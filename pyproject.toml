@@ -1,0 +1,19 @@
+[project]
+name = "marl-fleet-rebalancing"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "sharifmdathar", email = "116189751+sharifmdathar@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ride-gym[all]>=0.1.0",
+]
+
+[project.scripts]
+marl-fleet-rebalancing = "marl_fleet_rebalancing:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
