@@ -35,6 +35,9 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
+.omo/
+.omc/
+.omx/
 
 # Outputs / caches / data
 cache/
