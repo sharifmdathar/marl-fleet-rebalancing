@@ -368,9 +368,10 @@ class HeuristicBaseline:
         ]
 
         # 1. Dispatch: nearest-neighbor assignment to pending orders
+        from ride_gym.enums import OrderStatus
         pending_orders = [
             o for o in env.orders.values()
-            if o.status.value == "PENDING" and o.order_id not in dispatched_orders
+            if o.status == OrderStatus.PENDING and o.order_id not in dispatched_orders
         ]
 
         for order in pending_orders:
