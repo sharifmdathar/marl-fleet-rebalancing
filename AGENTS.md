@@ -12,6 +12,9 @@ claiming anyone "solved" robust rebalancing — this is a measurement study.
 ## Commands
 
 - Run smoke test:        `uv run python main.py`
+- Run interactive:       `uv run python main.py -i`
+- Run MP4 output:        `uv run python main.py -o episode.mp4`
+- Test PettingZoo env:   `uv run python -m marl_fleet_rebalancing.env.test_wrapper`
 - Install deps:          `uv sync`
 - Run tests:             `uv run pytest`            <TODO: confirm once tests exist>
 - Lint/format:           `uv run ruff check . && uv run ruff format .`  <TODO: confirm>
