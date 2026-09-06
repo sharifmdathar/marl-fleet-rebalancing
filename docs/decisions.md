@@ -44,6 +44,30 @@ Format: date, status, decision, why, what would change our mind.
   ConflictError coordination problem in multi-agent bidding.
 - Revisit if: advisor wants joint dispatch+rebalancing.
 
+## D6 — Study area switched to NYC Manhattan
+- Date: 2026-09-05, Status: accepted
+- Decision: Primary study area is now NYC Manhattan (not Bandra West).
+- Why: NYC is the standard benchmark in ride-hailing research. Real TLC trip data
+  provides realistic demand patterns. Bandra code remains for quick local testing.
+- Known: ~60 taxi zones in Region A bbox. max_pending=80 carried from Bandra;
+  MUST be updated after measuring actual NYC peak pending counts.
+- Revisit if: NYC data pipeline too slow for iteration → fall back to Bandra for
+  development, NYC for final experiments.
+
+## D7 — Config-driven parameters (no magic numbers)
+- Date: 2026-09-05, Status: accepted
+- Decision: All experiment parameters live in EnvConfig dataclass (config.py).
+  No hardcoded constants in env or training code.
+- Why: makes experiments reproducible, configs swappable (NYCConfig, BandraConfig),
+  and prevents magic numbers from creeping in.
+- Revisit if: config overhead too heavy for quick scripts.
+
+## D8 — Reward function: R = -alpha*wait - beta*empty + gamma*served
+- Date: 2026-09-05, Status: accepted
+- Decision: Reward is the weighted sum from the project doc. Weights (alpha, beta,
+  gamma) are config parameters, tuned as part of the experiment.
+- Why: matches the advisor-provided formula. Equal weights as starting point.
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>

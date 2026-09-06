@@ -15,34 +15,27 @@ from ride_gym.enums import OrderStatus
 
 from marl_fleet_rebalancing.agents.random_policy import random_actions
 from marl_fleet_rebalancing.visualization import interactive_view, render_animation
-
-NETWORK_PATH = "data/bandra_west.gpickle"
-SPEED_KMH = 30.0
-NUM_DRIVERS = 30
-DRIVER_CAPACITY = 4
-DT = 0.1
-HORIZON = 30.0
-ORDER_TIMEOUT = 2.0
-NUM_ORDERS = 400
-MAX_PARTY_SIZE = 3
-SEED = 0
+from marl_fleet_rebalancing.config import BandraConfig
 
 
-def build_env() -> RidePoolEnv:
-    network = OSMnxNetwork(graph_path=NETWORK_PATH, speed_kmh=SPEED_KMH)
+def build_env(config: BandraConfig | None = None) -> RidePoolEnv:
+    if config is None:
+        config = BandraConfig()
+
+    network = OSMnxNetwork(graph_path=config.network_path, speed_kmh=config.speed_kmh)
     order_gen = OSMnxOrderGenerator(
         network=network,
-        horizon=HORIZON,
-        num_orders=NUM_ORDERS,
+        horizon=config.horizon,
+        num_orders=config.num_orders,
         arrival="poisson",
-        max_party_size=MAX_PARTY_SIZE,
+        max_party_size=config.max_party_size,
     )
     return RidePoolEnv(
-        num_drivers=NUM_DRIVERS,
-        driver_capacity=DRIVER_CAPACITY,
-        dt=DT,
-        horizon=HORIZON,
-        order_timeout=ORDER_TIMEOUT,
+        num_drivers=config.num_drivers,
+        driver_capacity=config.driver_capacity,
+        dt=config.dt,
+        horizon=config.horizon,
+        order_timeout=config.order_timeout,
         order_generator=order_gen,
         road_network=network,
     )
@@ -58,9 +51,10 @@ def main() -> None:
                         help="Show driver IDs and routes in output")
     args = parser.parse_args()
 
-    env = build_env()
+    cfg = BandraConfig()
+    env = build_env(cfg)
     rec = TrajectoryRecorder()
-    obs, info = env.reset(seed=SEED)
+    obs, info = env.reset(seed=cfg.seed)
     done = False
     step = 0
     while not done:
@@ -68,12 +62,12 @@ def main() -> None:
         obs, rewards, dones, info = env.step(actions)
         rec.snapshot(env)
         step += 1
-        done = env.time >= HORIZON
+        done = env.time >= cfg.horizon
         if step % 30 == 0 or done:
             served = sum(o.status == OrderStatus.COMPLETED for o in env.orders.values())
             cancelled = sum(o.status == OrderStatus.CANCELLED for o in env.orders.values())
             print(
-                f"\r  t = {env.time:5.1f} / {HORIZON:.0f} min   |   "
+                f"\r  t = {env.time:5.1f} / {cfg.horizon:.0f} min   |   "
                 f"step {step:3d}   |   served {served:3d}   cancelled {cancelled:3d}   "
                 f"pending {len(env._pending_ids):3d}",
                 end="",
