@@ -14,6 +14,7 @@ from ride_gym.visualize import TrajectoryRecorder
 from ride_gym.enums import OrderStatus
 
 from marl_fleet_rebalancing.agents.random_policy import random_actions
+from marl_fleet_rebalancing.baselines.heuristic_baseline import heuristic_actions, reset_baseline
 from marl_fleet_rebalancing.visualization import interactive_view, render_animation
 from marl_fleet_rebalancing.config import BandraConfig
 
@@ -42,7 +43,9 @@ def build_env(config: BandraConfig | None = None) -> RidePoolEnv:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run random policy on Bandra West")
+    parser = argparse.ArgumentParser(description="Run fleet policy on Bandra West")
+    parser.add_argument("--policy", choices=["random", "heuristic"], default="random",
+                        help="Policy to execute (default: random)")
     parser.add_argument("-i", "--interactive", action="store_true", default=False,
                         help="Open interactive viewer instead of saving MP4")
     parser.add_argument("-o", "--output", type=str, default="episode.mp4",
@@ -55,10 +58,16 @@ def main() -> None:
     env = build_env(cfg)
     rec = TrajectoryRecorder()
     obs, info = env.reset(seed=cfg.seed)
+    if args.policy == "heuristic":
+        reset_baseline()
+
     done = False
     step = 0
     while not done:
-        actions = random_actions(env, obs)
+        if args.policy == "heuristic":
+            actions = heuristic_actions(env, obs)
+        else:
+            actions = random_actions(env, obs)
         obs, rewards, dones, info = env.step(actions)
         rec.snapshot(env)
         step += 1
