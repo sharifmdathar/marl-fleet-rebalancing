@@ -15,8 +15,16 @@ Two files must be downloaded manually:
 
 ### 1. NYC TLC Taxi Zone Shapefile
 - Source: NYC TLC website or NYC Open Data
+  (`https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip` is TLC's S3 mirror)
 - Files needed: `taxi_zones.shp`, `taxi_zones.shx`, `taxi_zones.dbf`
 - Place in: `./dataset/taxi_zones/`
+- Gotcha (2026-09-07): the zip contains a **nested read-only `taxi_zones/` folder**,
+  so the shapefile lands at `dataset/taxi_zones/taxi_zones/*.shp` while the
+  pipeline expects `dataset/taxi_zones/*.shp`. Unpack with:
+  ```bash
+  cd dataset/taxi_zones && unzip taxi_zones.zip && chmod -R u+w . \
+    && mv taxi_zones/* . && rmdir taxi_zones && cd ../..
+  ```
 
 ### 2. NYC TLC FHVHV Trip Data
 - Source: https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
@@ -96,6 +104,8 @@ env = RideGymAEC(config=cfg, seed=42)
 
 ## Notes
 
-- Zone count is ~60 (taxi zones whose centroids fall in Region A bbox)
-- `max_pending` in NYCConfig is currently 80 (carried from Bandra). MUST be updated after measuring actual peak pending from NYC data.
+- Zone count is 62 (taxi zones whose centroids fall in Region A bbox)
+- `max_pending` in NYCConfig is 650, measured 2026-09-07 (worst case 604
+  concurrent 2-min arrivals across all 108 split windows, plus headroom).
+  Re-measure if the bbox, timeout, or sample rate changes.
 - RideGym uses zone centroids as relocation points. KNN adjacency (k=8) defines neighboring zones.

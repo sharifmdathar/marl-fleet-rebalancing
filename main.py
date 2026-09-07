@@ -1,4 +1,4 @@
-"""Entry point: roll out a random policy on the Bandra network.
+"""Entry point: roll out a policy (--policy random|heuristic) on the Bandra network.
 
 Run:
     uv run python main.py              # interactive viewer (default)

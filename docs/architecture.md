@@ -2,19 +2,30 @@
 
 ## Current (verified against code)
 
-Only the smoke test and random policy exist on disk:
-
 ```
-main.py                              # smoke test: random policy + MP4 render
+main.py                              # smoke test: --policy random|heuristic, MP4/interactive render
+build_zone_partition.py              # one-time script: generates data/zone_partition.json
 marl_fleet_rebalancing/
   agents/
-    random_policy.py                 # random_actions(env, obs)  ← only agent on disk
+    random_policy.py                 # random_actions(env, obs)
+  baselines/
+    heuristic_baseline.py            # LP rolling-horizon rebalancer (D3, raw RideGym interface)
+  config.py                          # EnvConfig / NYCConfig / BandraConfig (D7)
+  demand/
+    zones.py                         # ZonePartition + get_default()
+  env/
+    pettingzoo_env.py                # RideGymAEC wrapper (D9: joint dispatch+relocate)
+    test_wrapper.py                  # wrapper smoke test (Bandra)
+  visualization.py                   # custom MP4 renderer + interactive viewer
 data/
   bandra_west.gpickle                # OSMnx road network (git-ignored)
+  zone_partition.json                # 12-zone 3x4 mapping, verified 1464/1464 nodes
+  nyc/                               # NYC pipeline output (git-ignored):
+                                     # zone_centroids.csv, manhattan.gpickle
+                                     # (4868 nodes), splits/ 84 train / 12 val / 12 test
 ```
 
-Additional directories exist on disk but are empty (only `__init__.py`):
-- `baselines/` — planned for MIVR-lite baseline
+Still empty (only `__init__.py`):
 - `networks/` — planned for PPO model architectures
 - `shifts/` — planned for demand shift generators
 
@@ -71,5 +82,7 @@ marl_fleet_rebalancing/
 - **Cancellation rate** = cancelled / total orders (timeout = 2.0 min currently).
 - **Avg wait time** = pickup_time - request_time, over completed orders.
 - **Empty VMT** = distance driven without passengers (incl. rebalancing legs).
+- **Fleet utilization** = 1 − (idle vehicle-time / total vehicle-time), averaged
+  over the episode. (Brief metric; add when metrics module is built.)
 - **Rebalancing trips** = count of `relocate` actions executed.
 - All KPIs computed per episode, then aggregated mean ± std over seeds.
