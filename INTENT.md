@@ -2,12 +2,19 @@
 
 (Read this before writing or changing any experiment code.)
 
-## The question
+## The questions (refined with advisor, 2026-09 — see D12)
 
-When a fleet-rebalancing policy trained on one passenger-demand distribution is
-deployed FROZEN under shifted demand, how does performance degrade — and do
-independent (IPPO) and centralized-critic (MAPPO) training degrade differently
-relative to a tuned classical baseline?
+- **RQ1**: How much does fleet-rebalancing performance degrade as passenger
+  demand moves away from the training distribution?
+- **RQ2**: Do IPPO and MAPPO degrade *differently* under the same demand shifts?
+
+Central question: *How robust are independent and centralized-training MARL
+approaches for dynamic fleet rebalancing under passenger-demand distribution
+shift?*
+
+Framing (advisor): the research problem is demand distribution shift;
+IPPO-vs-MAPPO is one investigation method, not the problem itself; the tuned
+baseline exists for credibility, not as a research direction.
 
 ## Why it matters
 
