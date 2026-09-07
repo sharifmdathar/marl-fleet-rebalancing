@@ -21,9 +21,10 @@ claiming anyone "solved" robust rebalancing — this is a measurement study.
 
 ## Repo layout
 
-See `docs/architecture.md`. Key rule: environment code, agent code, and
-experiment/eval code live in separate modules. Experiments never import from
-`main.py`; `main.py` is a smoke test only.
+Start with `docs/HANDOFF.md` — current state, what's broken, what to do next.
+See `docs/architecture.md` for the module map. Key rule: environment code,
+agent code, and experiment/eval code live in separate modules. Experiments
+never import from `main.py`; `main.py` is a smoke test only.
 
 ## Coding conventions
 

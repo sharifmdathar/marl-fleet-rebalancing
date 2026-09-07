@@ -2,6 +2,7 @@
 
 Read this file first. It tells you what exists, what's done, what's broken,
 and what to do next. Everything else in the repo supports this.
+Rules live in `AGENTS.md`; research scope in `INTENT.md` — this file is status, not rules.
 
 ---
 
@@ -13,16 +14,18 @@ algorithm paper. We train on one demand distribution, freeze the policy, then
 stress-test on shifted distributions and plot degradation curves.
 
 **Advisor:** Alaa Daoud (INSA Hauts-de-France, LAMIH CNRS)
-**Student:** Prashil
-
 ---
 
 ## What exists right now (verified working)
 
 ### Simulation (RideGym)
 - Bandra West, Mumbai — OSMnx graph at `data/bandra_west.gpickle`
-- `main.py` — rolls out a random policy, saves MP4 or opens interactive viewer
+- `main.py` — `--policy random|heuristic`, config-driven (`BandraConfig`),
+  saves MP4 or opens interactive viewer
 - `src/marl_fleet_rebalancing/visualization.py` — custom MP4 renderer + interactive viewer
+- `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
+  rolling-horizon rebalancer (MIVR-lite, D3); raw RideGym interface, needs a
+  wrapper port for fair comparison (Phase 3)
 
 ### PettingZoo wrapper
 - `src/marl_fleet_rebalancing/env/pettingzoo_env.py` — AEC wrapper around RideGym
@@ -46,17 +49,25 @@ stress-test on shifted distributions and plot degradation curves.
 - `docs/pettingzoo-design-decisions.md` — why AEC, shuffled order, action mask as method
 - `docs/pettingzoo-wrapper-plan.md` — implementation plan
 - `docs/nyc-pipeline.md` — NYC data setup steps
-- `docs/architecture.md` — has inaccuracies (zone partition claimed as current)
+- `docs/architecture.md` — module map + KPI definitions
 
 ---
 
 ## What does NOT exist yet (blocking)
 
 ### NYC data (required for paper)
-- No `data/nyc/` directory — must run the 4-stage pipeline
-- No `dataset/taxi_zones/` or `dataset/fhvhv_tripdata_*.parquet` — must download manually
-- `max_pending` in NYCConfig is still 80 (from Bandra) — must measure from NYC data
-- See `docs/nyc-pipeline.md` for exact steps
+- DONE 2026-09-07: `data/nyc/` built via the 4-stage pipeline —
+  `zone_centroids.csv` (263 citywide, 62 in Region A bbox),
+  `manhattan.gpickle` (4868 nodes / 10478 edges),
+  `splits/` 84 train / 12 val / 12 test + `manifest.json`.
+- Raw downloads in `dataset/` (git-ignored): taxi-zone shapefile + FHVHV April 2026.
+- `max_pending` in NYCConfig is 650 (measured worst case: 604 concurrent
+  2-min arrivals in `train/window_0071`; see `config.py`).
+- Open scale question: peak windows carry ~15k trips/hr vs a 50-driver fleet —
+  full-rate episodes are unservable; needs a sample-rate/fleet/episode-scope
+  decision before training (advisor call).
+- Wrapper has NO NYC mode yet: `pettingzoo_env.py` only builds the synthetic
+  `OSMnxOrderGenerator`; needs `DataFrameOrderGenerator` support for the splits.
 
 ### Agents / training code
 - Only `src/marl_fleet_rebalancing/agents/random_policy.py` exists
@@ -65,7 +76,12 @@ stress-test on shifted distributions and plot degradation curves.
 - No experiment runner
 
 ### Baselines
-- No classical rebalancing baselines (greedy, LP, MPC)
+- `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
+  rolling-horizon rebalancer (MIVR-lite, D3) EXISTS but targets the raw
+  RideGym dict interface; needs a port to the PettingZoo wrapper env for a
+  fair comparison, plus tuning with effort comparable to RL (D3).
+- No greedy nearest-idle floor yet (random policy in `main.py` is the
+  current floor).
 - No tuning infrastructure
 
 ### Metrics / evaluation
@@ -79,12 +95,17 @@ stress-test on shifted distributions and plot degradation curves.
 
 | Decision | Status | File |
 |---|---|---|
-| Simulator: RideGym | Accepted | `docs/decisions.md` D1 |
-| Study area: NYC Manhattan | Accepted | `docs/decisions.md` D6 |
+| Simulator: RideGym (no SUMO) | Accepted | `docs/decisions.md` D1, D11 |
+| Study area: NYC Manhattan, full dataset, ~62 zones | Accepted | `docs/decisions.md` D6, D12 |
 | Config-driven params | Accepted | `docs/decisions.md` D7, `config.py` |
-| Reward: -alpha*wait - beta*empty + gamma*served | Accepted | `docs/decisions.md` D8 |
+| Reward: -alpha*wait - beta*empty + gamma*served (equal weights) | Accepted | `docs/decisions.md` D8 |
 | IPPO vs MAPPO only | Accepted | `docs/decisions.md` D4 |
-| Dispatch + rebalancing (not dispatch only) | Accepted | wrapper has both actions |
+| Joint dispatch+rebalancing (not relocate-only) | Accepted | `docs/decisions.md` D9 (supersedes D5) |
+| Zone-controller agents (not per-vehicle) | Accepted | `docs/decisions.md` D10 |
+| Baseline: LP rebalancer + greedy floor, tuned (D3) | Accepted | `docs/decisions.md` D3 |
+| 7-scenario shift taxonomy (S0–S6) | Accepted | `docs/decisions.md` D12, `docs/demand-shift.md` |
+| India dataset: dropped | Accepted | `docs/decisions.md` D12 |
+| RQ1/RQ2 framing | Accepted | `INTENT.md`, `docs/decisions.md` D12 |
 
 ### PettingZoo wrapper design
 - **AEC (not Parallel)** — same training signal, matches RideGym API
@@ -135,16 +156,14 @@ RideGymAEC (PettingZoo AEC)
 
 ## What to do next (in order)
 
-### Phase 1: NYC data pipeline
-1. Download NYC TLC taxi-zone shapefile → `dataset/taxi_zones/`
-2. Download NYC TLC FHVHV parquet → `dataset/`
-3. Run `python -m ride_gym.data_tools.nyc.zone_centroids`
-4. Run `python -m ride_gym.data_tools.nyc.build_nyc_network`
-5. Run `python -m ride_gym.data_tools.nyc.build_splits`
-6. Measure actual `max_pending` from NYC data → update `NYCConfig`
-7. Test wrapper with NYC config
+### Phase 1: NYC data pipeline — DONE 2026-09-07 (all artifacts on disk)
+Remaining: add `DataFrameOrderGenerator` support to the wrapper so it can run
+the splits, then smoke-test the wrapper on an NYC window.
 
 ### Phase 2: Training infrastructure
+0. Rework wrapper to zone-controller granularity (D10) + add
+   `DataFrameOrderGenerator` support for the NYC splits — vehicle-agent
+   API cannot be trained on (decisions changed under it)
 1. Implement IPPO (using existing PPO library or from scratch)
 2. Implement MAPPO (shared critic variant)
 3. Create training loop that uses PettingZoo API
@@ -152,10 +171,9 @@ RideGymAEC (PettingZoo AEC)
 5. Train on NYC base demand, verify agents learn something
 
 ### Phase 3: Baselines
-1. Implement greedy nearest-idle dispatch
-2. Implement demand-following heuristic
-3. Implement optimization-based rebalancer (LP/MIVR-lite)
-4. Tune all baselines with comparable effort to RL
+1. Implement greedy nearest-idle dispatch (the floor)
+2. Port LP rebalancer (`baselines/heuristic_baseline.py`) to the wrapper env
+3. Tune all baselines with comparable effort to RL (D3 / RLSCALE-BENCH lesson)
 
 ### Phase 4: Demand shift experiments
 1. Implement shift injection (spatial, magnitude, event)
@@ -189,6 +207,30 @@ RideGymAEC (PettingZoo AEC)
 6. **Do NOT use single-seed results** — minimum 5 seeds for any reported number
 
 ---
+
+## Program gates (Batch 2 brief)
+
+- **Gate 1 (end of week 2)** — simulation producing machine-readable results:
+  MET (wrapper runs; splits are parquet windows).
+- **Gate 2 (end of week 4)** — baseline + proposed approach running end-to-end:
+  HALF (LP baseline runs on raw interface; no IPPO/MAPPO yet).
+
+## Resolved scope (per PPT + prof chats, 2026-09-07 — see D9/D10/D12)
+
+1. **Actions**: joint dispatch+rebalancing (D9 CONFIRMED).
+2. **Granularity**: zone-controllers, not per-car agents (D10 CONFIRMED) —
+   wrapper rework required before training (Phase 2 step 0).
+3. **Scale**: full NYC dataset, ~62 data zones (CONFIRMED, no downscoping).
+4. **Shifts**: keep all 7 scenarios. **India dataset**: dropped.
+5. **Platform**: no SUMO, RideGym confirmed (D11).
+
+## Still open
+
+- **Sample-rate/fleet sizing**: full-NYC peaks (~15k/hr vs 50 drivers) are
+  unservable at full rate. Must settle before training (spaces freeze).
+- **Baseline understanding**: LP + greedy plan stands; "gotta understand the
+  baseline" is ongoing work.
+- **Reward weights**: equal start, revisit if tuning stalls.
 
 ## Contact
 
