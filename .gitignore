@@ -41,6 +41,7 @@ Thumbs.db
 # Outputs / caches / data
 cache/
 data/
+dataset/
 *.gpickle
 *.gpickle.matrices.npz
 

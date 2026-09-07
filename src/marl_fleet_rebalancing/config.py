@@ -85,7 +85,13 @@ class NYCConfig(EnvConfig):
     max_party_size: int = 3
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
-    max_pending: int = 80       # TODO: measure from NYC data after pipeline runs
+    # Measured 2026-09-07 from data/nyc/splits (108 windows): worst case is
+    # 604 orders arriving within one 2-min order_timeout span
+    # (train/window_0071, Fri 19:00 peak). 650 = measured max + headroom.
+    # NOTE: peak windows carry ~15k trips/hr against a 50-driver fleet —
+    # full-rate episodes are unservable; expect sample-rate downsampling
+    # (or a larger fleet) as an experiment-design decision before training.
+    max_pending: int = 650
     alpha: float = 1.0
     beta: float = 1.0
     gamma: float = 1.0
