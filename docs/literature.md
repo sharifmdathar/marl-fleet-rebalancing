@@ -36,5 +36,13 @@ run for ride-hailing/fleet rebalancing.
 - [ ] Re-run advisor's search terms on Scholar/Semantic Scholar before writing
       related work: "MARL out-of-distribution generalization", "CTDE distribution
       shift", "fleet rebalancing unseen demand", "ride-hailing domain shift RL".
+      Expanded terms (advisor): unseen scenarios, demand uncertainty, robustness,
+      perturbation, stochastic demand, transfer, OOD evaluation.
+- [ ] Gap method (advisor, D12): "couldn't find it" ≠ gap. Establish
+      independently (A) what's known about IPPO/MAPPO generalization in MARL
+      and (B) what's known about robustness to demand changes in fleet
+      rebalancing — then check whether A + B leaves a meaningful unanswered
+      question. The gap sentence above is the draft answer; it must survive
+      the A/B decomposition.
 - [ ] Find and re-read the paper we remember claiming "MAPPO less robust due to
       overfitting" — confirm what it actually varied before citing it.

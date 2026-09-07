@@ -17,6 +17,10 @@ training demand (current: Poisson arrivals on Bandra West network, 400 orders /
 | S5 | Event-like spike | Short high-intensity burst at random node/time | Match ending, sudden rain |
 | S6 | Real held-out demand | Different day/window of real trip data | The non-synthetic case |
 
+Mapping to the prof's four shift families (D12): higher demand → S2;
+spatial shift → S1 (plus S4 hotspot emergence); temporal shift → S3;
+event-type shift → S5. S0 is the in-distribution control.
+
 ## Zone partition over the Bandra West graph
 
 The Bandra West OSMnx graph has 1464 nodes and 3281 edges (EPSG:4326).
