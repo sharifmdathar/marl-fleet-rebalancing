@@ -132,6 +132,55 @@ Format: date, status, decision, why, what would change our mind.
   see `docs/literature.md`.
 - Revisit if: advisor revises any of the above.
 
+## D13 — Zone-controller wrapper implementation (D10 rework)
+- Date: 2026-09-08, Status: accepted (Phase 2 step 0 complete)
+- Decision: `pettingzoo_env.py` reworked from vehicle-agents to zone-controller
+  agents per D10. Implementation contract:
+  - **Agents**: one per region — `zone_i` (62 NYC taxi zones / 25 Bandra grid
+    cells). AEC turn = every zone agent acts once (shuffled FCFS order, seeded
+    RNG, unchanged), then one RideGym `env.step` of `dt`.
+  - **Action space** (D9, unchanged): `Discrete(1 + max_pending + num_zones)` —
+    idle; dispatch pending order i to an idle driver IN THIS ZONE; relocate one
+    idle driver of THIS zone to another zone.
+  - **Zone→driver resolution**: per-zone FIFO queues of idle drivers, rebuilt
+    from the RideGym obs each turn; agents consume their zone's queue in
+    shuffled order. One driver serves one action per turn; drivers never
+    selected take no action (keep state). Dispatch claims the order globally
+    (FCFS); same-zone relocation is masked out (no-op).
+  - **Observation** (zone-level): `zone_location` (2), `zone_state` (3: fleet
+    fraction, idle fraction, pending-originating fraction), `all_zone_state`
+    (Z×2 fleet+idle fractions), `pending_orders` (max_pending×6: ox, oy, dx,
+    dy, pax/capacity, wait/timeout — sorted most-urgent-first), `pending_mask`,
+    `pending_passengers`, `time_frac`, `relocation_points`. Zone identity via
+    `zone_location` so policies share parameters across agents.
+  - **Region model fix**: all region centres now live in the network's real
+    coordinate space. Synthetic maps get a `relocation_grid` (config, 5×5)
+    grid over the NETWORK BOUNDS instead of RideGym's abstract-area default,
+    whose targets previously snapped to arbitrary graph nodes. NYC gets the
+    ~62 taxi-zone centroids (zone_centroids.csv, filtered to network bounds,
+    sorted by LocationID). Env `area` = network bounds.
+  - **Empty-distance term of the D8 reward is now exact**: deadhead metres
+    (moved while empty) are summed from the RideGym step event log
+    (`is_empty_move`/`distance_moved`), replacing the status proxy that was
+    silently always 0 (corrupted key). Normalized to km via
+    `empty_distance_norm_km` (config, default 1.0). Formula and weights (D8)
+    unchanged.
+  - **NYC order source**: `order_source="nyc"` builds
+    `MultiWindowNYCOrderGenerator` from `data/nyc/splits/manifest.json`
+    (train: random window/episode; val/test: deterministic cyclic), with
+    `nyc_window_limit` (per-window order cap — the sample-rate lever, still an
+    open experiment-design decision), `nyc_random_party_size`,
+    `nyc_perturb_od_radius_km` as config knobs. `order_source="dataframe"`
+    remains a raw passthrough (endpoints must be on-network).
+- Why: D10 changed agent granularity under the vehicle-agent API; zone-level
+  obs/actions keep the learning problem well-posed (fleet aggregates instead
+  of per-car states) while reusing the proven AEC turn/conflict machinery.
+- Smoke-tested: Bandra (25 zone agents, 300 turns) and NYC train split
+  (62 zone agents, 600 turns, real FHVHV window) — see
+  `marl_fleet_rebalancing.env.test_wrapper`.
+- Revisit if: advisor wants zone controllers to issue multi-driver actions per
+  turn (current: one action per zone per turn) or per-driver sub-queues.
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>

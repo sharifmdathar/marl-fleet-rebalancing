@@ -14,8 +14,10 @@ marl_fleet_rebalancing/
   demand/
     zones.py                         # ZonePartition + get_default()
   env/
-    pettingzoo_env.py                # RideGymAEC wrapper (D9: joint dispatch+relocate)
-    test_wrapper.py                  # wrapper smoke test (Bandra)
+    pettingzoo_env.py                # RideGymAEC wrapper: zone-controller agents
+                                     # (D10/D13), joint dispatch+relocate (D9),
+                                     # NYC split mode (order_source="nyc")
+    test_wrapper.py                  # wrapper smoke test (Bandra; --nyc for NYC)
   visualization.py                   # custom MP4 renderer + interactive viewer
 data/
   bandra_west.gpickle                # OSMnx road network (git-ignored)
@@ -41,9 +43,15 @@ Still empty (only `__init__.py`):
 - Conflicting bids on the same order raise `ConflictError` — any multi-agent
   dispatch policy MUST coordinate bids (central dispatcher or conflict-free
   bidding rule). This is the main integration risk for MARL.
-- Order sources are swappable: `OSMnxOrderGenerator` (current),
-  `RandomOrderGenerator`, `DataFrameOrderGenerator` — demand shift is injected
-  by swapping/parameterizing the generator, never by editing env internals.
+- Order sources are swappable: the wrapper selects via `EnvConfig.order_source`
+  — `synthetic` (OSMnxOrderGenerator), `nyc` (MultiWindowNYCOrderGenerator over
+  data/nyc/splits, one window per episode; train random / val+test cyclic),
+  `dataframe` (DataFrameOrderGenerator; endpoints must be on-network). Demand
+  shift is injected by swapping/parameterizing the generator, never by editing
+  env internals.
+- The wrapper's region model (one zone per agent) always lives in the network's
+  real coordinate space: NYC taxi-zone centroids, or a `relocation_grid` over
+  the network bounds for synthetic maps (D13).
 
 ### Planned (target layout — create as needed, update this file when you do)
 

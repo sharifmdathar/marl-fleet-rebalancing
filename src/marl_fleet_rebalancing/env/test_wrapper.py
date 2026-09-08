@@ -1,37 +1,47 @@
-"""Smoke test for the RideGymAEC wrapper."""
+"""Smoke test for the RideGymAEC zone-controller wrapper.
+
+Usage:
+    uv run python -m marl_fleet_rebalancing.env.test_wrapper          # Bandra
+    uv run python -m marl_fleet_rebalancing.env.test_wrapper --nyc    # NYC split
+"""
 
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 
+from marl_fleet_rebalancing.config import BandraConfig, NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
-from marl_fleet_rebalancing.config import BandraConfig
 
 
-def main() -> None:
-    cfg = BandraConfig()
-    env = RideGymAEC(config=cfg, seed=0)
-    env.reset(seed=0)
-    obs, _reward, _term, _trunc, _info = env.last()
-    print(f"agents: {env.agents}")
-    print(f"num_zones: {env._num_zones}")
+def run(env: RideGymAEC, max_iter: int, expected_turns: int, tol: int = 10) -> None:
+    print(f"agents ({len(env.possible_agents)}): {env.possible_agents[:3]} ...")
+    print(f"num_zones: {env._num_zones}  num_drivers: {env._num_drivers}")
     print(f"max_pending: {env._max_pending}")
     print(f"action_dim: {env.action_space(env.agent_selection).n}")
-    print(f"obs keys: {list(obs.keys())}")
+    obs = env.observe(env.agent_selection)
+    print(f"obs keys: {sorted(obs.keys())}")
     print(f"mask sum (initial): {env.action_mask(env.agent_selection).sum()}")
 
     total_step_calls = 0
     total_turns = 0
     total_reward = 0.0
+    dispatches = 0
+    relocations = 0
     last_time = env.env.time
-    for agent in env.agent_iter(max_iter=10_000):
-        _obs, reward, term, trunc, info = env.last()
+    for agent in env.agent_iter(max_iter=max_iter):
+        _obs, reward, term, trunc, _info = env.last()
         if term or trunc:
             action = None
         else:
             mask = env.action_mask(agent)
             valid = np.where(mask)[0]
             action = int(np.random.choice(valid))
+            if 1 <= action <= env._max_pending:
+                dispatches += 1
+            elif action > env._max_pending:
+                relocations += 1
         env.step(action)
         total_step_calls += 1
         total_reward += reward
@@ -46,13 +56,45 @@ def main() -> None:
         if env._terminated:
             break
 
-    print(f"Total env.step() calls: {total_step_calls}")
+    served = sum(
+        1 for o in env.env.orders.values() if o.status.value == "completed"
+    )
+    cancelled = sum(
+        1 for o in env.env.orders.values() if o.status.value == "cancelled"
+    )
+    print(f"Total wrapper.step() calls: {total_step_calls}")
     print(f"Total turns (env steps): {total_turns}")
+    print(f"Zone actions taken: {dispatches} dispatches, {relocations} relocations")
     print(f"Total reward: {total_reward:.2f}")
-    print(f"Expected: {total_turns} ~ 300 (30 min / 0.1 dt)")
-    assert total_turns >= 295, f"too few turns: {total_turns}"
-    assert total_turns <= 305, f"too many turns: {total_turns}"
+    print(f"KPIs: served={served} cancelled={cancelled} "
+          f"total_orders={len(env.env.orders)}")
+    print(f"Expected: {expected_turns} +/- {tol} turns")
+    assert expected_turns - tol <= total_turns <= expected_turns + tol, (
+        f"unexpected turn count: {total_turns}"
+    )
     print("OK")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Zone-controller wrapper smoke test")
+    parser.add_argument("--nyc", action="store_true", default=False,
+                        help="Smoke-test the NYC split mode instead of Bandra")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Per-window order cap for the NYC run (speed)")
+    args = parser.parse_args()
+
+    if args.nyc:
+        cfg = NYCConfig(nyc_window_limit=args.limit)
+        env = RideGymAEC(config=cfg, seed=0)
+        env.reset(seed=0)
+        # 60 min / 0.1 dt = 600 turns; one wrapper.step call per zone agent
+        run(env, max_iter=env._num_zones * 610, expected_turns=600)
+    else:
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=0)
+        env.reset(seed=0)
+        # 30 min / 0.1 dt = 300 turns; one wrapper.step call per zone agent
+        run(env, max_iter=env._num_zones * 310, expected_turns=300)
 
 
 if __name__ == "__main__":
