@@ -54,3 +54,6 @@ dataset/
 *.jpg
 *.jpeg
 *.gif
+# Training outputs (AGENTS.md: never commit checkpoints)
+runs/
+*.pt

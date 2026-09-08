@@ -343,11 +343,16 @@ class RideGymAEC(AECEnv):
     # ------------------------------------------------------------------ reset
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
+        # Gym seeding semantics: an explicit seed (re)fixes the RNG streams;
+        # reset(seed=None) lets them ADVANCE, so successive episodes differ
+        # (fresh synthetic orders / fresh NYC train windows per episode) while
+        # a seeded run stays fully reproducible. Passing the stored seed on
+        # every reset would replay identical episodes forever.
         if seed is not None:
             self._seed = seed
-        self._rng = np.random.default_rng(self._seed)
+            self._rng = np.random.default_rng(seed)
 
-        obs, _info = self.env.reset(seed=self._seed)
+        obs, _info = self.env.reset(seed=seed)
         self._last_obs = obs
         self._current_pending = self._extract_pending(obs)
         self._terminated = False

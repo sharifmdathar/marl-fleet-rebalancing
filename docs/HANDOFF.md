@@ -76,10 +76,19 @@ stress-test on shifted distributions and plot degradation curves.
   floods a 50-driver fleet (1.97k/2k cancelled at the random-policy floor).
 
 ### Agents / training code
-- Only `src/marl_fleet_rebalancing/agents/random_policy.py` exists
-- No IPPO or MAPPO implementation
-- No training loop
-- No experiment runner
+- `src/marl_fleet_rebalancing/agents/ippo.py` — IPPO DONE 2026-09-09
+  (Phase 2 step 1): shared actor-critic over zone agents, decentralized critic,
+  masked PPO-clip + GAE; rollout buffer handles AEC delayed-close rewards.
+- `src/marl_fleet_rebalancing/networks/encoder.py` — zone-obs flattening +
+  `ZoneActorCritic` MLP (masked logits).
+- `src/marl_fleet_rebalancing/experiments/train.py` — training entry
+  (`python -m marl_fleet_rebalancing.experiments.train --env bandra --seed 0`);
+  logs config/seed/git-commit/scenario-ID + per-iteration KPIs to `runs/`
+  (git-ignored). Torch (CUDA) added as dependency.
+- Smoke-verified on Bandra (25 zones, obs 746, 106 actions, CUDA): rollout →
+  GAE → PPO update → checkpoint all work; 10-iter trend run shows machinery
+  healthy. NOT yet tuned; "agents learn something" gate = Phase 2 step 5.
+- No MAPPO yet (Phase 2 step 2). No experiment runner beyond train.
 
 ### Baselines
 - `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
@@ -171,7 +180,8 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 ### Phase 2: Training infrastructure
 0. Rework wrapper to zone-controller granularity (D10) + NYC split support —
    **DONE 2026-09-08 (D13)**; smoke tests green on Bandra and NYC.
-1. Implement IPPO (using existing PPO library or from scratch)  ← NEXT
+1. Implement IPPO — **DONE 2026-09-09** (machinery; see agents/ippo.py +
+   experiments/train.py). Longer training + tuning = step 5.
 2. Implement MAPPO (shared critic variant)
 3. Create training loop that uses PettingZoo API
 4. Add metric logging (served rate, wait time, empty km, reward)

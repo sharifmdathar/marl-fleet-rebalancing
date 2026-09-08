@@ -8,6 +8,8 @@ build_zone_partition.py              # one-time script: generates data/zone_part
 marl_fleet_rebalancing/
   agents/
     random_policy.py                 # random_actions(env, obs)
+    ippo.py                          # IPPO learner: masked PPO-clip + GAE,
+                                     # decentralized critic, shared params
   baselines/
     heuristic_baseline.py            # LP rolling-horizon rebalancer (D3, raw RideGym interface)
   config.py                          # EnvConfig / NYCConfig / BandraConfig (D7)
@@ -18,6 +20,11 @@ marl_fleet_rebalancing/
                                      # (D10/D13), joint dispatch+relocate (D9),
                                      # NYC split mode (order_source="nyc")
     test_wrapper.py                  # wrapper smoke test (Bandra; --nyc for NYC)
+  experiments/
+    train.py                         # IPPO training entry; logs config/seed/
+                                     # git/scenario/KPIs to runs/ (git-ignored)
+  networks/
+    encoder.py                       # obs flattening + ZoneActorCritic MLP
   visualization.py                   # custom MP4 renderer + interactive viewer
 data/
   bandra_west.gpickle                # OSMnx road network (git-ignored)
@@ -28,8 +35,10 @@ data/
 ```
 
 Still empty (only `__init__.py`):
-- `networks/` — planned for PPO model architectures
 - `shifts/` — planned for demand shift generators
+
+No longer empty: `agents/` (ippo.py), `networks/` (encoder.py),
+`experiments/` (train.py) — populated 2026-09-09.
 
 ### RideGym interface contract (do not break)
 
