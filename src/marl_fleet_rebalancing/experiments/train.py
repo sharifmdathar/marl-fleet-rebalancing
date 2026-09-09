@@ -1,8 +1,8 @@
-"""Training entry point for IPPO on the zone-controller fleet env.
+"""Training entry point for IPPO/MAPPO on the zone-controller fleet env.
 
 Run (from repo root):
     uv run python -m marl_fleet_rebalancing.experiments.train \
-        --env bandra --seed 0 --iterations 20
+        --env bandra --algo mappo --seed 0 --iterations 20
 
 Every run logs: full config (env + algo), seed(s), git commit hash, demand
 scenario ID, and per-iteration KPIs (AGENTS.md experiment rules). Checkpoints
@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from marl_fleet_rebalancing.agents.ippo import IPPO, IPPOConfig, RolloutBuffer
+from marl_fleet_rebalancing.agents.mappo import MAPPO, MAPPOConfig
 from marl_fleet_rebalancing.config import BandraConfig, EnvConfig, NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.networks.encoder import obs_dim, obs_to_vector
@@ -33,7 +34,7 @@ class TrainConfig:
     """Training-run parameters (everything logged, nothing hardcoded)."""
 
     env_config: EnvConfig
-    algo_config: IPPOConfig
+    algo_config: IPPOConfig | MAPPOConfig
     seed: int = 0
     iterations: int = 20           # PPO updates; each = rollout_episodes episodes
     scenario_id: str = "S0-base"   # demand scenario per docs/demand-shift.md
@@ -77,9 +78,10 @@ def _make_env(name: str, seed: int, nyc_window_limit: int | None) -> tuple[RideG
 
 def collect_rollout(
     env: RideGymAEC,
-    ippo: IPPO,
+    learner: IPPO | MAPPO,
     buffer: RolloutBuffer,
     total_turns: int,
+    use_state: bool = False,
 ) -> dict:
     """Collect agent transitions for ``total_turns`` env turns (AEC pattern).
 
@@ -88,6 +90,10 @@ def collect_rollout(
     step that followed its previous action. Rollouts must end exactly at
     episode boundaries (total_turns = k * episode_turns), so no value
     bootstrap is needed. Returns episode KPIs.
+
+    With ``use_state`` (MAPPO), each transition also stores the centralized
+    global state and values come from the centralized critic; otherwise
+    values are decentralized (IPPO).
 
     Episode accounting: when the AEC termination dance empties ``env.agents``,
     the ended episode's KPIs are read from the env BEFORE the next reset.
@@ -124,11 +130,17 @@ def collect_rollout(
         obs = env.observe(agent)
         obs_vec = obs_to_vector(obs)
         mask = env.action_mask(agent)
-        action, logprob, value = ippo.act(obs_vec[None, :], mask[None, :])
+        action, logprob, decentral_value = learner.act(obs_vec[None, :], mask[None, :])
+        state_vec = env.state() if use_state else None
+        if use_state:
+            value = float(learner.value(state_vec[None, :])[0])
+        else:
+            value = float(decentral_value[0])
         turn = int(counts[slot])
         buffer.store(
             slot, turn, obs_vec, mask,
-            int(action[0]), float(logprob[0]), float(value[0]),
+            int(action[0]), float(logprob[0]), value,
+            state=state_vec,
         )
         counts[slot] += 1
         pending[agent] = (slot, turn)
@@ -162,9 +174,14 @@ def _episode_kpis(env: RideGymAEC) -> tuple[int, int]:
     return served, cancelled
 
 
-def train(train_cfg: TrainConfig, env_name: str, nyc_window_limit: int | None) -> Path:
+def train(
+    train_cfg: TrainConfig,
+    env_name: str,
+    nyc_window_limit: int | None,
+    algo_name: str = "ippo",
+) -> Path:
     run_id = (
-        f"ippo-{train_cfg.scenario_id}-seed{train_cfg.seed}-"
+        f"{algo_name}-{train_cfg.scenario_id}-seed{train_cfg.seed}-"
         f"{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
     run_dir = train_cfg.out_root / run_id
@@ -179,21 +196,36 @@ def train(train_cfg: TrainConfig, env_name: str, nyc_window_limit: int | None) -
     any_agent = env.possible_agents[0]
     observation_dim = obs_dim(env.observation_space(any_agent))
     action_dim = env.action_space(any_agent).n
-    ippo = IPPO(
-        observation_dim=observation_dim,
-        action_dim=action_dim,
-        config=train_cfg.algo_config,
-    )
+    use_state = algo_name == "mappo"
+    state_dim = len(env.state()) if use_state else None
+    if use_state:
+        assert isinstance(train_cfg.algo_config, MAPPOConfig)
+        learner: IPPO | MAPPO = MAPPO(
+            observation_dim=observation_dim,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            config=train_cfg.algo_config,
+        )
+    else:
+        assert isinstance(train_cfg.algo_config, IPPOConfig)
+        learner = IPPO(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            config=train_cfg.algo_config,
+        )
 
     # ---- run manifest: config + seed + git hash + scenario (AGENTS rules) --
     manifest = {
         **train_cfg.to_dict(),
+        "algo": algo_name,
         "git_commit": _git_hash(),
-        "torch_device": str(ippo.device),
+        "torch_device": str(learner.device),
         "num_zones": env._num_zones,
         "num_drivers": env._num_drivers,
         "episode_turns": _episode_turns(env_cfg),
     }
+    if state_dim is not None:
+        manifest["state_dim"] = state_dim
     with open(run_dir / "config.json", "w") as f:
         json.dump(manifest, f, indent=2, default=str)
 
@@ -204,16 +236,17 @@ def train(train_cfg: TrainConfig, env_name: str, nyc_window_limit: int | None) -
         num_turns=total_turns,
         obs_dim=observation_dim,
         action_dim=action_dim,
+        state_dim=state_dim,
     )
 
-    print(f"[train] run={run_id} device={ippo.device} zones={env._num_zones} "
+    print(f"[train] run={run_id} device={learner.device} zones={env._num_zones} "
           f"obs={observation_dim} actions={action_dim} "
           f"rollout_turns={total_turns}")
-    print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('scenario_id', 'seed', 'git_commit')})}")
+    print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('algo', 'scenario_id', 'seed', 'git_commit')})}")
 
     for it in range(1, train_cfg.iterations + 1):
-        kpis = collect_rollout(env, ippo, buffer, total_turns)
-        losses = ippo.update(buffer)
+        kpis = collect_rollout(env, learner, buffer, total_turns, use_state=use_state)
+        losses = learner.update(buffer)
         ep = max(kpis["episodes"], 1)
         record = {
             "iteration": it,
@@ -236,25 +269,28 @@ def train(train_cfg: TrainConfig, env_name: str, nyc_window_limit: int | None) -
             f"V-loss={losses['value_loss']:.3f} "
             f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
         )
-        torch.save(ippo.policy.state_dict(), run_dir / "checkpoint.pt")
+        torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
 
     print(f"[train] done -> {run_dir}")
     return run_dir
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train IPPO on the fleet env")
+    parser = argparse.ArgumentParser(description="Train IPPO/MAPPO on the fleet env")
     parser.add_argument("--env", choices=["bandra", "nyc"], default="bandra")
+    parser.add_argument("--algo", choices=["ippo", "mappo"], default="ippo")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
-                        help="Episodes per PPO update (default: IPPOConfig)")
+                        help="Episodes per PPO update (default: algo config)")
     parser.add_argument("--out-root", type=str, default="runs")
     args = parser.parse_args()
 
-    algo_cfg = IPPOConfig()
+    algo_cfg: IPPOConfig | MAPPOConfig = (
+        MAPPOConfig() if args.algo == "mappo" else IPPOConfig()
+    )
     if args.rollout_episodes is not None:
         algo_cfg.rollout_episodes = args.rollout_episodes
     train_cfg = TrainConfig(
@@ -264,7 +300,7 @@ def main() -> None:
         iterations=args.iterations,
         out_root=Path(args.out_root),
     )
-    train(train_cfg, args.env, args.nyc_window_limit)
+    train(train_cfg, args.env, args.nyc_window_limit, args.algo)
 
 
 if __name__ == "__main__":

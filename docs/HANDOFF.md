@@ -88,7 +88,12 @@ stress-test on shifted distributions and plot degradation curves.
 - Smoke-verified on Bandra (25 zones, obs 746, 106 actions, CUDA): rollout →
   GAE → PPO update → checkpoint all work; 10-iter trend run shows machinery
   healthy. NOT yet tuned; "agents learn something" gate = Phase 2 step 5.
-- No MAPPO yet (Phase 2 step 2). No experiment runner beyond train.
+- MAPPO DONE 2026-09-09 (Phase 2 step 2): `agents/mappo.py` — same PPO
+  backbone, shared `ZoneActorCritic` actor + `CentralizedCritic` over the
+  wrapper's global `state()`; buffer carries per-transition states;
+  `train.py --algo ippo|mappo` (default ippo, IPPO path unchanged).
+  Smoke-verified on Bandra (CUDA, 2 iters, same-seed byte-identical
+  metrics + checkpoint). No experiment runner beyond train.
 
 ### Baselines
 - `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
@@ -182,8 +187,10 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
    **DONE 2026-09-08 (D13)**; smoke tests green on Bandra and NYC.
 1. Implement IPPO — **DONE 2026-09-09** (machinery; see agents/ippo.py +
    experiments/train.py). Longer training + tuning = step 5.
-2. Implement MAPPO (shared critic variant)
-3. Create training loop that uses PettingZoo API
+2. Implement MAPPO (shared critic variant) — **DONE 2026-09-09**
+   (machinery; see agents/mappo.py). Longer training + tuning = step 5.
+3. Create training loop that uses PettingZoo API — **DONE 2026-09-09**
+   (experiments/train.py drives the AEC API for both algos).
 4. Add metric logging (served rate, wait time, empty km, reward)
 5. Train on NYC base demand, verify agents learn something
 

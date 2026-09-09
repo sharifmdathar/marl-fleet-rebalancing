@@ -51,6 +51,10 @@ class RolloutBuffer:
     Transition (agent_slot, t) = (obs, action, logp, value, reward, done,
     action_mask). Rewards/dones are filled at the agent's NEXT selection
     (standard AEC delayed-close); GAE runs per agent slot.
+
+    MAPPO mode (``state_dim`` given): each transition additionally stores
+    the centralized global state, consumed by the centralized critic.
+    IPPO paths (``state_dim=None``) are untouched.
     """
 
     def __init__(
@@ -59,6 +63,7 @@ class RolloutBuffer:
         num_turns: int,
         obs_dim: int,
         action_dim: int,
+        state_dim: int | None = None,
     ) -> None:
         self.num_agents = num_agents
         self.num_turns = num_turns
@@ -74,6 +79,11 @@ class RolloutBuffer:
         self.rewards = np.zeros((num_agents, num_turns), dtype=np.float32)
         self.dones = np.zeros((num_agents, num_turns), dtype=np.float32)
         self.filled = np.zeros((num_agents, num_turns), dtype=bool)
+        self.states = (
+            np.zeros((num_agents, num_turns, state_dim), dtype=np.float32)
+            if state_dim is not None
+            else None
+        )
 
     def store(
         self,
@@ -84,6 +94,7 @@ class RolloutBuffer:
         action: int,
         logprob: float,
         value: float,
+        state: np.ndarray | None = None,
     ) -> None:
         self.obs[slot, turn] = obs_vec
         self.action_mask[slot, turn] = action_mask
@@ -91,6 +102,8 @@ class RolloutBuffer:
         self.logprobs[slot, turn] = logprob
         self.values[slot, turn] = value
         self.filled[slot, turn] = True
+        if self.states is not None and state is not None:
+            self.states[slot, turn] = state
 
     def close(
         self, slot: int, turn: int, reward: float, done: bool,
@@ -135,12 +148,15 @@ class RolloutBuffer:
 
     def flatten(self) -> dict[str, np.ndarray]:
         mask = self.filled.ravel()
-        return {
+        flat: dict[str, np.ndarray] = {
             "obs": self.obs.reshape(self.capacity, -1)[mask],
             "action_mask": self.action_mask.reshape(self.capacity, -1)[mask],
             "actions": self.actions.ravel()[mask],
             "logprobs": self.logprobs.ravel()[mask],
         }
+        if self.states is not None:
+            flat["states"] = self.states.reshape(self.capacity, -1)[mask]
+        return flat
 
 
 class IPPO:
@@ -187,6 +203,9 @@ class IPPO:
         with torch.no_grad():
             _logits, value = self.policy.forward(obs_t)
         return value.cpu().numpy()
+
+    def state_dict(self) -> dict:
+        return self.policy.state_dict()
 
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         """PPO-clip update over one filled buffer. Returns loss metrics."""
