@@ -27,10 +27,16 @@ stress-test on shifted distributions and plot degradation curves.
   rolling-horizon rebalancer (MIVR-lite, D3); raw RideGym interface, needs a
   wrapper port for fair comparison (Phase 3)
 
-### PettingZoo wrapper
-- `src/marl_fleet_rebalancing/env/pettingzoo_env.py` — AEC wrapper around RideGym
-- `src/marl_fleet_rebalancing/env/test_wrapper.py` — smoke test (passes on Bandra)
-- Tested: 30 drivers, 25 zones, 300 turns, 9000 step calls
+### PettingZoo wrapper (zone-controller, D10 — reworked 2026-09-08)
+- `src/marl_fleet_rebalancing/env/pettingzoo_env.py` — AEC wrapper, ONE AGENT
+  PER ZONE (`zone_i`); joint dispatch+rebalance action space per D9; per-zone
+  idle-driver FIFO resolution (D13). Smoke test passes on Bandra.
+- `src/marl_fleet_rebalancing/env/test_wrapper.py` — smoke test; `--nyc` flag
+  runs the NYC split mode (62 taxi-zone agents, real FHVHV window). Passes.
+- NYC mode: `order_source="nyc"` (NYCConfig) replays split windows via
+  `MultiWindowNYCOrderGenerator`; zone model = taxi-zone centroids; verified
+  600 turns on a train window.
+- Tested: Bandra 25 zones × 300 turns; NYC 62 zones × 600 turns.
 
 ### Config
 - `src/marl_fleet_rebalancing/config.py` — `EnvConfig`, `NYCConfig`, `BandraConfig`
@@ -65,15 +71,24 @@ stress-test on shifted distributions and plot degradation curves.
   2-min arrivals in `train/window_0071`; see `config.py`).
 - Open scale question: peak windows carry ~15k trips/hr vs a 50-driver fleet —
   full-rate episodes are unservable; needs a sample-rate/fleet/episode-scope
-  decision before training (advisor call).
-- Wrapper has NO NYC mode yet: `pettingzoo_env.py` only builds the synthetic
-  `OSMnxOrderGenerator`; needs `DataFrameOrderGenerator` support for the splits.
+  decision before training (advisor call). The wrapper exposes the lever as
+  `NYCConfig.nyc_window_limit` (per-window order cap); even a 2k-order window
+  floods a 50-driver fleet (1.97k/2k cancelled at the random-policy floor).
 
 ### Agents / training code
-- Only `src/marl_fleet_rebalancing/agents/random_policy.py` exists
-- No IPPO or MAPPO implementation
-- No training loop
-- No experiment runner
+- `src/marl_fleet_rebalancing/agents/ippo.py` — IPPO DONE 2026-09-09
+  (Phase 2 step 1): shared actor-critic over zone agents, decentralized critic,
+  masked PPO-clip + GAE; rollout buffer handles AEC delayed-close rewards.
+- `src/marl_fleet_rebalancing/networks/encoder.py` — zone-obs flattening +
+  `ZoneActorCritic` MLP (masked logits).
+- `src/marl_fleet_rebalancing/experiments/train.py` — training entry
+  (`python -m marl_fleet_rebalancing.experiments.train --env bandra --seed 0`);
+  logs config/seed/git-commit/scenario-ID + per-iteration KPIs to `runs/`
+  (git-ignored). Torch (CUDA) added as dependency.
+- Smoke-verified on Bandra (25 zones, obs 746, 106 actions, CUDA): rollout →
+  GAE → PPO update → checkpoint all work; 10-iter trend run shows machinery
+  healthy. NOT yet tuned; "agents learn something" gate = Phase 2 step 5.
+- No MAPPO yet (Phase 2 step 2). No experiment runner beyond train.
 
 ### Baselines
 - `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
@@ -106,6 +121,7 @@ stress-test on shifted distributions and plot degradation curves.
 | 7-scenario shift taxonomy (S0–S6) | Accepted | `docs/decisions.md` D12, `docs/demand-shift.md` |
 | India dataset: dropped | Accepted | `docs/decisions.md` D12 |
 | RQ1/RQ2 framing | Accepted | `INTENT.md`, `docs/decisions.md` D12 |
+| Zone-controller wrapper implementation | Accepted | `docs/decisions.md` D13 |
 
 ### PettingZoo wrapper design
 - **AEC (not Parallel)** — same training signal, matches RideGym API
@@ -116,55 +132,56 @@ stress-test on shifted distributions and plot degradation curves.
 
 ---
 
-## Architecture of the wrapper
+## Architecture of the wrapper (zone-controller, D10/D13)
 
 ```
-RideGymAEC (PettingZoo AEC)
+RideGymAEC (PettingZoo AEC) — one agent per zone: zone_0 .. zone_{Z-1}
   ├── RidePoolEnv (RideGym) — the actual simulation
-  ├── EnvConfig — all parameters
-  ├── Observation space — Dict with per-driver features + pending orders
+  ├── EnvConfig — all parameters (order_source, nyc_split, reward, ...)
+  ├── Region model — NYC: ~62 taxi-zone centroids; synthetic: relocation_grid
+  │     over the network bounds (config, default 5x5)
+  ├── Observation space — Dict with own-zone state, all-zone fleet state,
+  │     pending orders, relocation points, clock
   ├── Action space — Discrete(1 + max_pending + num_zones)
-  │     0 = idle
-  │     1..max_pending = dispatch to pending order
-  │     max_pending+1.. = relocate to zone
-  ├── Reward — computed per turn, same for all agents
-  └── Conflict resolution — shuffled first-come-first-served
+  │     0 = no zone action
+  │     1..max_pending = dispatch pending order i to an idle driver IN ZONE
+  │     max_pending+1.. = relocate one idle driver of the zone to zone j
+  ├── Zone→driver resolution — per-zone idle-driver FIFO queues, consumed in
+  │     shuffled first-come-first-served order (seeded RNG)
+  └── Reward — R = -alpha*wait - beta*empty_km + gamma*served (D8), per turn,
+        shared by all zone agents; empty km exact from the RideGym event log
 ```
 
-### Observation space keys
-- `self_location` (2,) — normalized xy
-- `self_status` (4,) — one-hot: idle/to_pickup/to_dropoff/relocating
-- `self_passengers_ratio` (1,) — onboard / capacity
-- `self_capacity` (1,) — capacity / 10
-- `self_committed_ratio` (1,) — committed / capacity
-- `self_region` (num_zones,) — one-hot zone
-- `all_locations` (n*2,) — all driver locations
-- `all_statuses` (n*4,) — all driver statuses
-- `all_passengers` (n,) — all driver passenger counts
-- `pending_orders` (max_pending, 5) — origin_xy, dest_xy, passengers/capacity
+### Observation space keys (per zone agent)
+- `zone_location` (2,) — own zone centroid, normalized to [0,1]
+- `zone_state` (3,) — fleet fraction (drivers in zone / fleet), idle fraction
+  (within zone), pending-originating fraction (orders / max_pending)
+- `all_zone_state` (num_zones, 2) — per-zone [fleet fraction, idle fraction]
+- `pending_orders` (max_pending, 6) — origin_xy, dest_xy, pax/capacity,
+  wait/timeout; sorted MOST-URGENT-FIRST
 - `pending_mask` (max_pending,) — 1 if order exists
-- `pending_passengers` (max_pending,) — passengers/capacity
+- `pending_passengers` (max_pending,) — pax/capacity
 - `time_frac` (1,) — current_time / horizon
 - `relocation_points` (num_zones, 2) — zone centroids (normalized)
 
-### Action space
-- `0` = idle (do nothing)
-- `1` to `max_pending` = dispatch to pending order index
-- `max_pending+1` to `max_pending+num_zones` = relocate to zone index
+### Action space (per zone agent)
+- `0` = no zone action
+- `1` to `max_pending` = dispatch pending order (i-1) to an idle driver in this zone
+- `max_pending+1` to `max_pending+num_zones` = relocate one idle driver to zone (j - max_pending - 1)
 
 ---
 
 ## What to do next (in order)
 
 ### Phase 1: NYC data pipeline — DONE 2026-09-07 (all artifacts on disk)
-Remaining: add `DataFrameOrderGenerator` support to the wrapper so it can run
-the splits, then smoke-test the wrapper on an NYC window.
+Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
+`MultiWindowNYCOrderGenerator` and smoke-tests green on a train window.
 
 ### Phase 2: Training infrastructure
-0. Rework wrapper to zone-controller granularity (D10) + add
-   `DataFrameOrderGenerator` support for the NYC splits — vehicle-agent
-   API cannot be trained on (decisions changed under it)
-1. Implement IPPO (using existing PPO library or from scratch)
+0. Rework wrapper to zone-controller granularity (D10) + NYC split support —
+   **DONE 2026-09-08 (D13)**; smoke tests green on Bandra and NYC.
+1. Implement IPPO — **DONE 2026-09-09** (machinery; see agents/ippo.py +
+   experiments/train.py). Longer training + tuning = step 5.
 2. Implement MAPPO (shared critic variant)
 3. Create training loop that uses PettingZoo API
 4. Add metric logging (served rate, wait time, empty km, reward)
@@ -191,7 +208,7 @@ the splits, then smoke-test the wrapper on an NYC window.
 4. `docs/demand-shift.md` — shift taxonomy (S0-S6)
 5. `docs/literature.md` — what's known, what's not
 6. `config.py` — all experiment parameters
-7. `env/pettingzoo_env.py` — the wrapper (427 lines)
+7. `env/pettingzoo_env.py` — the wrapper (zone-controller, D13)
 8. `docs/nyc-pipeline.md` — NYC data setup
 9. `08-ps2-project-plan.md` (in parent dir) — full project plan
 

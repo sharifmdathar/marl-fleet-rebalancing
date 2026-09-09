@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -44,6 +45,44 @@ class EnvConfig:
     # after running the data pipeline. Update once data is available.
     max_pending: int = 80
 
+    # --- Region model (zone-controller agents, D10) ---
+    # Synthetic maps: rows x cols grid of zone centres over the network bounds
+    # (Bandra default 5x5 = 25 zones). NYC overrides this with real taxi-zone
+    # centroids (nyc_zone_centroids_path).
+    relocation_grid: tuple[int, int] = (5, 5)
+
+    # --- Order source ---
+    # "synthetic": OSMnxOrderGenerator over the network (num_orders, max_party_size)
+    # "nyc":       NYC FHVHV splits via MultiWindowNYCOrderGenerator — one
+    #              window per episode (train: random draw; val/test: cyclic);
+    #              endpoints are zone centroids snapped to network nodes.
+    #              See docs/nyc-pipeline.md.
+    # "dataframe": raw DataFrameOrderGenerator — endpoints must already lie on
+    #              the network (no snapping is performed).
+    order_source: str = "synthetic"
+    dataframe: Any = None                          # only for order_source="dataframe"
+    dataframe_columns: dict[str, str] | None = None
+
+    # --- NYC split parameters (order_source="nyc") ---
+    nyc_split: str = "train"                       # "train" | "val" | "test"
+    nyc_splits_dir: str = "data/nyc/splits"
+    nyc_zone_centroids_path: str = "data/nyc/zone_centroids.csv"
+    # Per-window cap on orders (sample-rate lever; None = full historical rate).
+    # Open experiment-design decision (HANDOFF): full-rate peaks (~15k trips/hr)
+    # are unservable by a 50-driver fleet. MUST be settled before training.
+    nyc_window_limit: int | None = None
+    nyc_random_party_size: bool = False  # FHVHV carries no real party size
+    nyc_max_party_size: int = 3
+    # Spatial jitter (km) of zone-centroid endpoints before snapping; mitigates
+    # the centroid-collapse artefact. 0 keeps exact centroids.
+    nyc_perturb_od_radius_km: float = 0.0
+
+    # --- Reward normalization ---
+    # Empty-distance normalizer in km: the beta term applies per
+    # (empty km traveled / this value). Deadhead distance is taken exactly from
+    # the RideGym step event log (D13).
+    empty_distance_norm_km: float = 1.0
+
     # --- Reward weights ---
     # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand
     # Tuning these is part of the experiment; start with equal weights.
@@ -63,14 +102,19 @@ class EnvConfig:
 class NYCConfig(EnvConfig):
     """Configuration for NYC Manhattan study area.
 
-    Zone count: ~60 taxi zones whose centroids fall inside Region A bbox
-    (-74.02, 40.70, -73.93, 40.80). Exact count depends on data pipeline.
+    Zone count: ~62 taxi zones whose centroids fall inside Region A bbox
+    (-74.02, 40.70, -73.93, 40.80); loaded from zone_centroids.csv and passed
+    to RideGym as relocation_centroids (region model = real taxi zones).
 
     Fleet size: 50 drivers for a 60-minute episode. Scale as needed.
 
-    max_pending: 80 is carried over from Bandra West measurements.
-    MUST be updated after running the NYC data pipeline and measuring
-    actual peak pending order counts.
+    max_pending: 650 — measured worst case of concurrent 2-min arrivals
+    (train/window_0071, Fri 19:00 peak).
+
+    Demand: real FHVHV windows from data/nyc/splits via
+    MultiWindowNYCOrderGenerator (train: random window per episode;
+    val/test: deterministic cyclic traversal). nyc_window_limit is the
+    sample-rate lever — still an open experiment-design decision.
 
     Network: manhattan.gpickle downloaded via
     `python -m ride_gym.data_tools.nyc.build_nyc_network`
@@ -81,8 +125,10 @@ class NYCConfig(EnvConfig):
     dt: float = 0.1
     horizon: float = 60.0
     order_timeout: float = 2.0
-    num_orders: int = 800
+    num_orders: int = 800  # unused in nyc mode; kept for the synthetic fallback
     max_party_size: int = 3
+    order_source: str = "nyc"
+    nyc_split: str = "train"
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
     # Measured 2026-09-07 from data/nyc/splits (108 windows): worst case is
