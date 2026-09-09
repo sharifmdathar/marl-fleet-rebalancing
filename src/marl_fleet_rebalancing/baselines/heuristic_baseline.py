@@ -156,14 +156,22 @@ class BaselineConfig:
     with comparable effort to RL training (D3 / RLSCALE-BENCH lesson).
     """
 
-    lookback_minutes: float = 10.0      # sliding window for rate estimation
-    lookahead_minutes: float = 5.0     # horizon for demand prediction
+    lookback_minutes: float = 5.0       # sliding window for rate estimation
+    lookahead_minutes: float = 3.0     # horizon for demand prediction
     rebalance_frequency_minutes: float = 1.0
     max_rebalance_per_step: int = 5
     min_idle_to_rebalance: int = 3
     demand_model: str = "exponential_smoothing"
     smoothing_alpha: float = 0.3
     max_per_route: int | None = None
+    # Relocations longer than this (minutes of empty travel at network speed)
+    # are skipped: with 2-min order timeouts they arrive after demand cancels.
+    max_relocate_minutes: float | None = 5.0
+    # Cap on orders assigned to one car per step (None = fill to capacity).
+    # Lower values trade pooled throughput for shorter pickup waits.
+    max_pool_per_step: int | None = None
+    # Prior demand rate per region (orders/hr) before the EMA warms up.
+    demand_init_rate: float = 30.0
 
 
 class HeuristicBaseline:
@@ -186,6 +194,7 @@ class HeuristicBaseline:
         self._current_plan: RebalancePlan | None = None
         self._idle_vehicle_regions: dict[int, int] = {}  # vid -> region
         self._demand_rate: np.ndarray | None = None
+        self._last_costs: np.ndarray | None = None
         self._network = None
 
     def reset(self, seed: int | None = None) -> None:
@@ -194,7 +203,7 @@ class HeuristicBaseline:
         self._current_plan = None
         self._idle_vehicle_regions.clear()
         if self._n_regions is not None:
-            self._demand_rate = np.ones(self._n_regions) * 10.0  # default 10 veh/hr
+            self._demand_rate = np.ones(self._n_regions) * self.config.demand_init_rate
 
     def actions(self, env: "RidePoolEnv", obs: dict[str, Any]) -> dict[str, Any]:
         """Produce per-vehicle actions for the current step.
@@ -213,6 +222,11 @@ class HeuristicBaseline:
 
         # 1. Update demand rate estimates
         self._update_demand_rates(env, obs, current_time)
+
+        # 1b. Refresh the idle-vehicle snapshot EVERY step. It cannot wait
+        # for the LP replan cadence: dispatch assigns from this map, and a
+        # 1-minute-stale map bids for cars that are no longer idle.
+        self._refresh_idle_regions(obs)
 
         # 2. Recompute plan if needed
         time_since_last = current_time - self._last_rebalance_time
@@ -236,7 +250,7 @@ class HeuristicBaseline:
             self._region_centroids = [
                 (float(lon), float(lat)) for lon, lat in relocation_points
             ]
-            self._demand_rate = np.ones(self._n_regions) * 10.0
+            self._demand_rate = np.ones(self._n_regions) * self.config.demand_init_rate
             logger.info(
                 f"HeuristicBaseline initialized with {self._n_regions} regions"
             )
@@ -284,6 +298,20 @@ class HeuristicBaseline:
                 best_idx = i
         return best_idx
 
+    def _refresh_idle_regions(self, obs: dict[str, Any]) -> dict[int, int]:
+        """Snapshot of currently idle vehicles (vid -> region) from this step's obs."""
+        n_regions = self._n_regions or 0
+        idle_vehicles: dict[int, int] = {}
+        for vid, vstate in obs.items():
+            self_state = vstate.get("self", {})
+            if self_state.get("status") != "idle":
+                continue
+            region_id = self_state.get("current_region", 0)
+            if 0 <= region_id < n_regions:
+                idle_vehicles[vid] = region_id
+        self._idle_vehicle_regions = idle_vehicles
+        return idle_vehicles
+
     def _compute_rebalance_plan(
         self,
         env: "RidePoolEnv",
@@ -299,18 +327,12 @@ class HeuristicBaseline:
         forecast_horizon = self.config.lookahead_minutes / 60.0
         predicted_demand = self._demand_rate * forecast_horizon
 
-        # 2. Count current supply (idle vehicles) per region
+        # 2. Count current supply (IDLE vehicles only — busy ones cannot
+        # take new orders, so counting them understates every deficit).
         supply = np.zeros(n_regions)
-        idle_vehicles: dict[int, int] = {}  # vid -> region
-
-        for vid, vstate in obs.items():
-            region_id = vstate.get("self", {}).get("current_region", 0)
-            if 0 <= region_id < n_regions:
-                supply[region_id] += 1
-                if vstate.get("self", {}).get("status") == "idle":
-                    idle_vehicles[vid] = region_id
-
-        self._idle_vehicle_regions = idle_vehicles
+        idle_vehicles = self._refresh_idle_regions(obs)
+        for _vid, region_id in idle_vehicles.items():
+            supply[region_id] += 1
 
         # 3. Compute imbalance: positive = deficit, negative = surplus
         imbalance = predicted_demand - supply
@@ -322,6 +344,7 @@ class HeuristicBaseline:
 
         # 4. Compute inter-region costs (Euclidean)
         costs = self._compute_region_costs()
+        self._last_costs = costs
 
         # 5. Solve LP
         self._current_plan = solve_rebalance_lp(
@@ -367,52 +390,95 @@ class HeuristicBaseline:
             (vid, region) for vid, region in self._idle_vehicle_regions.items()
         ]
 
-        # 1. Dispatch: nearest-neighbor assignment to pending orders
+        # 1. Dispatch: nearest-VEHICLE assignment to pending orders.
+        # Scores actual driver locations, not region centroids: same-zone
+        # cars no longer tie arbitrarily and nearby cross-boundary cars win.
+        # Every car with remaining capacity is eligible — including busy ones
+        # pooling en route (the env re-plans their route on assignment).
+        # Assigning only idle cars strands stockpiling gains: assigned orders
+        # cannot time out, so shallow queues bleed demand to cancellation.
         from ride_gym.enums import OrderStatus
         pending_orders = [
             o for o in env.orders.values()
             if o.status == OrderStatus.PENDING and o.order_id not in dispatched_orders
         ]
 
+        eligible_vids: list[int] = []
+        eligible_locs: list[tuple[float, float]] = []
+        eligible_cap: list[int] = []
+        for vid, vstate in obs.items():
+            self_state = vstate.get("self", {})
+            room = max(
+                int(self_state.get("capacity", 0))
+                - int(self_state.get("committed_passengers", 0)),
+                0,
+            )
+            if room <= 0:
+                continue
+            eligible_vids.append(vid)
+            eligible_locs.append(self_state["location"])
+            eligible_cap.append(room)
+        idle_locs = np.array(eligible_locs, dtype=float)
+        cap_left = np.array(eligible_cap, dtype=int)
+        alive = cap_left > 0
+        takes = np.zeros(len(eligible_vids), dtype=int)
+        max_pool = self.config.max_pool_per_step
+
         for order in pending_orders:
-            best_vid = None
-            best_dist = float("inf")
-            best_region = -1
-
-            for vid, region in remaining_idle:
-                dist = self._region_distance(
-                    region, self._find_nearest_region(order.origin)
-                )
-                if dist < best_dist:
-                    best_dist = dist
-                    best_vid = vid
-                    best_region = region
-
-            if best_vid is not None:
+            party = int(order.num_passengers)
+            live_idx = np.where(alive & (cap_left >= party))[0]
+            if max_pool is not None:
+                live_idx = live_idx[takes[live_idx] < max_pool]
+            if len(live_idx) == 0:
+                continue
+            d2 = ((idle_locs[live_idx] - np.asarray(order.origin, dtype=float)) ** 2).sum(axis=1)
+            pick = int(live_idx[int(np.argmin(d2))])
+            best_vid = eligible_vids[pick]
+            if best_vid in actions:
+                actions[best_vid]["orders"].append(order.order_id)
+            else:
                 actions[best_vid] = {"orders": [order.order_id]}
-                dispatched_orders.add(order.order_id)
-                remaining_idle = [(v, r) for v, r in remaining_idle if v != best_vid]
+            dispatched_orders.add(order.order_id)
+            cap_left[pick] -= party
+            takes[pick] += 1
+            alive[pick] = cap_left[pick] > 0
 
-        # 2. Rebalancing: execute from current plan
+        remaining_idle = [
+            (vid, region) for vid, region in self._idle_vehicle_regions.items()
+            if vid not in actions
+        ]
+
+        # 2. Rebalancing: execute from current plan, skipping relocations
+        # longer than max_relocate_minutes (they arrive after demand cancels).
         if self._current_plan is not None and remaining_idle:
             transfers = self._current_plan.transfers.copy()
             reloc_count = 0
+            costs = self._last_costs
 
             for vid, region in remaining_idle:
                 if reloc_count >= self.config.max_rebalance_per_step:
                     break
+                if vid in actions:
+                    continue
 
                 available = int(transfers[region, :].sum())
                 if available <= 0:
                     continue
 
-                # Find best destination
-                best_dest = int(np.argmax(transfers[region, :]))
-                if best_dest != region and transfers[region, best_dest] > 0:
-                    target_lon, target_lat = self._region_centroids[best_dest]
-                    actions[vid] = {"relocate": (target_lon, target_lat)}
-                    transfers[region, best_dest] -= 1
-                    reloc_count += 1
+                # Best destination within the relocation distance cap.
+                dests = np.where(transfers[region, :] > 0)[0]
+                if self.config.max_relocate_minutes is not None and costs is not None:
+                    dests = dests[costs[region, dests] <= self.config.max_relocate_minutes]
+                    dests = dests[dests != region]
+                else:
+                    dests = dests[dests != region]
+                if len(dests) == 0:
+                    continue
+                best_dest = int(dests[int(np.argmax(transfers[region, dests]))])
+                target_lon, target_lat = self._region_centroids[best_dest]
+                actions[vid] = {"relocate": (target_lon, target_lat)}
+                transfers[region, best_dest] -= 1
+                reloc_count += 1
 
         # 3. Remaining vehicles: no orders (idle)
         all_vids = set(obs.keys())
