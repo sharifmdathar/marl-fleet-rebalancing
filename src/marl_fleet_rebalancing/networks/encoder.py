@@ -1,8 +1,10 @@
 """Neural network architectures for the MARL policies.
 
 Zone-controller observation encoder + shared actor-critic used by IPPO and
-(later) MAPPO. One network is shared across all zone agents (parameter
-sharing) — zone identity enters through ``zone_location``, per D13.
+MAPPO. One actor network is shared across all zone agents (parameter
+sharing) — zone identity enters through ``zone_location``, per D13. MAPPO
+keeps the shared actor and replaces the decentralized critic head with
+:class:`CentralizedCritic` over the global state.
 """
 
 from __future__ import annotations
@@ -90,3 +92,30 @@ class ZoneActorCritic(nn.Module):
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.mode if deterministic else dist.sample()
         return action, dist.log_prob(action), value
+
+
+class CentralizedCritic(nn.Module):
+    """Global-state value MLP for MAPPO's centralized critic (D4).
+
+    Same trunk architecture as the actor (Linear-Tanh x2) but over the
+    wrapper's centralized ``state()`` (all-zone fleet state + pending
+    features + clock) instead of a single zone's observation.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        hidden_dim: int = 256,
+    ) -> None:
+        super().__init__()
+        self.trunk = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+        )
+        self.value = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """Return value estimates for a batch of global states."""
+        return self.value(self.trunk(state)).squeeze(-1)
