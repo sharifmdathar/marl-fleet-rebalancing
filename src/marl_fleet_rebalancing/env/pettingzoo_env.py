@@ -140,7 +140,6 @@ class RideGymAEC(AECEnv):
         self._actions_this_turn: dict[str, int] = {}
         self._turn_complete = False
         self._terminated = False
-        self._cached_rewards: dict[str, float] = {}
         self._terminate_idx = 0
 
         # Reward tracking (for computing the custom reward)
@@ -373,7 +372,6 @@ class RideGymAEC(AECEnv):
         self.terminations = {a: False for a in self.agents}
         self.truncations = {a: False for a in self.agents}
         self.infos = {a: {} for a in self.agents}
-        self._cached_rewards = {a: 0.0 for a in self.agents}
 
     # --------------------------------------------------------------- observe
 
@@ -547,7 +545,12 @@ class RideGymAEC(AECEnv):
         # Compute our custom reward (same for all zone agents — global task)
         custom_reward = self._compute_reward(info.get("events", {}))
 
-        self._cached_rewards = {a: custom_reward for a in self.agents}
+        # Standard AEC delivery: the turn reward lands in rewards/cumulative
+        # now, so each agent reads exactly this turn's reward at its NEXT
+        # selection (single-turn delayed-close). last() serves cumulative.
+        for a in self.agents:
+            self.rewards[a] += custom_reward
+        self._accumulate_rewards()
 
         done_flag = bool(dones["__all__"])
 
@@ -595,22 +598,18 @@ class RideGymAEC(AECEnv):
         if self._terminated:
             done_agent = self.agent_selection
             remaining = [a for a in self.agents if a != done_agent]
+            self.rewards.pop(done_agent, None)
+            self._cumulative_rewards[done_agent] = 0.0
             self.agents = remaining
             self.agent_selection = remaining[0] if remaining else None
-            self.rewards = {a: 0.0 for a in remaining}
             self.terminations = {a: True for a in remaining}
             self.truncations = {a: False for a in remaining}
             self.infos = {a: {} for a in remaining}
             return
-        self.rewards = {a: 0.0 for a in self.agents}
-        if (
-            self.agent_selection in self._cached_rewards
-            and not self.terminations.get(self.agent_selection, False)
-        ):
-            self.rewards[self.agent_selection] = self._cached_rewards[self.agent_selection]
-        self._cumulative_rewards[self.agent_selection] = 0.0
-        self._accumulate_rewards()
-        self._actions_this_turn[self.agent_selection] = 0 if action is None else int(action)
+        current = self.agent_selection
+        self.rewards[current] = 0.0
+        self._cumulative_rewards[current] = 0.0
+        self._actions_this_turn[current] = 0 if action is None else int(action)
         self._advance_selection()
 
     def state(self) -> np.ndarray:
