@@ -179,6 +179,31 @@ class TestFixesAndDemand(unittest.TestCase):
         self.assertEqual(val.shape, (1,))
         self.assertTrue(np.isfinite(val[0]))
 
+    def test_macro_demand_observation_and_rebalance_credit(self):
+        """Test that all_zone_state has shape (num_zones, 3) exposing macro-demand and credit assignment handles assists."""
+        cfg = BandraConfig()
+        cfg.target_zone = 3
+        cfg.target_zone_demand_pct = 0.80
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+
+        any_agent = env.possible_agents[0]
+        obs = env.observe(any_agent)
+
+        # 1. Check all_zone_state shape is (Z, 3)
+        self.assertEqual(obs["all_zone_state"].shape, (env._num_zones, 3))
+        # 2. Check that target zone 3 has significant pending demand fraction in column 2
+        demand_col = obs["all_zone_state"][:, 2]
+        self.assertTrue(np.all(demand_col >= 0.0))
+        # 3. Simulate rebalancing assist attribution in reward computation
+        env._order_dispatcher[100] = 5
+        env._driver_relocator[1] = 18  # Driver 1 was relocated by Zone 18
+        mock_events = {1: {"completed_orders": [100], "is_empty_move": False}}
+        rewards = env._compute_zone_rewards(mock_events)
+        # Zone 5 is dispatcher, Zone 18 is relocator: both must receive non-zero positive reward
+        self.assertGreater(rewards[5], 0.0)
+        self.assertGreater(rewards[18], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -154,7 +154,7 @@ class RideGymAEC(AECEnv):
         self._pending_mask = np.zeros(self._max_pending, dtype=np.float32)
         self._pending_per_zone = np.zeros(self._num_zones, dtype=np.float32)
         self._zone_fleet_state = np.zeros(
-            (self._num_zones, 2), dtype=np.float32,
+            (self._num_zones, 3), dtype=np.float32,
         )
         self._zone_centroids_norm = self._normalized_centroids()
 
@@ -167,11 +167,15 @@ class RideGymAEC(AECEnv):
             (self._num_zones, self._max_pending), dtype=np.float32,
         )
 
-        # Local credit assignment mappings (Point A):
+        # Local credit assignment mappings (Point A & D16):
         # order_id -> zone_idx (which zone controller dispatched this order)
         self._order_dispatcher: dict[int, int] = {}
         # driver_id -> zone_idx (which zone controller commanded this driver)
         self._driver_commander: dict[int, int] = {}
+        # driver_id -> zone_idx (which zone initiated relocation)
+        self._driver_relocator: dict[int, int] = {}
+        # driver_id -> target_zone_idx (destination of ongoing relocation)
+        self._driver_relocation_target: dict[int, int] = {}
 
     # ------------------------------------------------------------------ setup
 
@@ -295,7 +299,7 @@ class RideGymAEC(AECEnv):
         return Dict({
             "zone_location": Box(0.0, 1.0, shape=(2,), dtype=np.float32),
             "zone_state": Box(0.0, 1.0, shape=(3,), dtype=np.float32),
-            "all_zone_state": Box(0.0, 1.0, shape=(z, 2), dtype=np.float32),
+            "all_zone_state": Box(0.0, 1.0, shape=(z, 3), dtype=np.float32),
             "pending_orders": Box(0.0, 1.0, shape=(p, 6), dtype=np.float32),
             "pending_mask": Box(0.0, 1.0, shape=(p,), dtype=np.float32),
             "pending_passengers": Box(0.0, 1.0, shape=(p,), dtype=np.float32),
@@ -433,8 +437,16 @@ class RideGymAEC(AECEnv):
 
         self._zone_fleet_state[:, 0] = zone_totals / max(self._num_drivers, 1)
         self._zone_fleet_state[:, 1] = zone_idle / max(self._num_drivers, 1)
+        self._zone_fleet_state[:, 2] = self._pending_per_zone
         self._zone_idle_counts = zone_idle.astype(np.int64)
         self._zone_dispatchable_counts = zone_dispatchable.astype(np.int64)
+
+        # Clear active relocation target if driver is no longer in status RELOCATING
+        if hasattr(self, "_driver_relocation_target"):
+            for did in range(self._num_drivers):
+                d = self._last_obs[did]["self"]
+                if d["status"] != "relocating":
+                    self._driver_relocation_target.pop(did, None)
 
     # ------------------------------------------------------------------ reset
 
@@ -458,6 +470,8 @@ class RideGymAEC(AECEnv):
         self._episode_empty_m = 0.0
         self._order_dispatcher.clear()
         self._driver_commander.clear()
+        self._driver_relocator.clear()
+        self._driver_relocation_target.clear()
         self._claimed_orders_this_turn: set[int] = set()
         self._seen_cancelled_ids: set[int] = set()
 
@@ -595,12 +609,18 @@ class RideGymAEC(AECEnv):
             if o.status == OrderStatus.COMPLETED
         )
 
-        # 1. Served demand attribution (+gamma)
+        # 1. Served demand attribution (+gamma) with rebalancing assist sharing
         for did, event in events.items():
             for oid in event.get("completed_orders", []):
                 dispatcher = self._order_dispatcher.get(oid)
+                relocator = self._driver_relocator.get(did)
                 if dispatcher is not None and 0 <= dispatcher < self._num_zones:
-                    local_rewards[dispatcher] += cfg.gamma
+                    if relocator is not None and relocator != dispatcher and 0 <= relocator < self._num_zones:
+                        # Rebalancing assist credit: 70% to local dispatcher, 30% to the zone that supplied the vehicle
+                        local_rewards[dispatcher] += 0.7 * cfg.gamma
+                        local_rewards[relocator] += 0.3 * cfg.gamma
+                    else:
+                        local_rewards[dispatcher] += cfg.gamma
                 else:
                     order = self.env.orders.get(oid)
                     if order is not None:
@@ -609,15 +629,23 @@ class RideGymAEC(AECEnv):
                         local_rewards[zi] += cfg.gamma
                     else:
                         local_rewards += cfg.gamma / self._num_zones
+                self._driver_relocator.pop(did, None)
 
-        # 2. Empty deadhead distance penalty (-beta)
+        # 2. Empty deadhead distance penalty (-beta) with shared relocation cost
         for did, event in events.items():
             if event.get("is_empty_move", False):
                 empty_m = float(event.get("distance_moved", 0.0))
                 self._episode_empty_m += empty_m
                 empty_km = empty_m / _M_PER_KM / max(cfg.empty_distance_norm_km, 1e-9)
                 commander = self._driver_commander.get(did)
-                if commander is not None and 0 <= commander < self._num_zones:
+                reloc_target = self._driver_relocation_target.get(did)
+
+                if reloc_target is not None and commander is not None and commander != reloc_target:
+                    # Relocation is a cooperative transfer: sender and receiver share the empty travel cost 50/50
+                    local_rewards[commander] -= 0.5 * cfg.beta * empty_km
+                    if 0 <= reloc_target < self._num_zones:
+                        local_rewards[reloc_target] -= 0.5 * cfg.beta * empty_km
+                elif commander is not None and 0 <= commander < self._num_zones:
                     local_rewards[commander] -= cfg.beta * empty_km
                 else:
                     if self._last_obs is not None and did in self._last_obs:
@@ -730,6 +758,7 @@ class RideGymAEC(AECEnv):
                 claimed_orders.add(oid)
                 self._order_dispatcher[oid] = zone_idx
                 self._driver_commander[driver_id] = zone_idx
+                self._driver_relocation_target.pop(driver_id, None)
                 ridegym_actions[driver_id] = decoded
 
             elif "relocate" in decoded:
@@ -737,7 +766,10 @@ class RideGymAEC(AECEnv):
                 if not zone_idle_queues[zone_idx]:
                     continue
                 driver_id = zone_idle_queues[zone_idx].popleft()
+                target_zone = decoded["relocate"]
                 self._driver_commander[driver_id] = zone_idx
+                self._driver_relocator[driver_id] = zone_idx
+                self._driver_relocation_target[driver_id] = target_zone
                 ridegym_actions[driver_id] = decoded
 
         obs, _rewards, dones, info = self.env.step(ridegym_actions)

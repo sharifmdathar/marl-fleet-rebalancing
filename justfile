@@ -19,7 +19,7 @@ train-ippo env="bandra" iters="20" rollouts="3" target_zone="" target_pct="" nam
     $CMD
 
 # 2. Train centralized-critic MAPPO policy
-train-mappo env="bandra" iters="20" rollouts="3" target_zone="" target_pct="" name="":
+train-mappo env="bandra" iters="50" rollouts="3" target_zone="" target_pct="" name="":
     #!/usr/bin/env bash
     CMD="uv run python -m marl_fleet_rebalancing.experiments.train --env {{env}} --algo mappo --iterations {{iters}} --rollout-episodes {{rollouts}}"
     if [ -n "{{target_zone}}" ]; then CMD="$CMD --target-zone {{target_zone}}"; fi

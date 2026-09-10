@@ -110,7 +110,7 @@ class EnvConfig:
     beta: float = 0.1    # weight for empty repositioning distance (cost per empty km)
     gamma: float = 5.0   # weight for served demand (payoff per completed order)
     cancel_penalty: float = 2.0  # penalty per cancelled order in zone (D15)
-    team_share: float = 0.2  # 80% local credit assignment + 20% team cooperation
+    team_share: float = 0.4  # 60% local credit assignment + 40% team cooperation (D16)
 
     # --- Seeding ---
     seed: int | None = None
@@ -157,7 +157,7 @@ class NYCConfig(EnvConfig):
     alpha: float = 1.0
     beta: float = 0.1
     gamma: float = 5.0
-    team_share: float = 0.2
+    team_share: float = 0.4
 
 
 # ---------------------------------------------------------------------------
@@ -187,4 +187,4 @@ class BandraConfig(EnvConfig):
     alpha: float = 1.0
     beta: float = 0.1
     gamma: float = 5.0
-    team_share: float = 0.2
+    team_share: float = 0.4

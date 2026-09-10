@@ -220,8 +220,20 @@ Format: date, status, decision, why, what would change our mind.
 - Revisit if:
   - Regional geometries require adaptive radius thresholds or dynamic zone neighborhoods.
 
+## D16 — Macro-demand observation & cooperative rebalancing credit assignment
+- Date: 2026-09-11, Status: accepted
+- Decision:
+  - **Macro-Demand Observation**: Expanded `all_zone_state` in the zone-controller observation space from `(Z, 2)` to `(Z, 3)`. The 3rd column contains each zone's current fraction of citywide pending demand (`self._pending_per_zone`). Every zone agent now sees both the fleet distribution and the unmet demand heatmap across all zones, enabling perception of distribution shifts and distant surges.
+  - **Rebalancing Assist Credit**: When a vehicle relocated by Zone A completes an order in Zone B, the completion reward (+gamma) is shared: 70% to the local dispatcher (Zone B) and 30% as a rebalancing assist to the zone that supplied the vehicle (Zone A).
+  - **Shared Relocation Deadhead Penalty**: Empty travel during inter-zone relocation is now split 50/50 between the sending zone and the receiving zone, eliminating the altruism penalty where sending zones bore 100% of fuel costs alone.
+  - **Increased Team Share**: Set default `team_share: float = 0.4` (from 0.2), creating strong cooperative alignment across all agents while preserving local credit assignment.
+- Why:
+  - Resolves the sensory blind spot where agents could not detect demand outside their 1.2 km dispatch radius.
+  - Fixes the credit assignment free-rider defect where rebalancing agents were strictly penalized for sending vehicles to assist neighboring deficit zones.
+- Revisit if:
+  - Assist split percentages (70/30) need tuning under different fleet-to-demand ratios.
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>
 - Decision / Why / Revisit if:
-
