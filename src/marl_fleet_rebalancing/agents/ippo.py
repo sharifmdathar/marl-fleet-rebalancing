@@ -207,6 +207,9 @@ class IPPO:
     def state_dict(self) -> dict:
         return self.policy.state_dict()
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.policy.load_state_dict(state_dict)
+
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         """PPO-clip update over one filled buffer. Returns loss metrics."""
         cfg = self.config

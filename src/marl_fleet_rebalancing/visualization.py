@@ -19,8 +19,7 @@ Usage (interactive viewer):
 
     rec = TrajectoryRecorder()
     # ... run episode ...
-    interactive_view(rec)            # opens a window
-    # Space = play/pause, arrows = step, click = select driver, Esc = deselect
+    interactive_view(rec)            # opens an interactive control window
 """
 
 from __future__ import annotations
@@ -30,6 +29,8 @@ from typing import Tuple
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
+from matplotlib.widgets import Slider, Button
 
 from ride_gym.visualize import TrajectoryRecorder, STATUS_COLORS, STATUS_LABEL
 from ride_gym.enums import DriverStatus
@@ -111,19 +112,52 @@ def _count_orders(frame: dict) -> dict[str, int]:
     }
 
 
+def _make_legend_handles(show_zones: bool = False) -> list[Line2D]:
+    """Build permanent proxy handles for the map legend to prevent Matplotlib warnings."""
+    handles = [
+        Line2D([0], [0], marker="o", color="w", label="Idle",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.IDLE], markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="To Pickup",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_PICKUP], markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="To Dropoff",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_DROPOFF], markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="Relocating",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.RELOCATING], markersize=7),
+        Line2D([0], [0], marker="o", color="#d62728", fillstyle="none",
+               label="Pending Order", markersize=6, markeredgewidth=1.2),
+    ]
+    if show_zones:
+        handles.append(
+            Line2D([0], [0], marker="s", color="w", label="Zone Centroid",
+                   markerfacecolor="#9c27b0", markersize=6)
+        )
+    return handles
+
+
 _STATS_TEMPLATE = (
     "SIMULATION\n"
-    "  Time       {time}\n"
+    "  Time         {time}\n"
     "\n"
     "DRIVERS\n"
-    "  Moving     {moving}\n"
-    "  Idle       {idle}\n"
+    "  Moving       {moving}\n"
+    "  Idle         {idle}\n"
     "\n"
     "ORDERS\n"
-    "  Waiting    {waiting}\n"
-    "  On trip    {on_trip}\n"
-    "  Completed  {completed}\n"
-    "  Cancelled  {cancelled}"
+    "  Waiting      {waiting}\n"
+    "  On trip      {on_trip}\n"
+    "  Completed    {completed}\n"
+    "  Cancelled    {cancelled}\n"
+    "  Service rate {sr}\n"
+    "\n"
+    "CONTROLS\n"
+    "  [Space]   Play / Pause\n"
+    "  [← / →]   Step 1 frame\n"
+    "  [↑ / ↓]   Jump 10 frames\n"
+    "  [r]       Reset to start\n"
+    "  [z]       Toggle zones\n"
+    "  [f]       Cycle speed\n"
+    "  [Click]   Select driver\n"
+    "  [Esc]     Deselect"
 )
 
 
@@ -133,8 +167,11 @@ def _draw_stats(ax, frame: dict, horizon: float, selected: tuple | None = None) 
     ax.set_axis_off()
     dc = _count_drivers(frame)
     oc = _count_orders(frame)
+    tot = oc["completed"] + oc["cancelled"]
+    sr_str = f"{oc['completed'] / tot * 100:.1f}%" if tot > 0 else "0.0%"
     txt = _STATS_TEMPLATE.format(
         time=f"{frame['time']:.1f} / {horizon:.0f} min",
+        sr=sr_str,
         **dc, **oc,
     )
     if selected is not None:
@@ -143,7 +180,7 @@ def _draw_stats(ax, frame: dict, horizon: float, selected: tuple | None = None) 
     ax.text(
         0.05, 0.95, txt,
         transform=ax.transAxes,
-        fontsize=10,
+        fontsize=9,
         fontfamily="monospace",
         verticalalignment="top",
         bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5", edgecolor="#cccccc"),
@@ -172,11 +209,26 @@ def _draw_frame(
     lc = LineCollection(precomputed_segs, colors="#dddddd", linewidths=0.4, zorder=0)
     ax.add_collection(lc)
 
+    # Zones overlay if available
+    reloc_pts = getattr(recorder, "relocation_points", None)
+    if reloc_pts:
+        zx = [p[0] for p in reloc_pts]
+        zy = [p[1] for p in reloc_pts]
+        ax.scatter(
+            zx, zy, s=50, marker="s", c="#9c27b0", alpha=0.4,
+            edgecolors="white", linewidths=0.6, zorder=2,
+        )
+        for zi, (x, y) in enumerate(reloc_pts):
+            ax.text(
+                x, y, str(zi), fontsize=6, ha="center", va="center",
+                color="white", weight="bold", zorder=3,
+            )
+
     if frame["pending"]:
         px, py = zip(*frame["pending"])
         ax.scatter(
             px, py, s=20, facecolors="none", edgecolors="#d62728",
-            linewidths=0.8, zorder=2, label="pending",
+            linewidths=0.8, zorder=4,
         )
 
     if detailed:
@@ -194,7 +246,7 @@ def _draw_frame(
         color = STATUS_COLORS.get(status, "#333333")
         ax.scatter(
             xs, ys, s=40, c=color, edgecolors="white",
-            linewidths=0.3, zorder=5, label=STATUS_LABEL.get(status, str(status)),
+            linewidths=0.3, zorder=5,
         )
 
     if detailed:
@@ -221,8 +273,8 @@ def _draw_frame(
                 )
 
     ax.legend(
-        loc="upper left", fontsize=7, framealpha=0.9,
-        markerscale=1.0, ncol=2,
+        handles=_make_legend_handles(show_zones=bool(reloc_pts)),
+        loc="upper left", fontsize=7, framealpha=0.9, ncol=2,
     )
     ax.set_title(
         f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min",
@@ -240,28 +292,7 @@ def render_animation(
     figsize: Tuple[float, float] = (12, 7),
     dpi: int = 100,
 ) -> str:
-    """Render a recorded trajectory to an MP4 with a clean custom layout.
-
-    Parameters
-    ----------
-    recorder:
-        A :class:`TrajectoryRecorder` populated over one episode.
-    out_path:
-        Output file (.mp4 uses FFMpeg, .gif uses Pillow).
-    fps:
-        Frames per second.
-    detailed:
-        If True, draw driver IDs, street-level routes, and order
-        pickup/dropoff locations (debug/presentation mode).
-    figsize:
-        Matplotlib figure size (width, height).
-    dpi:
-        Output resolution.
-
-    Returns
-    -------
-    The path to the saved file.
-    """
+    """Render a recorded trajectory to an MP4 with a clean custom layout."""
     if not recorder.frames:
         raise ValueError("recorder has no frames; call snapshot() during the run.")
 
@@ -329,31 +360,21 @@ def _driver_info_text(did: str, d: dict, network) -> str:
 def interactive_view(
     recorder: TrajectoryRecorder,
     detailed: bool = True,
-    figsize: Tuple[float, float] = (14, 7),
+    figsize: Tuple[float, float] = (14, 8),
     dpi: int = 100,
 ) -> None:
     """Open an interactive matplotlib window to explore the episode.
 
-    Controls
-    --------
-    Space       play / pause
-    Right       step one frame forward
-    Left        step one frame backward
-    Click       select a driver (highlights route + shows info)
-    Escape      deselect current driver
-    r           reset to frame 0
-    q / close   quit
-
-    Parameters
-    ----------
-    recorder:
-        A :class:`TrajectoryRecorder` populated over one episode.
-    detailed:
-        If True, show driver IDs and street-level routes for all drivers.
-    figsize:
-        Matplotlib figure size.
-    dpi:
-        Display resolution.
+    Controls:
+      Space       play / pause / replay
+      Right/Left  step 1 frame forward/backward
+      Up/Down     jump 10 frames forward/backward
+      r           reset to start (frame 0)
+      z           toggle zone overlay
+      f           cycle playback speed (1x, 2x, 4x, 0.5x)
+      Click       select a vehicle to inspect
+      Escape      deselect current vehicle
+      q / close   quit
     """
     if not recorder.frames:
         raise ValueError("recorder has no frames; call snapshot() during the run.")
@@ -362,6 +383,7 @@ def interactive_view(
     network = recorder.network
     precomputed_segs, bounds = _precompute_network_segments(network)
     lon0, lat0, lon1, lat1 = bounds
+    reloc_pts = getattr(recorder, "relocation_points", None)
 
     state = {
         "idx": 0,
@@ -369,15 +391,49 @@ def interactive_view(
         "selected_id": None,
         "all_drivers": [],
         "scatter": None,
+        "show_zones": bool(reloc_pts),
+        "speed_idx": 0,
+        "speeds": [100, 50, 25, 200],
+        "speed_labels": ["1x", "2x", "4x", "0.5x"],
+        "updating_slider": False,
+        "timer": None,
+        "widgets": [],
     }
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
-    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.05)
-    ax_map = fig.add_subplot(gs[0])
-    ax_stats = fig.add_subplot(gs[1])
 
-    def _draw(idx: int):
-        """Redraw the entire frame."""
+    # Main viewports
+    ax_map = fig.add_axes([0.05, 0.16, 0.65, 0.80])
+    ax_stats = fig.add_axes([0.72, 0.16, 0.25, 0.80])
+
+    # Scrubber slider
+    ax_slider = fig.add_axes([0.08, 0.085, 0.60, 0.03])
+    slider = Slider(
+        ax_slider, "Time", 0, len(frames) - 1,
+        valinit=0, valstep=1, valfmt="%0.0f",
+        color="#1f77b4",
+    )
+
+    # Control buttons
+    ax_btn_reset = fig.add_axes([0.08, 0.025, 0.07, 0.04])
+    ax_btn_prev = fig.add_axes([0.16, 0.025, 0.07, 0.04])
+    ax_btn_play = fig.add_axes([0.24, 0.025, 0.08, 0.04])
+    ax_btn_next = fig.add_axes([0.33, 0.025, 0.07, 0.04])
+    ax_btn_speed = fig.add_axes([0.41, 0.025, 0.08, 0.04])
+    ax_btn_zones = fig.add_axes([0.50, 0.025, 0.09, 0.04])
+
+    btn_reset = Button(ax_btn_reset, "Reset")
+    btn_prev = Button(ax_btn_prev, "« -10s")
+    btn_play = Button(ax_btn_play, "Play")
+    btn_next = Button(ax_btn_next, "» +10s")
+    btn_speed = Button(ax_btn_speed, "Speed: 1x")
+    btn_zones = Button(ax_btn_zones, f"Zones: {'ON' if state['show_zones'] else 'OFF'}")
+
+    # Retain references on state so garbage collection never kills them
+    state["widgets"] = [slider, btn_reset, btn_prev, btn_play, btn_next, btn_speed, btn_zones]
+
+    def _draw(idx: int, update_slider: bool = True):
+        """Redraw map, drivers, zones, and statistics."""
         ax_map.clear()
         ax_stats.clear()
 
@@ -389,14 +445,30 @@ def interactive_view(
         ax_map.set_xticks([])
         ax_map.set_yticks([])
 
+        # Road network
         lc = LineCollection(precomputed_segs, colors="#dddddd", linewidths=0.4, zorder=0)
         ax_map.add_collection(lc)
 
+        # Zones overlay
+        if state["show_zones"] and reloc_pts:
+            zx = [p[0] for p in reloc_pts]
+            zy = [p[1] for p in reloc_pts]
+            ax_map.scatter(
+                zx, zy, s=50, marker="s", c="#9c27b0", alpha=0.45,
+                edgecolors="white", linewidths=0.6, zorder=2,
+            )
+            for zi, (x, y) in enumerate(reloc_pts):
+                ax_map.text(
+                    x, y, str(zi), fontsize=6, ha="center", va="center",
+                    color="white", weight="bold", zorder=3,
+                )
+
+        # Pending orders
         if frame["pending"]:
             px, py = zip(*frame["pending"])
             ax_map.scatter(
-                px, py, s=20, facecolors="none", edgecolors="#d62728",
-                linewidths=0.8, zorder=2, label="pending",
+                px, py, s=22, facecolors="none", edgecolors="#d62728",
+                linewidths=1.0, zorder=4,
             )
 
         if detailed:
@@ -410,6 +482,7 @@ def interactive_view(
         if not all_drivers:
             ax_map.set_title(f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min")
             _draw_stats(ax_stats, frame, recorder.horizon, None)
+            fig.canvas.draw_idle()
             return
 
         xs = [d["location"][0] for _, d in all_drivers]
@@ -420,6 +493,7 @@ def interactive_view(
         sel_d = frame["drivers"].get(sel_did) if sel_did else None
         if sel_did and sel_d is None:
             state["selected_id"] = None
+
         edge_colors = ["white"] * len(all_drivers)
         sizes = [80] * len(all_drivers)
         if sel_did is not None and sel_d is not None:
@@ -435,25 +509,26 @@ def interactive_view(
         )
         state["scatter"] = scatter
 
+        # Highlight selected driver path
         if sel_d is not None and sel_d["task_points"]:
             first_task = sel_d["task_points"][0]
             task_kind = first_task[0]
             task_coord = first_task[2]
             TASK_STYLE = {
-                "pickup":  ("#1f77b4", "^"),
-                "dropoff": ("#2ca02c", "v"),
+                "pickup":   ("#1f77b4", "^"),
+                "dropoff":  ("#2ca02c", "v"),
                 "relocate": ("#ff7f0e", "s"),
             }
             leg_color, dest_marker = TASK_STYLE.get(task_kind, ("#ff00ff", "o"))
             ax_map.plot(
                 [sel_d["location"][0], task_coord[0]],
                 [sel_d["location"][1], task_coord[1]],
-                color=leg_color, linewidth=1.2, alpha=0.9, zorder=4,
+                color=leg_color, linewidth=1.5, alpha=0.9, zorder=6,
                 linestyle="--",
             )
             ax_map.scatter(
-                *task_coord, s=90, c="#d62728", edgecolors="white",
-                linewidths=1.0, zorder=6, marker="o",
+                *task_coord, s=100, c="#d62728", edgecolors="white",
+                linewidths=1.2, zorder=7, marker=dest_marker,
             )
 
         if detailed:
@@ -481,51 +556,122 @@ def interactive_view(
                     linestyle="--",
                 )
 
-        ax_map.legend(loc="upper left", fontsize=7, framealpha=0.9, markerscale=1.0, ncol=2)
-        play_state = "\u25b6" if state["playing"] else "\u275a\u275a"
+        legend_handles = _make_legend_handles(show_zones=bool(state["show_zones"] and reloc_pts))
+        ax_map.legend(handles=legend_handles, loc="upper left", fontsize=7.5, framealpha=0.9, ncol=2)
+
+        status_str = "PLAY" if state["playing"] else "PAUSE"
+        speed_lbl = state["speed_labels"][state["speed_idx"]]
         sel_label = f"  |  selected: {sel_did}" if sel_did is not None else ""
         ax_map.set_title(
-            f"{play_state}  t = {frame['time']:.1f} / {recorder.horizon:.0f} min"
-            f"  (frame {idx + 1}/{len(frames)}){sel_label}",
+            f"[{status_str}]  t = {frame['time']:.1f} / {recorder.horizon:.0f} min"
+            f"  (frame {idx + 1}/{len(frames)})  [{speed_lbl}]{sel_label}",
             fontsize=10, pad=4,
         )
 
         sel_tuple = (sel_did, sel_d) if sel_did and sel_d else None
         _draw_stats(ax_stats, frame, recorder.horizon, sel_tuple)
 
+        if update_slider:
+            state["updating_slider"] = True
+            slider.set_val(idx)
+            state["updating_slider"] = False
+
         fig.canvas.draw_idle()
 
+    # Hardware timer via canvas: eliminates FuncAnimation generator exhaustion & GC drops
+    timer = fig.canvas.new_timer(interval=state["speeds"][0])
+    state["timer"] = timer
+
+    def _on_timer():
+        if not state["playing"]:
+            return
+        if state["idx"] < len(frames) - 1:
+            state["idx"] += 1
+            _draw(state["idx"], update_slider=True)
+        else:
+            # Reached end: stop playback cleanly
+            state["playing"] = False
+            timer.stop()
+            btn_play.label.set_text("Play")
+            _draw(state["idx"], update_slider=True)
+
+    timer.add_callback(_on_timer)
+
+    def _toggle_play(event=None):
+        if state["idx"] >= len(frames) - 1:
+            state["idx"] = 0
+        state["playing"] = not state["playing"]
+        if state["playing"]:
+            btn_play.label.set_text("Pause")
+            timer.start()
+        else:
+            btn_play.label.set_text("Play")
+            timer.stop()
+        _draw(state["idx"], update_slider=True)
+
+    def _reset(event=None):
+        state["playing"] = False
+        timer.stop()
+        btn_play.label.set_text("Play")
+        state["idx"] = 0
+        state["selected_id"] = None
+        _draw(0, update_slider=True)
+
+    def _step_prev(event=None, step: int = 10):
+        state["playing"] = False
+        timer.stop()
+        btn_play.label.set_text("▶ Play")
+        state["idx"] = max(0, state["idx"] - step)
+        _draw(state["idx"], update_slider=True)
+
+    def _step_next(event=None, step: int = 10):
+        state["playing"] = False
+        timer.stop()
+        btn_play.label.set_text("▶ Play")
+        state["idx"] = min(len(frames) - 1, state["idx"] + step)
+        _draw(state["idx"], update_slider=True)
+
+    def _toggle_speed(event=None):
+        state["speed_idx"] = (state["speed_idx"] + 1) % len(state["speeds"])
+        new_int = state["speeds"][state["speed_idx"]]
+        lbl = state["speed_labels"][state["speed_idx"]]
+        btn_speed.label.set_text(f"Speed: {lbl}")
+        timer.interval = new_int
+        _draw(state["idx"], update_slider=False)
+
+    def _toggle_zones(event=None):
+        state["show_zones"] = not state["show_zones"]
+        btn_zones.label.set_text(f"Zones: {'ON' if state['show_zones'] else 'OFF'}")
+        _draw(state["idx"], update_slider=False)
+
+    def _on_slider(val):
+        if state["updating_slider"]:
+            return
+        target = int(round(val))
+        target = max(0, min(target, len(frames) - 1))
+        state["idx"] = target
+        _draw(target, update_slider=False)
+
     def _on_key(event):
-        src = state.get("ani_event_source")
         if event.key == " ":
-            state["playing"] = not state["playing"]
-            if src is not None:
-                if state["playing"]:
-                    src.start()
-                else:
-                    src.stop()
+            _toggle_play()
         elif event.key == "right":
-            state["playing"] = False
-            if src is not None:
-                src.stop()
-            state["idx"] = min(state["idx"] + 1, len(frames) - 1)
-            _draw(state["idx"])
+            _step_next(step=1)
         elif event.key == "left":
-            state["playing"] = False
-            if src is not None:
-                src.stop()
-            state["idx"] = max(state["idx"] - 1, 0)
-            _draw(state["idx"])
+            _step_prev(step=1)
+        elif event.key == "up":
+            _step_next(step=10)
+        elif event.key == "down":
+            _step_prev(step=10)
+        elif event.key == "r":
+            _reset()
+        elif event.key == "z":
+            _toggle_zones()
+        elif event.key in ("f", "s"):
+            _toggle_speed()
         elif event.key == "escape":
             state["selected_id"] = None
-            _draw(state["idx"])
-        elif event.key == "r":
-            state["idx"] = 0
-            state["selected_id"] = None
-            state["playing"] = False
-            if src is not None:
-                src.stop()
-            _draw(0)
+            _draw(state["idx"], update_slider=False)
 
     def _on_click(event):
         if event.mouseevent.inaxes != ax_map:
@@ -541,31 +687,31 @@ def interactive_view(
                 state["selected_id"] = None
             else:
                 state["selected_id"] = did
-            _draw(state["idx"])
+            _draw(state["idx"], update_slider=False)
 
-    def _animate(_frame_idx):
-        if state["playing"]:
-            state["idx"] = min(state["idx"] + 1, len(frames) - 1)
-            if state["idx"] >= len(frames) - 1:
-                state["playing"] = False
-                src = state.get("ani_event_source")
-                if src is not None:
-                    src.stop()
-        _draw(state["idx"])
+    def _on_close(event):
+        state["playing"] = False
+        if timer is not None:
+            timer.stop()
 
+    slider.on_changed(_on_slider)
+    btn_reset.on_clicked(_reset)
+    btn_prev.on_clicked(lambda e: _step_prev(e, 10))
+    btn_play.on_clicked(_toggle_play)
+    btn_next.on_clicked(lambda e: _step_next(e, 10))
+    btn_speed.on_clicked(_toggle_speed)
+    btn_zones.on_clicked(_toggle_zones)
+
+    fig.canvas.mpl_connect("close_event", _on_close)
     fig.canvas.mpl_connect("key_press_event", _on_key)
     fig.canvas.mpl_connect("pick_event", _on_click)
 
-    ani = animation.FuncAnimation(
-        fig, _animate, frames=len(frames), interval=100, repeat=False,
-    )
-    state["ani_event_source"] = ani.event_source
-    ani.event_source.stop()
-
-    _draw(0)
+    _draw(0, update_slider=True)
     try:
         plt.show()
     except KeyboardInterrupt:
         pass
     finally:
+        if timer is not None:
+            timer.stop()
         plt.close(fig)

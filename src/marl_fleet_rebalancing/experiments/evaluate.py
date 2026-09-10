@@ -1,0 +1,263 @@
+"""Evaluation and visual playback tool for trained IPPO / MAPPO policies.
+
+Usage:
+    # 1. Evaluate a trained checkpoint over 5 evaluation seeds:
+    uv run python -m marl_fleet_rebalancing.experiments.evaluate \
+        --checkpoint runs/ippo-S0-base-bandra-seed0-.../checkpoint.pt \
+        --episodes 5
+
+    # 2. Render an MP4 animation of the policy in action:
+    uv run python -m marl_fleet_rebalancing.experiments.evaluate \
+        --checkpoint runs/ippo-S0-base-bandra-seed0-.../checkpoint.pt \
+        --output policy_rollout.mp4
+
+    # 3. Open the interactive GUI viewer:
+    uv run python -m marl_fleet_rebalancing.experiments.evaluate \
+        --checkpoint runs/ippo-S0-base-bandra-seed0-.../checkpoint.pt -i
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from marl_fleet_rebalancing.agents.ippo import IPPO, IPPOConfig
+from marl_fleet_rebalancing.agents.mappo import MAPPO, MAPPOConfig
+from marl_fleet_rebalancing.config import BandraConfig, EnvConfig, NYCConfig
+from marl_fleet_rebalancing.env import RideGymAEC
+from marl_fleet_rebalancing.networks.encoder import obs_dim, obs_to_vector
+from marl_fleet_rebalancing.visualization import interactive_view, render_animation
+from ride_gym.visualize import TrajectoryRecorder
+
+
+def load_trained_policy(checkpoint_path: Path) -> tuple[IPPO | MAPPO, dict[str, Any], RideGymAEC]:
+    """Load policy weights and instantiate the environment from run config."""
+    run_dir = checkpoint_path.parent
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing config.json in {run_dir}. Cannot infer environment layout.")
+
+    with open(config_path) as f:
+        run_manifest = json.load(f)
+
+    algo = run_manifest.get("algo", "ippo")
+    scenario_id = run_manifest.get("scenario_id", "")
+    is_nyc = "nyc" in scenario_id.lower() or "nyc" in str(run_dir).lower()
+
+    # Reconstruct EnvConfig
+    env_cfg_dict = run_manifest.get("env_config", {})
+    if is_nyc:
+        env_cfg = NYCConfig(**{k: v for k, v in env_cfg_dict.items() if hasattr(NYCConfig, k)})
+    else:
+        env_cfg = BandraConfig(**{k: v for k, v in env_cfg_dict.items() if hasattr(BandraConfig, k)})
+
+    # Build environment
+    eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
+    eval_env.reset(seed=run_manifest.get("seed", 42))
+
+    any_agent = eval_env.possible_agents[0]
+    observation_dim = obs_dim(eval_env.observation_space(any_agent))
+    action_dim = eval_env._action_dim
+    use_state = algo == "mappo"
+    state_dim = len(eval_env.state()) if use_state else None
+
+    # Reconstruct Learner
+    if use_state:
+        algo_cfg = MAPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(MAPPOConfig, k)})
+        learner: IPPO | MAPPO = MAPPO(
+            observation_dim=observation_dim,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            config=algo_cfg,
+        )
+    else:
+        algo_cfg = IPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(IPPOConfig, k)})
+        learner = IPPO(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            config=algo_cfg,
+        )
+
+    # Load weights
+    weights = torch.load(checkpoint_path, map_location=learner.device, weights_only=True)
+    learner.load_state_dict(weights)
+    return learner, run_manifest, eval_env
+
+
+def evaluate_policy(
+    learner: IPPO | MAPPO,
+    env: RideGymAEC,
+    num_episodes: int = 5,
+    base_seed: int = 1000,
+    deterministic: bool = True,
+    record_first_episode: bool = False,
+) -> tuple[list[dict[str, float]], TrajectoryRecorder | None]:
+    """Run evaluation episodes over fresh seeds and record performance metrics."""
+    recorder = TrajectoryRecorder() if record_first_episode else None
+
+    episode_results: list[dict[str, float]] = []
+
+    for ep in range(num_episodes):
+        seed = base_seed + ep
+        env.reset(seed=seed)
+        should_record = recorder is not None and ep == 0
+
+        acts_idle = 0
+        acts_dispatch = 0
+        acts_relocate = 0
+        total_reward = 0.0
+        last_time = env.env.time
+
+        if should_record:
+            if not hasattr(recorder, "relocation_points"):
+                recorder.relocation_points = list(getattr(env.env, "relocation_points", []))
+            recorder.snapshot(env.env)
+
+        while env.agents and not env._terminated:
+            agent = env.agent_selection
+            _obs, reward, term, trunc, _info = env.last()
+            total_reward += float(reward)
+
+            if term or trunc:
+                env.step(None)
+                continue
+
+            obs = env.observe(agent)
+            obs_vec = obs_to_vector(obs)
+            mask = env.action_mask(agent)
+
+            action, _logprob, _val = learner.act(
+                obs_vec[None, :], mask[None, :], deterministic=deterministic,
+            )
+            act_val = int(action[0])
+
+            if act_val == 0:
+                acts_idle += 1
+            elif 1 <= act_val <= env._max_pending:
+                acts_dispatch += 1
+            else:
+                acts_relocate += 1
+
+            env.step(act_val)
+
+            if should_record and env.env.time > last_time:
+                recorder.snapshot(env.env)
+                last_time = env.env.time
+
+        # Harvest final episode KPIs
+        kpi = env.kpi_summary()
+        total_acts = max(acts_idle + acts_dispatch + acts_relocate, 1)
+        sr = float(kpi["served"]) / max(float(kpi["served"]) + float(kpi["cancelled"]), 1.0)
+
+        res = {
+            "episode": float(ep + 1),
+            "seed": float(seed),
+            "served": float(kpi["served"]),
+            "cancelled": float(kpi["cancelled"]),
+            "service_rate": sr,
+            "avg_wait_min": float(kpi["avg_wait"]),
+            "empty_km": float(kpi["empty_km"]),
+            "total_reward": total_reward,
+            "pct_dispatch": float(100.0 * acts_dispatch / total_acts),
+            "pct_relocate": float(100.0 * acts_relocate / total_acts),
+            "pct_idle": float(100.0 * acts_idle / total_acts),
+        }
+        episode_results.append(res)
+
+    return episode_results, recorder
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate a trained MARL rebalancing checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to checkpoint.pt file")
+    parser.add_argument("--episodes", type=int, default=5,
+                        help="Number of evaluation episodes (default: 5)")
+    parser.add_argument("--base-seed", type=int, default=1000,
+                        help="Base seed for evaluation episodes (default: 1000)")
+    parser.add_argument("--stochastic", action="store_true", default=False,
+                        help="Sample actions stochastically instead of greedy argmax")
+    parser.add_argument("-o", "--output", type=str, default=None,
+                        help="Output MP4 path to render animation (e.g. rollout.mp4)")
+    parser.add_argument("-i", "--interactive", action="store_true", default=False,
+                        help="Open interactive viewer for the evaluation episode")
+    args = parser.parse_args()
+
+    ckpt_path = Path(args.checkpoint)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
+
+    print(f"Loading policy from {ckpt_path}...")
+    learner, manifest, env = load_trained_policy(ckpt_path)
+    algo = manifest.get("algo", "unknown").upper()
+    scenario = manifest.get("scenario_id", "unknown")
+    print(f"Config loaded: Algo={algo} | Scenario={scenario} | Zones={env._num_zones} | Drivers={env._num_drivers}")
+
+    record_animation = args.output is not None or args.interactive
+    deterministic = not args.stochastic
+
+    print(f"\nRunning {args.episodes} evaluation episodes (deterministic={deterministic}, base_seed={args.base_seed})...")
+    results, recorder = evaluate_policy(
+        learner=learner,
+        env=env,
+        num_episodes=args.episodes,
+        base_seed=args.base_seed,
+        deterministic=deterministic,
+        record_first_episode=record_animation,
+    )
+
+    # Compute Aggregate Stats
+    served_vals = [r["served"] for r in results]
+    cancelled_vals = [r["cancelled"] for r in results]
+    sr_vals = [r["service_rate"] * 100 for r in results]
+    wait_vals = [r["avg_wait_min"] for r in results]
+    empty_vals = [r["empty_km"] for r in results]
+    reward_vals = [r["total_reward"] for r in results]
+    disp_vals = [r["pct_dispatch"] for r in results]
+    reloc_vals = [r["pct_relocate"] for r in results]
+
+    if args.episodes == 1:
+        r = results[0]
+        print("\n" + "=" * 60)
+        print(f"EVALUATION RESULT ({algo} on {scenario} | seed={int(r['seed'])})")
+        print("=" * 60)
+        print(f"  Served Orders:      {r['served']:.0f}")
+        print(f"  Cancelled Orders:   {r['cancelled']:.0f}")
+        print(f"  Service Rate:       {r['service_rate'] * 100:.1f}%")
+        print(f"  Avg Wait Time:      {r['avg_wait_min']:.2f} min")
+        print(f"  Empty Distance:     {r['empty_km']:.1f} km")
+        print(f"  Cumulative Reward:  {r['total_reward']:+.1f}")
+        print("=" * 60)
+    else:
+        print("\n" + "=" * 78)
+        print(f"EVALUATION SUMMARY ({algo} on {scenario} over {args.episodes} seeds)")
+        print("=" * 78)
+        print(f"{'Metric':<25} | {'Mean ± Std':<20} | {'Range [Min, Max]'}")
+        print("-" * 78)
+        print(f"{'Served Orders':<25} | {np.mean(served_vals):6.1f} ± {np.std(served_vals):<10.1f} | [{min(served_vals):.0f}, {max(served_vals):.0f}]")
+        print(f"{'Cancelled Orders':<25} | {np.mean(cancelled_vals):6.1f} ± {np.std(cancelled_vals):<10.1f} | [{min(cancelled_vals):.0f}, {max(cancelled_vals):.0f}]")
+        print(f"{'Service Rate (%)':<25} | {np.mean(sr_vals):6.1f}% ± {np.std(sr_vals):<9.1f}% | [{min(sr_vals):.1f}%, {max(sr_vals):.1f}%]")
+        print(f"{'Avg Waiting Time (min)':<25} | {np.mean(wait_vals):6.2f} ± {np.std(wait_vals):<10.2f} | [{min(wait_vals):.2f}, {max(wait_vals):.2f}]")
+        print(f"{'Empty Distance (km)':<25} | {np.mean(empty_vals):6.1f} ± {np.std(empty_vals):<10.1f} | [{min(empty_vals):.1f}, {max(empty_vals):.1f}]")
+        print(f"{'Cumulative Reward':<25} | {np.mean(reward_vals):6.1f} ± {np.std(reward_vals):<10.1f} | [{min(reward_vals):.1f}, {max(reward_vals):.1f}]")
+        print(f"{'Dispatch Actions (%)':<25} | {np.mean(disp_vals):6.1f}% ± {np.std(disp_vals):<9.1f}% | [{min(disp_vals):.1f}%, {max(disp_vals):.1f}%]")
+        print(f"{'Relocate Actions (%)':<25} | {np.mean(reloc_vals):6.1f}% ± {np.std(reloc_vals):<9.1f}% | [{min(reloc_vals):.1f}%, {max(reloc_vals):.1f}%]")
+        print("=" * 78)
+
+    if recorder is not None:
+        if args.interactive:
+            print("\nOpening interactive viewer...")
+            interactive_view(recorder, detailed=True)
+        elif args.output:
+            print(f"\nRendering {len(recorder.frames)} frames to {args.output}...")
+            render_animation(recorder, out_path=args.output, detailed=True)
+            print(f"Saved {args.output}")
+
+
+if __name__ == "__main__":
+    main()

@@ -57,6 +57,7 @@ def main() -> None:
     cfg = BandraConfig()
     env = build_env(cfg)
     rec = TrajectoryRecorder()
+    rec.relocation_points = list(getattr(env, "relocation_points", []))
     obs, info = env.reset(seed=cfg.seed)
     if args.policy == "heuristic":
         reset_baseline()

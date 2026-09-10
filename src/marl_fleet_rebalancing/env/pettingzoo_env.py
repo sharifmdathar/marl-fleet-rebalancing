@@ -144,6 +144,7 @@ class RideGymAEC(AECEnv):
 
         # Reward tracking (for computing the custom reward)
         self._prev_served: int = 0
+        self._episode_empty_m: float = 0.0
 
         # Per-turn agent-invariant caches, rebuilt after every env step
         self._pending_features = np.zeros(
@@ -358,6 +359,7 @@ class RideGymAEC(AECEnv):
 
         # Reset reward tracking
         self._prev_served = 0
+        self._episode_empty_m = 0.0
 
         self._rebuild_caches()
 
@@ -488,6 +490,7 @@ class RideGymAEC(AECEnv):
         for event in events.values():
             if event.get("is_empty_move", False):
                 empty_m += float(event.get("distance_moved", 0.0))
+        self._episode_empty_m += empty_m
         empty_km = empty_m / _M_PER_KM / max(cfg.empty_distance_norm_km, 1e-9)
 
         reward = (
@@ -556,14 +559,16 @@ class RideGymAEC(AECEnv):
 
         if done_flag:
             self._terminated = True
-            served, cancelled = self._kpi_counts()
+            kpis = self._kpi_counts()
             self.terminations = {a: True for a in self.agents}
             self.truncations = {a: False for a in self.agents}
             self.infos = {
                 a: {
                     "time": info.get("time", self.env.time),
-                    "served_total": served,
-                    "cancelled_total": cancelled,
+                    "served_total": int(kpis["served"]),
+                    "cancelled_total": int(kpis["cancelled"]),
+                    "avg_wait": kpis["avg_wait"],
+                    "empty_km": kpis["empty_km"],
                 }
                 for a in self.agents
             }
@@ -577,7 +582,7 @@ class RideGymAEC(AECEnv):
             self._actions_this_turn = {}
             self._turn_complete = False
 
-    def _kpi_counts(self) -> tuple[int, int]:
+    def _kpi_counts(self) -> dict[str, float]:
         from ride_gym.enums import OrderStatus
 
         served = sum(
@@ -588,7 +593,23 @@ class RideGymAEC(AECEnv):
             1 for o in self.env.orders.values()
             if o.status == OrderStatus.CANCELLED
         )
-        return served, cancelled
+        wait_times = [
+            float(o.pickup_time - o.request_time)
+            for o in self.env.orders.values()
+            if o.status == OrderStatus.COMPLETED and o.pickup_time is not None
+        ]
+        avg_wait = float(np.mean(wait_times)) if wait_times else 0.0
+        empty_km = float(self._episode_empty_m / _M_PER_KM)
+        return {
+            "served": float(served),
+            "cancelled": float(cancelled),
+            "avg_wait": avg_wait,
+            "empty_km": empty_km,
+        }
+
+    def kpi_summary(self) -> dict[str, float]:
+        """Return episode summary KPIs (served, cancelled, avg_wait, empty_km)."""
+        return self._kpi_counts()
 
     # -------------------------------------------------------------------- AEC
 

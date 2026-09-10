@@ -113,6 +113,10 @@ class MAPPO:
             "critic": self.critic.state_dict(),
         }
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.actor.load_state_dict(state_dict["actor"])
+        self.critic.load_state_dict(state_dict["critic"])
+
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         """PPO-clip update over one filled buffer. Returns loss metrics."""
         assert buffer.states is not None, (

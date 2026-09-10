@@ -4,9 +4,9 @@ Run (from repo root):
     uv run python -m marl_fleet_rebalancing.experiments.train \
         --env bandra --algo mappo --seed 0 --iterations 20
 
-Every run logs: full config (env + algo), seed(s), git commit hash, demand
-scenario ID, and per-iteration KPIs (AGENTS.md experiment rules). Checkpoints
-are written to the run dir but never committed (git-ignored).
+Every run logs: full config (env + algo), seed(s), demand scenario ID,
+and per-iteration KPIs (AGENTS.md experiment rules). Checkpoints are written
+to the run dir but never committed (git-ignored).
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import argparse
 import dataclasses
 import datetime as _dt
 import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +38,9 @@ class TrainConfig:
     iterations: int = 20           # PPO updates; each = rollout_episodes episodes
     scenario_id: str = "S0-base"   # demand scenario per docs/demand-shift.md
     out_root: Path = Path("runs")
+    run_name: str | None = None
+    checkpoint_interval: int = 10
+    verbose: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -47,16 +49,8 @@ class TrainConfig:
             "seed": self.seed,
             "iterations": self.iterations,
             "scenario_id": self.scenario_id,
+            "checkpoint_interval": self.checkpoint_interval,
         }
-
-
-def _git_hash() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True,
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
 
 
 def _episode_turns(cfg: EnvConfig) -> int:
@@ -104,14 +98,22 @@ def collect_rollout(
     episodes = 0
     served_total = 0
     cancelled_total = 0
+    empty_km_total = 0.0
+    wait_times_all: list[float] = []
+    acts_idle = 0
+    acts_dispatch = 0
+    acts_relocate = 0
     episode_ended = False  # an episode finished; KPIs not yet accounted
 
     while counts.min() < total_turns or env.agents:
         if not env.agents:
             if episode_ended:
-                served, cancelled = _episode_kpis(env)
-                served_total += served
-                cancelled_total += cancelled
+                kpi = env.kpi_summary()
+                served_total += int(kpi["served"])
+                cancelled_total += int(kpi["cancelled"])
+                empty_km_total += float(kpi["empty_km"])
+                if kpi["avg_wait"] > 0:
+                    wait_times_all.append(kpi["avg_wait"])
                 episodes += 1
                 episode_ended = False
             if counts.min() < total_turns:
@@ -131,6 +133,14 @@ def collect_rollout(
         obs_vec = obs_to_vector(obs)
         mask = env.action_mask(agent)
         action, logprob, decentral_value = learner.act(obs_vec[None, :], mask[None, :])
+        act_val = int(action[0])
+        if act_val == 0:
+            acts_idle += 1
+        elif 1 <= act_val <= env._max_pending:
+            acts_dispatch += 1
+        else:
+            acts_relocate += 1
+
         state_vec = env.state() if use_state else None
         if use_state:
             value = float(learner.value(state_vec[None, :])[0])
@@ -139,63 +149,72 @@ def collect_rollout(
         turn = int(counts[slot])
         buffer.store(
             slot, turn, obs_vec, mask,
-            int(action[0]), float(logprob[0]), value,
+            act_val, float(logprob[0]), value,
             state=state_vec,
         )
         counts[slot] += 1
         pending[agent] = (slot, turn)
-        env.step(int(action[0]))
+        env.step(act_val)
 
     # The rollout ends inside the final episode's termination dance; account
     # its KPIs now (env still holds the finished episode's orders until reset).
     if episode_ended:
-        served, cancelled = _episode_kpis(env)
-        served_total += served
-        cancelled_total += cancelled
+        kpi = env.kpi_summary()
+        served_total += int(kpi["served"])
+        cancelled_total += int(kpi["cancelled"])
+        empty_km_total += float(kpi["empty_km"])
+        if kpi["avg_wait"] > 0:
+            wait_times_all.append(kpi["avg_wait"])
         episodes += 1
+
+    total_acts = max(acts_idle + acts_dispatch + acts_relocate, 1)
+    avg_wait = float(np.mean(wait_times_all)) if wait_times_all else 0.0
 
     return {
         "episodes": episodes,
         "served_total": served_total,
         "cancelled_total": cancelled_total,
+        "empty_km_total": empty_km_total,
+        "avg_wait": avg_wait,
+        "pct_dispatch": float(100.0 * acts_dispatch / total_acts),
+        "pct_relocate": float(100.0 * acts_relocate / total_acts),
+        "pct_idle": float(100.0 * acts_idle / total_acts),
     }
 
 
-def _episode_kpis(env: RideGymAEC) -> tuple[int, int]:
-    """KPIs of the episode that just ended (from the env's final order set)."""
-    from ride_gym.enums import OrderStatus
-
-    served = sum(
-        1 for o in env.env.orders.values() if o.status == OrderStatus.COMPLETED
-    )
-    cancelled = sum(
-        1 for o in env.env.orders.values() if o.status == OrderStatus.CANCELLED
-    )
-    return served, cancelled
+def _episode_kpis(env: RideGymAEC) -> dict[str, float]:
+    """KPIs of the episode that just ended."""
+    return env.kpi_summary()
 
 
 def train(
     train_cfg: TrainConfig,
     env_name: str,
     nyc_window_limit: int | None,
-    algo_name: str = "ippo",
+    algo_name: str,
 ) -> Path:
-    run_id = (
-        f"{algo_name}-{train_cfg.scenario_id}-seed{train_cfg.seed}-"
-        f"{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    )
+    env, env_cfg, scenario_id = _make_env(env_name, train_cfg.seed, nyc_window_limit)
+    train_cfg.env_config = env_cfg
+    train_cfg.scenario_id = scenario_id
+    env.reset(seed=train_cfg.seed)
+
+    # ---- setup directory structure ----
+    if train_cfg.run_name:
+        run_id = train_cfg.run_name
+    else:
+        timestamp = _dt.datetime.now().strftime("%m%d-%H%M%S")
+        run_id = f"{algo_name}-{env_name}-{timestamp}"
     run_dir = train_cfg.out_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    env, env_cfg, scenario = _make_env(env_name, train_cfg.seed, nyc_window_limit)
-    train_cfg.scenario_id = scenario
-    env.reset(seed=train_cfg.seed)
+    # ---- policy & networks ----
     torch.manual_seed(train_cfg.seed)
-    np.random.seed(train_cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(train_cfg.seed)
 
     any_agent = env.possible_agents[0]
     observation_dim = obs_dim(env.observation_space(any_agent))
-    action_dim = env.action_space(any_agent).n
+    action_dim = env._action_dim
     use_state = algo_name == "mappo"
     state_dim = len(env.state()) if use_state else None
     if use_state:
@@ -214,11 +233,10 @@ def train(
             config=train_cfg.algo_config,
         )
 
-    # ---- run manifest: config + seed + git hash + scenario (AGENTS rules) --
+    # ---- run manifest: config + seed + scenario (AGENTS rules) -----------
     manifest = {
         **train_cfg.to_dict(),
         "algo": algo_name,
-        "git_commit": _git_hash(),
         "torch_device": str(learner.device),
         "num_zones": env._num_zones,
         "num_drivers": env._num_drivers,
@@ -242,34 +260,52 @@ def train(
     print(f"[train] run={run_id} device={learner.device} zones={env._num_zones} "
           f"obs={observation_dim} actions={action_dim} "
           f"rollout_turns={total_turns}")
-    print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('algo', 'scenario_id', 'seed', 'git_commit')})}")
+    print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('algo', 'scenario_id', 'seed')})}")
 
     for it in range(1, train_cfg.iterations + 1):
         kpis = collect_rollout(env, learner, buffer, total_turns, use_state=use_state)
         losses = learner.update(buffer)
         ep = max(kpis["episodes"], 1)
+        sr = kpis["served_total"] / max(kpis["served_total"] + kpis["cancelled_total"], 1)
         record = {
             "iteration": it,
             "episodes": kpis["episodes"],
             "mean_reward_per_turn": float(buffer.rewards[buffer.filled].mean()),
-            "service_rate": kpis["served_total"]
-            / max(kpis["served_total"] + kpis["cancelled_total"], 1),
-            "served_total": kpis["served_total"],
-            "cancelled_total": kpis["cancelled_total"],
+            "service_rate": sr,
+            "served_per_ep": kpis["served_total"] / ep,
+            "cancelled_per_ep": kpis["cancelled_total"] / ep,
+            "avg_wait_min": kpis["avg_wait"],
+            "empty_km_per_ep": kpis["empty_km_total"] / ep,
+            "pct_dispatch": kpis["pct_dispatch"],
+            "pct_relocate": kpis["pct_relocate"],
+            "pct_idle": kpis["pct_idle"],
             **{f"loss_{k}": v for k, v in losses.items()},
         }
         with open(metrics_path, "a") as f:
             f.write(json.dumps(record) + "\n")
-        print(
-            f"[iter {it:3d}] eps={kpis['episodes']} "
-            f"served={kpis['served_total']:5d} "
-            f"cancelled={kpis['cancelled_total']:6d} "
-            f"service_rate={record['service_rate']:.3f} "
-            f"R/turn={record['mean_reward_per_turn']:+.3f} "
-            f"V-loss={losses['value_loss']:.3f} "
-            f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
-        )
-        torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
+
+        if train_cfg.verbose:
+            print(
+                f"[iter {it:3d}/{train_cfg.iterations}] eps={ep} | "
+                f"served={record['served_per_ep']:5.1f}/ep (sr={sr*100:4.1f}%) | "
+                f"wait={kpis['avg_wait']:4.2f}m | "
+                f"empty={record['empty_km_per_ep']:5.1f}km | "
+                f"acts: disp={kpis['pct_dispatch']:4.1f}% reloc={kpis['pct_relocate']:4.1f}% idle={kpis['pct_idle']:4.1f}% | "
+                f"R/t={record['mean_reward_per_turn']:+.3f} "
+                f"V-loss={losses['value_loss']:6.2f} "
+                f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
+            )
+        else:
+            print(
+                f"[iter {it:3d}/{train_cfg.iterations}] "
+                f"served={record['served_per_ep']:4.0f}/ep (sr={sr*100:4.1f}%) | "
+                f"wait={kpis['avg_wait']:4.2f}m | "
+                f"empty={record['empty_km_per_ep']:5.1f}km | "
+                f"reward={record['mean_reward_per_turn']:+.2f}"
+            )
+
+        if it % train_cfg.checkpoint_interval == 0 or it == train_cfg.iterations:
+            torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
 
     print(f"[train] done -> {run_dir}")
     return run_dir
@@ -281,6 +317,18 @@ def main() -> None:
     parser.add_argument("--algo", choices=["ippo", "mappo"], default="ippo")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--name", "-n", type=str, default=None,
+                        help="Custom run directory name (default: {algo}-{env}-{timestamp})")
+    parser.add_argument("--checkpoint-interval", type=int, default=10,
+                        help="Save checkpoint every N iterations (default: 10)")
+    parser.add_argument("--verbose", action="store_true", default=False,
+                        help="Print internal RL statistics (entropy, value loss, EV)")
+    parser.add_argument("--alpha", type=float, default=None,
+                        help="Weight for waiting time penalty (default: 1.0)")
+    parser.add_argument("--beta", type=float, default=None,
+                        help="Weight for empty distance penalty (default: 0.1)")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="Weight for served orders reward (default: 5.0)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
@@ -293,12 +341,24 @@ def main() -> None:
     )
     if args.rollout_episodes is not None:
         algo_cfg.rollout_episodes = args.rollout_episodes
+
+    env_cfg = BandraConfig() if args.env == "bandra" else NYCConfig()
+    if args.alpha is not None:
+        env_cfg.alpha = args.alpha
+    if args.beta is not None:
+        env_cfg.beta = args.beta
+    if args.gamma is not None:
+        env_cfg.gamma = args.gamma
+
     train_cfg = TrainConfig(
-        env_config=BandraConfig() if args.env == "bandra" else NYCConfig(),
+        env_config=env_cfg,
         algo_config=algo_cfg,
         seed=args.seed,
         iterations=args.iterations,
         out_root=Path(args.out_root),
+        run_name=args.name,
+        checkpoint_interval=args.checkpoint_interval,
+        verbose=args.verbose,
     )
     train(train_cfg, args.env, args.nyc_window_limit, args.algo)
 
