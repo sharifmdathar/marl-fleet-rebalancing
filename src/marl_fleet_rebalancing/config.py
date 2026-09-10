@@ -33,7 +33,7 @@ class EnvConfig:
     allow_relocating_dispatch: bool = True
     # Maximum distance (km) from zone centroid for an order to be considered a
     # candidate for dispatch. Prevents cross-city deadheading (D15). None disables.
-    max_dispatch_radius_km: float | None = 2.0
+    max_dispatch_radius_km: float | None = 1.2
     # When True, relocation actions are restricted to adjacent zone neighbours (D15).
     neighbor_relocation_only: bool = True
 
@@ -109,7 +109,7 @@ class EnvConfig:
     alpha: float = 1.0   # weight for passenger waiting time
     beta: float = 0.1    # weight for empty repositioning distance (cost per empty km)
     gamma: float = 5.0   # weight for served demand (payoff per completed order)
-    cancel_penalty: float = 5.0  # penalty per cancelled order in zone (D15)
+    cancel_penalty: float = 2.0  # penalty per cancelled order in zone (D15)
     team_share: float = 0.2  # 80% local credit assignment + 20% team cooperation
 
     # --- Seeding ---

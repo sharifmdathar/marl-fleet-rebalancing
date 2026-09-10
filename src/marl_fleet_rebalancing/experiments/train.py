@@ -361,6 +361,8 @@ def main() -> None:
                         help="Weight for served orders reward (default: 5.0)")
     parser.add_argument("--team-share", type=float, default=None,
                         help="Weight for shared global reward vs local credit (default: 0.2)")
+    parser.add_argument("--cancel-penalty", type=float, default=None,
+                        help="Penalty per cancelled order in zone (default: 2.0)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
@@ -375,7 +377,7 @@ def main() -> None:
     parser.add_argument("--num-drivers", type=int, default=None,
                         help="Number of active drivers in the fleet (default: 30 for Bandra)")
     parser.add_argument("--max-dispatch-radius", type=float, default=None,
-                        help="Maximum pickup distance in km from zone centroid (default: 2.0 km)")
+                        help="Maximum pickup distance in km from zone centroid (default: 1.2 km)")
     parser.add_argument("--out-root", type=str, default="runs")
     args = parser.parse_args()
 
@@ -392,6 +394,8 @@ def main() -> None:
         env_cfg.beta = args.beta
     if args.gamma is not None:
         env_cfg.gamma = args.gamma
+    if args.cancel_penalty is not None:
+        env_cfg.cancel_penalty = args.cancel_penalty
     if args.team_share is not None:
         env_cfg.team_share = args.team_share
     if args.num_drivers is not None:
