@@ -42,13 +42,14 @@ stress-test on shifted distributions and plot degradation curves.
 - `src/marl_fleet_rebalancing/config.py` — `EnvConfig`, `NYCConfig`, `BandraConfig`
 - All parameters documented with source/rationale. No magic numbers.
 
-### Reward function
-- Implemented in `pettingzoo_env.py` (`_compute_reward` method)
-- Formula: `R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand`
-- Weights are config params (alpha, beta, gamma)
-- **Caveat:** empty_distance is approximate (uses status proxy, not exact distance tracking)
+### Reward function & Credit Assignment
+- Implemented in `pettingzoo_env.py` (`_compute_zone_rewards` method).
+- Formula per zone: $R_z = (1 - \text{team\_share}) \cdot R_{\text{local}, z} + \text{team\_share} \cdot \bar{R}_{\text{global}}$.
+- Local credit assignment: $+5.0$ to the zone that dispatched the completed order, $-0.1 \times \text{km}$ to the zone commanding empty movement (exact physical distance from RideGym events), and $-1.0 \times \text{wait}$ localized by order origin.
+- Default weights: $\alpha = 1.0, \beta = 0.1, \gamma = 5.0, \text{team\_share} = 0.2$.
 
 ### Docs
+- `docs/agent-mechanics.md` — Diagnostics of root issues, what agents observe, action mapping, and credit assignment.
 - `docs/decisions.md` — D1-D8 decisions logged
 - `docs/demand-shift.md` — S0-S6 shift taxonomy
 - `docs/literature.md` — gap sentence + adjacent work table
