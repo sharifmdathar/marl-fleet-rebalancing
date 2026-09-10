@@ -17,11 +17,31 @@ from typing import Any
 
 @dataclass
 class EnvConfig:
-    """Environment configuration shared across all experiments."""
+    """Environment configuration shared across all experiments.
+    
+    Version: 1.2 (D15: proximity cutoff, collision masking, neighbor relocation,
+                  volume-aware rewards, cancellation penalty, parameterized zone demand)
+    """
 
     # --- Fleet ---
     num_drivers: int = 50
     driver_capacity: int = 4
+
+    # --- Dispatch & Relocation policies (D14, D15) ---
+    # When True, zone agents can opportunistically dispatch orders to empty
+    # drivers in status RELOCATING in addition to IDLE drivers.
+    allow_relocating_dispatch: bool = True
+    # Maximum distance (km) from zone centroid for an order to be considered a
+    # candidate for dispatch. Prevents cross-city deadheading (D15). None disables.
+    max_dispatch_radius_km: float | None = 2.0
+    # When True, relocation actions are restricted to adjacent zone neighbours (D15).
+    neighbor_relocation_only: bool = True
+
+    # --- Parameterized Zone Demand (D15) ---
+    # Specific zone ID (0 .. num_zones - 1) to receive a dedicated share of demand.
+    target_zone: int | None = None
+    # Percentage (0.0 to 100.0) of total episode demand originating in target_zone.
+    target_zone_demand_pct: float | None = None
 
     # --- Simulation ---
     dt: float = 0.1             # minutes per step
@@ -89,6 +109,7 @@ class EnvConfig:
     alpha: float = 1.0   # weight for passenger waiting time
     beta: float = 0.1    # weight for empty repositioning distance (cost per empty km)
     gamma: float = 5.0   # weight for served demand (payoff per completed order)
+    cancel_penalty: float = 5.0  # penalty per cancelled order in zone (D15)
     team_share: float = 0.2  # 80% local credit assignment + 20% team cooperation
 
     # --- Seeding ---

@@ -112,24 +112,40 @@ def _count_orders(frame: dict) -> dict[str, int]:
     }
 
 
-def _make_legend_handles(show_zones: bool = False) -> list[Line2D]:
-    """Build permanent proxy handles for the map legend to prevent Matplotlib warnings."""
+def _make_legend_handles(
+    show_zones: bool = False,
+    show_od: bool = True,
+    has_target_zone: bool = False,
+) -> list[Line2D]:
+    """Build permanent proxy handles for the map legend with distinct shapes and colors."""
     handles = [
-        Line2D([0], [0], marker="o", color="w", label="Idle",
-               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.IDLE], markersize=7),
-        Line2D([0], [0], marker="o", color="w", label="To Pickup",
-               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_PICKUP], markersize=7),
-        Line2D([0], [0], marker="o", color="w", label="To Dropoff",
-               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_DROPOFF], markersize=7),
-        Line2D([0], [0], marker="o", color="w", label="Relocating",
-               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.RELOCATING], markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="Car (Idle)",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.IDLE], markeredgecolor="white", markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="Car (To Pickup)",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_PICKUP], markeredgecolor="white", markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="Car (With Rider)",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.TO_DROPOFF], markeredgecolor="white", markersize=7),
+        Line2D([0], [0], marker="o", color="w", label="Car (Relocating)",
+               markerfacecolor=STATUS_COLORS_DARK[DriverStatus.RELOCATING], markeredgecolor="white", markersize=7),
         Line2D([0], [0], marker="o", color="#d62728", fillstyle="none",
-               label="Pending Order", markersize=6, markeredgewidth=1.2),
+               label="Rider Waiting", markersize=7, markeredgewidth=1.8),
     ]
+    if show_od:
+        handles.extend([
+            Line2D([0], [0], marker="^", color="w", label="Pickup Point (▲)",
+                   markerfacecolor="#00e5ff", markeredgecolor="#006064", markersize=7.5),
+            Line2D([0], [0], marker="v", color="w", label="Dropoff Point (▼)",
+                   markerfacecolor="#76ff03", markeredgecolor="#1b5e20", markersize=7.5),
+        ])
     if show_zones:
         handles.append(
-            Line2D([0], [0], marker="s", color="w", label="Zone Centroid",
-                   markerfacecolor="#9c27b0", markersize=6)
+            Line2D([0], [0], marker="s", color="w", label="Zone Centroid (■)",
+                   markerfacecolor="#9c27b0", markeredgecolor="white", markersize=6)
+        )
+    if has_target_zone:
+        handles.append(
+            Line2D([0], [0], marker="o", color="#ffd700", fillstyle="none",
+                   label="Surge Zone (★)", markersize=8, markeredgewidth=2.0, linestyle="--")
         )
     return handles
 
@@ -223,18 +239,34 @@ def _draw_frame(
                 x, y, str(zi), fontsize=6, ha="center", va="center",
                 color="white", weight="bold", zorder=3,
             )
+        target_zi = getattr(recorder, "target_zone", None)
+        target_pct = getattr(recorder, "target_zone_pct", None)
+        if target_zi is not None and 0 <= target_zi < len(reloc_pts):
+            tx, ty = reloc_pts[target_zi]
+            pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else target_pct
+            pct_str = f" ({pct_val:.0f}% demand)" if pct_val else ""
+            ax.scatter(
+                [tx], [ty], s=350, marker="o", facecolors="none",
+                edgecolors="#ffd700", linewidths=2.2, linestyle="--", zorder=3,
+            )
+            ax.text(
+                tx, ty - 0.003, f"★ ZONE {target_zi}{pct_str}",
+                fontsize=7, ha="center", va="top", color="#ffd700",
+                weight="bold", zorder=4,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="#1e1e1e", edgecolor="#ffd700", alpha=0.9),
+            )
 
     if frame["pending"]:
         px, py = zip(*frame["pending"])
         ax.scatter(
-            px, py, s=20, facecolors="none", edgecolors="#d62728",
-            linewidths=0.8, zorder=4,
+            px, py, s=40, facecolors="none", edgecolors="#d62728",
+            linewidths=1.6, zorder=4,
         )
 
     if detailed:
         for oid, (orig, dest) in frame["order_od"].items():
-            ax.scatter(*orig, s=14, c="#1f77b4", zorder=3, marker="o")
-            ax.scatter(*dest, s=14, c="#2ca02c", zorder=3, marker="o")
+            ax.scatter(*orig, s=32, c="#00e5ff", edgecolors="#006064", linewidths=0.8, zorder=3, marker="^")
+            ax.scatter(*dest, s=32, c="#76ff03", edgecolors="#1b5e20", linewidths=0.8, zorder=3, marker="v")
 
     by_status: dict[DriverStatus, list] = {}
     for did, d in frame["drivers"].items():
@@ -245,8 +277,8 @@ def _draw_frame(
         ys = [d["location"][1] for _, d in items]
         color = STATUS_COLORS.get(status, "#333333")
         ax.scatter(
-            xs, ys, s=40, c=color, edgecolors="white",
-            linewidths=0.3, zorder=5,
+            xs, ys, s=55, c=color, edgecolors="white",
+            linewidths=0.8, zorder=5, marker="o",
         )
 
     if detailed:
@@ -272,13 +304,18 @@ def _draw_frame(
                     zorder=6,
                 )
 
+    has_target = bool(getattr(recorder, "target_zone", None) is not None)
     ax.legend(
-        handles=_make_legend_handles(show_zones=bool(reloc_pts)),
-        loc="upper left", fontsize=7, framealpha=0.9, ncol=2,
+        handles=_make_legend_handles(
+            show_zones=bool(reloc_pts),
+            show_od=detailed,
+            has_target_zone=has_target,
+        ),
+        loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=5, fontsize=6.8, framealpha=0.95,
     )
     ax.set_title(
         f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min",
-        fontsize=10, pad=4,
+        fontsize=10, y=1.13,
     )
 
     _draw_stats(stats_ax, frame, recorder.horizon)
@@ -289,7 +326,7 @@ def render_animation(
     out_path: str = "episode.mp4",
     fps: int = 10,
     detailed: bool = False,
-    figsize: Tuple[float, float] = (12, 7),
+    figsize: Tuple[float, float] = (13, 8),
     dpi: int = 100,
 ) -> str:
     """Render a recorded trajectory to an MP4 with a clean custom layout."""
@@ -299,7 +336,7 @@ def render_animation(
     precomputed_segs, bounds = _precompute_network_segments(recorder.network)
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
-    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.05)
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.08, top=0.87, bottom=0.05, left=0.04, right=0.98)
     ax_map = fig.add_subplot(gs[0])
     ax_stats = fig.add_subplot(gs[1])
 
@@ -400,11 +437,11 @@ def interactive_view(
         "widgets": [],
     }
 
-    fig = plt.figure(figsize=figsize, dpi=dpi)
+    fig = plt.figure(figsize=(figsize[0], max(figsize[1], 8.5)), dpi=dpi)
 
-    # Main viewports
-    ax_map = fig.add_axes([0.05, 0.16, 0.65, 0.80])
-    ax_stats = fig.add_axes([0.72, 0.16, 0.25, 0.80])
+    # Main viewports (top margin reserved for title and legend outside map grid)
+    ax_map = fig.add_axes([0.05, 0.16, 0.65, 0.70])
+    ax_stats = fig.add_axes([0.72, 0.16, 0.25, 0.76])
 
     # Scrubber slider
     ax_slider = fig.add_axes([0.08, 0.085, 0.60, 0.03])
@@ -462,19 +499,35 @@ def interactive_view(
                     x, y, str(zi), fontsize=6, ha="center", va="center",
                     color="white", weight="bold", zorder=3,
                 )
+            target_zi = getattr(recorder, "target_zone", None)
+            target_pct = getattr(recorder, "target_zone_pct", None)
+            if target_zi is not None and 0 <= target_zi < len(reloc_pts):
+                tx, ty = reloc_pts[target_zi]
+                pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else target_pct
+                pct_str = f" ({pct_val:.0f}% demand)" if pct_val else ""
+                ax_map.scatter(
+                    [tx], [ty], s=350, marker="o", facecolors="none",
+                    edgecolors="#ffd700", linewidths=2.5, linestyle="--", zorder=3,
+                )
+                ax_map.text(
+                    tx, ty - 0.003, f"★ ZONE {target_zi}{pct_str}",
+                    fontsize=8, ha="center", va="top", color="#ffd700",
+                    weight="bold", zorder=4,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#1e1e1e", edgecolor="#ffd700", alpha=0.9),
+                )
 
         # Pending orders
         if frame["pending"]:
             px, py = zip(*frame["pending"])
             ax_map.scatter(
-                px, py, s=22, facecolors="none", edgecolors="#d62728",
-                linewidths=1.0, zorder=4,
+                px, py, s=45, facecolors="none", edgecolors="#d62728",
+                linewidths=1.8, zorder=4,
             )
 
         if detailed:
             for oid, (orig, dest) in frame["order_od"].items():
-                ax_map.scatter(*orig, s=14, c="#1f77b4", zorder=3, marker="o")
-                ax_map.scatter(*dest, s=14, c="#2ca02c", zorder=3, marker="o")
+                ax_map.scatter(*orig, s=36, c="#00e5ff", edgecolors="#006064", linewidths=0.8, zorder=3, marker="^")
+                ax_map.scatter(*dest, s=36, c="#76ff03", edgecolors="#1b5e20", linewidths=0.8, zorder=3, marker="v")
 
         all_drivers = [(did, d) for did, d in frame["drivers"].items()]
         state["all_drivers"] = all_drivers
@@ -556,8 +609,20 @@ def interactive_view(
                     linestyle="--",
                 )
 
-        legend_handles = _make_legend_handles(show_zones=bool(state["show_zones"] and reloc_pts))
-        ax_map.legend(handles=legend_handles, loc="upper left", fontsize=7.5, framealpha=0.9, ncol=2)
+        has_target = bool(getattr(recorder, "target_zone", None) is not None)
+        legend_handles = _make_legend_handles(
+            show_zones=bool(state["show_zones"] and reloc_pts),
+            show_od=detailed,
+            has_target_zone=has_target,
+        )
+        ax_map.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=5,
+            fontsize=7.0,
+            framealpha=0.95,
+        )
 
         status_str = "PLAY" if state["playing"] else "PAUSE"
         speed_lbl = state["speed_labels"][state["speed_idx"]]
@@ -565,7 +630,7 @@ def interactive_view(
         ax_map.set_title(
             f"[{status_str}]  t = {frame['time']:.1f} / {recorder.horizon:.0f} min"
             f"  (frame {idx + 1}/{len(frames)})  [{speed_lbl}]{sel_label}",
-            fontsize=10, pad=4,
+            fontsize=10, y=1.13,
         )
 
         sel_tuple = (sel_did, sel_d) if sel_did and sel_d else None

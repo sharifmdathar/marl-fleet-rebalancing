@@ -35,17 +35,25 @@ from marl_fleet_rebalancing.visualization import interactive_view, render_animat
 from ride_gym.visualize import TrajectoryRecorder
 
 
-def load_trained_policy(checkpoint_path: Path) -> tuple[IPPO | MAPPO, dict[str, Any], RideGymAEC]:
-    """Load policy weights and instantiate the environment from run config."""
+def load_trained_policy(
+    checkpoint_path: Path,
+    target_zone: int | None = None,
+    target_zone_demand_pct: float | None = None,
+    num_drivers: int | None = None,
+    max_dispatch_radius_km: float | None = None,
+) -> tuple[IPPO | MAPPO, dict, RideGymAEC]:
+    """Load policy weights, run manifest, and an aligned evaluation env."""
     run_dir = checkpoint_path.parent
-    config_path = run_dir / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Missing config.json in {run_dir}. Cannot infer environment layout.")
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        manifest_path = run_dir / "config.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Neither manifest.json nor config.json found at {run_dir}")
 
-    with open(config_path) as f:
+    with open(manifest_path, "r", encoding="utf-8") as f:
         run_manifest = json.load(f)
 
-    algo = run_manifest.get("algo", "ippo")
+    algo = run_manifest.get("algo", "ippo").lower()
     scenario_id = run_manifest.get("scenario_id", "")
     is_nyc = "nyc" in scenario_id.lower() or "nyc" in str(run_dir).lower()
 
@@ -56,6 +64,18 @@ def load_trained_policy(checkpoint_path: Path) -> tuple[IPPO | MAPPO, dict[str, 
     else:
         env_cfg = BandraConfig(**{k: v for k, v in env_cfg_dict.items() if hasattr(BandraConfig, k)})
 
+    if target_zone is not None:
+        env_cfg.target_zone = target_zone
+    if target_zone_demand_pct is not None:
+        pct = target_zone_demand_pct
+        if pct > 1.0:
+            pct = pct / 100.0
+        env_cfg.target_zone_demand_pct = pct
+    if num_drivers is not None:
+        env_cfg.num_drivers = num_drivers
+    if max_dispatch_radius_km is not None:
+        env_cfg.max_dispatch_radius_km = max_dispatch_radius_km
+
     # Build environment
     eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
     eval_env.reset(seed=run_manifest.get("seed", 42))
@@ -64,7 +84,18 @@ def load_trained_policy(checkpoint_path: Path) -> tuple[IPPO | MAPPO, dict[str, 
     observation_dim = obs_dim(eval_env.observation_space(any_agent))
     action_dim = eval_env._action_dim
     use_state = algo == "mappo"
-    state_dim = len(eval_env.state()) if use_state else None
+
+    # Pre-inspect checkpoint weights to accurately size the critic (backward compatibility)
+    weights = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=True)
+
+    state_dim = None
+    if use_state:
+        if "critic" in weights and "trunk.0.weight" in weights["critic"]:
+            state_dim = weights["critic"]["trunk.0.weight"].shape[1]
+        else:
+            sample_obs = eval_env.observe(any_agent)
+            zone_loc_dim = len(sample_obs["zone_location"].ravel())
+            state_dim = len(eval_env.state()) + zone_loc_dim
 
     # Reconstruct Learner
     if use_state:
@@ -83,8 +114,6 @@ def load_trained_policy(checkpoint_path: Path) -> tuple[IPPO | MAPPO, dict[str, 
             config=algo_cfg,
         )
 
-    # Load weights
-    weights = torch.load(checkpoint_path, map_location=learner.device, weights_only=True)
     learner.load_state_dict(weights)
     return learner, run_manifest, eval_env
 
@@ -116,6 +145,9 @@ def evaluate_policy(
         if should_record:
             if not hasattr(recorder, "relocation_points"):
                 recorder.relocation_points = list(getattr(env.env, "relocation_points", []))
+            if not hasattr(recorder, "target_zone"):
+                recorder.target_zone = getattr(env._cfg, "target_zone", None)
+                recorder.target_zone_pct = getattr(env._cfg, "target_zone_demand_pct", None)
             recorder.snapshot(env.env)
 
         while env.agents and not env._terminated:
@@ -186,6 +218,14 @@ def main() -> None:
                         help="Output MP4 path to render animation (e.g. rollout.mp4)")
     parser.add_argument("-i", "--interactive", action="store_true", default=False,
                         help="Open interactive viewer for the evaluation episode")
+    parser.add_argument("--target-zone", type=int, default=None,
+                        help="Target zone ID for parameterized demand injection")
+    parser.add_argument("--target-zone-demand-pct", type=float, default=None,
+                        help="Fraction or percentage of total orders originating from target zone (e.g. 0.08 or 8 for 8%%)")
+    parser.add_argument("--num-drivers", type=int, default=None,
+                        help="Override number of active drivers in the fleet")
+    parser.add_argument("--max-dispatch-radius", type=float, default=None,
+                        help="Override maximum pickup distance in km from zone centroid")
     args = parser.parse_args()
 
     ckpt_path = Path(args.checkpoint)
@@ -193,7 +233,13 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
 
     print(f"Loading policy from {ckpt_path}...")
-    learner, manifest, env = load_trained_policy(ckpt_path)
+    learner, manifest, env = load_trained_policy(
+        ckpt_path,
+        target_zone=args.target_zone,
+        target_zone_demand_pct=args.target_zone_demand_pct,
+        num_drivers=args.num_drivers,
+        max_dispatch_radius_km=args.max_dispatch_radius,
+    )
     algo = manifest.get("algo", "unknown").upper()
     scenario = manifest.get("scenario_id", "unknown")
     print(f"Config loaded: Algo={algo} | Scenario={scenario} | Zones={env._num_zones} | Drivers={env._num_drivers}")

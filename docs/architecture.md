@@ -26,6 +26,7 @@ marl_fleet_rebalancing/
     train.py                         # IPPO/MAPPO training entry (--algo);
                                      # logs config/seed/git/scenario/KPIs
                                      # to runs/ (git-ignored)
+    evaluate.py                      # frozen policy multi-seed eval & MP4/interactive viewer
   networks/
     encoder.py                       # obs flattening + ZoneActorCritic MLP
                                      # + CentralizedCritic (MAPPO value head)

@@ -57,15 +57,25 @@ def _episode_turns(cfg: EnvConfig) -> int:
     return int(round(cfg.horizon / cfg.dt))
 
 
-def _make_env(name: str, seed: int, nyc_window_limit: int | None) -> tuple[RideGymAEC, EnvConfig, str]:
-    if name == "bandra":
-        env_cfg: EnvConfig = BandraConfig()
+def _make_env(
+    name: str,
+    seed: int,
+    nyc_window_limit: int | None,
+    base_env_cfg: EnvConfig | None = None,
+) -> tuple[RideGymAEC, EnvConfig, str]:
+    if base_env_cfg is not None:
+        env_cfg = base_env_cfg
+        scenario = "S0-base-bandra" if name == "bandra" else "S0-base-nyc-train"
+    elif name == "bandra":
+        env_cfg = BandraConfig()
         scenario = "S0-base-bandra"
     elif name == "nyc":
         env_cfg = NYCConfig(nyc_window_limit=nyc_window_limit)
         scenario = "S0-base-nyc-train"
     else:
         raise ValueError(f"Unknown env: {name!r} (expected 'bandra' or 'nyc')")
+    if env_cfg.target_zone is not None:
+        scenario += f"-target-zone-{env_cfg.target_zone}"
     env = RideGymAEC(config=env_cfg, seed=seed)
     return env, env_cfg, scenario
 
@@ -141,10 +151,12 @@ def collect_rollout(
         else:
             acts_relocate += 1
 
-        state_vec = env.state() if use_state else None
         if use_state:
+            zone_loc = obs["zone_location"].ravel()
+            state_vec = np.concatenate([env.state(), zone_loc]).astype(np.float32)
             value = float(learner.value(state_vec[None, :])[0])
         else:
+            state_vec = None
             value = float(decentral_value[0])
         turn = int(counts[slot])
         buffer.store(
@@ -194,7 +206,9 @@ def train(
     algo_name: str,
     resume_from: str | None = None,
 ) -> Path:
-    env, env_cfg, scenario_id = _make_env(env_name, train_cfg.seed, nyc_window_limit)
+    env, env_cfg, scenario_id = _make_env(
+        env_name, train_cfg.seed, nyc_window_limit, base_env_cfg=train_cfg.env_config
+    )
     train_cfg.env_config = env_cfg
     train_cfg.scenario_id = scenario_id
     env.reset(seed=train_cfg.seed)
@@ -217,7 +231,9 @@ def train(
     observation_dim = obs_dim(env.observation_space(any_agent))
     action_dim = env._action_dim
     use_state = algo_name == "mappo"
-    state_dim = len(env.state()) if use_state else None
+    sample_obs = env.observe(any_agent)
+    zone_loc_dim = len(sample_obs["zone_location"].ravel())
+    state_dim = (len(env.state()) + zone_loc_dim) if use_state else None
     if use_state:
         assert isinstance(train_cfg.algo_config, MAPPOConfig)
         learner: IPPO | MAPPO = MAPPO(
@@ -255,6 +271,8 @@ def train(
     if state_dim is not None:
         manifest["state_dim"] = state_dim
     with open(run_dir / "config.json", "w") as f:
+        json.dump(manifest, f, indent=2, default=str)
+    with open(run_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2, default=str)
 
     metrics_path = run_dir / "metrics.jsonl"
@@ -350,6 +368,14 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None,
                         help="Checkpoint.pt to warm-start from (fresh optimizer, "
                              "parent recorded in manifest)")
+    parser.add_argument("--target-zone", type=int, default=None,
+                        help="Target zone ID for parameterized demand injection")
+    parser.add_argument("--target-zone-demand-pct", type=float, default=None,
+                        help="Fraction or percentage of total orders originating from target zone (e.g. 0.08 or 8 for 8%%)")
+    parser.add_argument("--num-drivers", type=int, default=None,
+                        help="Number of active drivers in the fleet (default: 30 for Bandra)")
+    parser.add_argument("--max-dispatch-radius", type=float, default=None,
+                        help="Maximum pickup distance in km from zone centroid (default: 2.0 km)")
     parser.add_argument("--out-root", type=str, default="runs")
     args = parser.parse_args()
 
@@ -368,6 +394,17 @@ def main() -> None:
         env_cfg.gamma = args.gamma
     if args.team_share is not None:
         env_cfg.team_share = args.team_share
+    if args.num_drivers is not None:
+        env_cfg.num_drivers = args.num_drivers
+    if args.max_dispatch_radius is not None:
+        env_cfg.max_dispatch_radius_km = args.max_dispatch_radius
+    if args.target_zone is not None:
+        env_cfg.target_zone = args.target_zone
+    if args.target_zone_demand_pct is not None:
+        pct = args.target_zone_demand_pct
+        if pct > 1.0:
+            pct = pct / 100.0
+        env_cfg.target_zone_demand_pct = pct
 
     train_cfg = TrainConfig(
         env_config=env_cfg,

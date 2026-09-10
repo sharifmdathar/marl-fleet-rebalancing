@@ -181,7 +181,47 @@ Format: date, status, decision, why, what would change our mind.
 - Revisit if: advisor wants zone controllers to issue multi-driver actions per
   turn (current: one action per zone per turn) or per-driver sub-queues.
 
+## D14 — Opportunistic dispatch of relocating drivers
+- Date: 2026-09-10, Status: accepted
+- Decision:
+  - Empty drivers in transit (`DriverStatus.RELOCATING`) are now eligible to be
+    dispatched to pending passenger orders (`"orders"` action) by the zone
+    controller where the driver is currently located.
+  - In `_flush_turn`, purely `IDLE` drivers are prioritized first in the zone's
+    dispatch queue; `RELOCATING` drivers serve as opportunistic fallbacks.
+  - When a relocating driver is dispatched, RideGym natively cancels its
+    relocation target (`driver.relocation_target = None`) and redirects it to
+    passenger pickup.
+  - Relocation actions (`"relocate"`) still strictly consume purely `IDLE`
+    vehicles, preventing erratic redirection loops of vehicles in flight.
+  - Added `allow_relocating_dispatch: bool = True` to `EnvConfig` (config v1.1).
+- Why:
+  - Without this, an empty rebalancing vehicle passing right next to a newly
+    spawned passenger order was forbidden from serving it because its status
+    was `RELOCATING` rather than `IDLE`. This locked the local zone out of
+    dispatching, allowing distant idle vehicles from across the city to claim
+    the order instead, producing severe deadhead detours and delayed pickups.
+- Revisit if:
+  - Advisor prefers rebalancing legs to be strictly uninterruptible commitments.
+
+## D15 — Fleet rebalancing pipeline fixes & parameterized zone demand injection
+- Date: 2026-09-10, Status: accepted
+- Decision:
+  - Bumped config version to `v1.2` (`EnvConfig`).
+  - Added local dispatch radius cutoff (`max_dispatch_radius_km = 2.0` km): candidates beyond 2 km from zone centroid are excluded from pending order queues in `_rebuild_caches`, preventing cross-city deadheading assignments.
+  - Added intra-turn collision masking: orders claimed by prior agents within the current simulation turn (`_claimed_orders_this_turn`) are dynamically masked out (`False`) in `action_mask()` for subsequent agents.
+  - Added neighbor-only relocation pruning (`neighbor_relocation_only = True`): idle vehicle relocation actions are restricted to adjacent graph regions (`region_neighbours`), pruning 96% irrelevant action exploration.
+  - Replaced volume-blind waiting penalty with volume-aware wait penalty (`alpha * total_waiting_seconds / (max_pending * 60)`), scaling linearly with passenger backlog volume.
+  - Added explicit cancellation penalty (`cancel_penalty = 5.0` per cancelled order) charged directly to the origin zone controller upon order expiration.
+  - Agent-conditioned MAPPO Centralized Critic: concatenated the acting agent's normalized zone centroid (`[state, zone_location]`) into the centralized critic input, giving the shared critic spatial identity to distinguish 25 distinct local return trajectories.
+  - Added parameterized zone demand injection (`ParameterizedZoneOrderGenerator`): allows specifying `--target-zone <int>` and `--target-zone-demand-pct <float>` across training and evaluation CLI to inject arbitrary source demand fractions into designated zones at random intervals.
+- Why:
+  - Fixes the 6 critical operational and reinforcement learning flaws identified in the rebalancing pipeline, and satisfies the user requirement for targeted zone demand distribution control.
+- Revisit if:
+  - Regional geometries require adaptive radius thresholds or dynamic zone neighborhoods.
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>
 - Decision / Why / Revisit if:
+

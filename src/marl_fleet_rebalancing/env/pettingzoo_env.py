@@ -43,6 +43,7 @@ from ride_gym.order_generator import (
 from ride_gym.osmnx_network import OSMnxNetwork
 
 from marl_fleet_rebalancing.config import EnvConfig
+from marl_fleet_rebalancing.demand.generators import ParameterizedZoneOrderGenerator
 
 _M_PER_KM = 1000.0
 
@@ -83,11 +84,14 @@ class RideGymAEC(AECEnv):
 
         self._cfg = config
         self._num_drivers = config.num_drivers
+        self._seed = seed
+        self._rng = np.random.default_rng(seed)
 
         network = OSMnxNetwork(
             graph_path=config.network_path, speed_kmh=config.speed_kmh,
         )
-        order_gen = self._make_order_generator(config, network)
+        centroids = self._region_centroids(config, network)
+        order_gen = self._make_order_generator(config, network, centroids)
         # The region model (one zone per agent, D10) must live in the network's
         # real coordinate space: taxi-zone centroids for NYC, a grid over the
         # network bounds for synthetic maps (RideGym's default grid is built
@@ -104,11 +108,8 @@ class RideGymAEC(AECEnv):
             order_timeout=config.order_timeout,
             order_generator=order_gen,
             road_network=network,
-            relocation_centroids=self._region_centroids(config, network),
+            relocation_centroids=centroids,
         )
-
-        self._seed = seed
-        self._rng = np.random.default_rng(seed)
 
         self._geo_min: tuple[float, float] = (net_bounds[0], net_bounds[1])
         self._geo_range: tuple[float, float] = (
@@ -174,19 +175,24 @@ class RideGymAEC(AECEnv):
 
     # ------------------------------------------------------------------ setup
 
-    def _make_order_generator(self, config: EnvConfig, network: OSMnxNetwork):
+    def _make_order_generator(
+        self,
+        config: EnvConfig,
+        network: OSMnxNetwork,
+        centroids: list[tuple[float, float]] | None = None,
+    ):
         """Build the order source selected by ``config.order_source``."""
         if config.order_source == "synthetic":
-            return OSMnxOrderGenerator(
+            gen = OSMnxOrderGenerator(
                 network=network,
                 horizon=config.horizon,
                 num_orders=config.num_orders,
                 arrival="poisson",
                 max_party_size=config.max_party_size,
             )
-        if config.order_source == "nyc":
+        elif config.order_source == "nyc":
             paths = self._nyc_split_paths(config)
-            return MultiWindowNYCOrderGenerator(
+            gen = MultiWindowNYCOrderGenerator(
                 network=network,
                 order_paths=paths,
                 horizon=config.horizon,
@@ -196,18 +202,36 @@ class RideGymAEC(AECEnv):
                 max_party_size=config.nyc_max_party_size,
                 perturb_od_radius_km=config.nyc_perturb_od_radius_km,
             )
-        if config.order_source == "dataframe":
+        elif config.order_source == "dataframe":
             if config.dataframe is None:
                 raise ValueError(
                     "order_source='dataframe' requires config.dataframe "
                     "(pandas DataFrame with origin_x/origin_y/dest_x/dest_y/"
                     "request_time columns; endpoints must lie on the network)."
                 )
-            return DataFrameOrderGenerator(
+            gen = DataFrameOrderGenerator(
                 dataframe=config.dataframe,
                 columns=config.dataframe_columns,
             )
-        raise ValueError(f"Unknown order_source: {config.order_source!r}")
+        else:
+            raise ValueError(f"Unknown order_source: {config.order_source!r}")
+
+        # Parameterized zone demand injection (D15)
+        if (
+            config.target_zone is not None
+            and config.target_zone_demand_pct is not None
+            and centroids is not None
+        ):
+            gen = ParameterizedZoneOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                target_zone=config.target_zone,
+                target_zone_pct=config.target_zone_demand_pct,
+                seed=self._seed,
+            )
+
+        return gen
 
     @staticmethod
     def _nyc_split_paths(config: EnvConfig) -> list[str]:
@@ -351,12 +375,17 @@ class RideGymAEC(AECEnv):
             pending_origins = np.asarray(
                 [o["origin"] for o in self._current_pending], dtype=float
             ).reshape(-1, 2)
+            max_r_km = getattr(cfg, "max_dispatch_radius_km", None)
+            max_r_deg_sq = ((max_r_km / 111.0) ** 2) if (max_r_km is not None and max_r_km > 0) else None
+
             for zi in range(self._num_zones):
                 zc = cents[zi]
                 # Euclidean distance squared from zone centroid zi to order origins
                 dists_sq = np.sum((pending_origins - zc) ** 2, axis=1)
                 # Sort orders: primary key distance ascending, secondary key wait time descending
                 order_indices = list(range(len(self._current_pending)))
+                if max_r_deg_sq is not None:
+                    order_indices = [idx for idx in order_indices if dists_sq[idx] <= max_r_deg_sq]
                 order_indices.sort(
                     key=lambda idx: (
                         dists_sq[idx],
@@ -388,6 +417,9 @@ class RideGymAEC(AECEnv):
         # --- Per-zone fleet state -------------------------------------------
         zone_totals = np.zeros(self._num_zones, dtype=np.float32)
         zone_idle = np.zeros(self._num_zones, dtype=np.float32)
+        zone_dispatchable = np.zeros(self._num_zones, dtype=np.float32)
+        allow_reloc_disp = getattr(cfg, "allow_relocating_dispatch", True)
+
         for did in range(self._num_drivers):
             d = self._last_obs[did]["self"]
             zi = int(d.get("current_region", 0))
@@ -395,9 +427,14 @@ class RideGymAEC(AECEnv):
             zone_totals[zi] += 1.0
             if d["status"] == "idle":
                 zone_idle[zi] += 1.0
+                zone_dispatchable[zi] += 1.0
+            elif allow_reloc_disp and d["status"] == "relocating":
+                zone_dispatchable[zi] += 1.0
+
         self._zone_fleet_state[:, 0] = zone_totals / max(self._num_drivers, 1)
         self._zone_fleet_state[:, 1] = zone_idle / max(self._num_drivers, 1)
         self._zone_idle_counts = zone_idle.astype(np.int64)
+        self._zone_dispatchable_counts = zone_dispatchable.astype(np.int64)
 
     # ------------------------------------------------------------------ reset
 
@@ -421,6 +458,8 @@ class RideGymAEC(AECEnv):
         self._episode_empty_m = 0.0
         self._order_dispatcher.clear()
         self._driver_commander.clear()
+        self._claimed_orders_this_turn: set[int] = set()
+        self._seen_cancelled_ids: set[int] = set()
 
         self._rebuild_caches()
 
@@ -479,14 +518,22 @@ class RideGymAEC(AECEnv):
         if self._last_obs is None:
             return mask
         zone_idx = self._zone_int_id(agent)
+        # Dispatch orders: valid if there is at least one dispatchable driver (idle or relocating, D14)
+        has_dispatchable = bool(getattr(self, "_zone_dispatchable_counts", self._zone_idle_counts)[zone_idx] > 0)
+        if has_dispatchable:
+            candidates = self._zone_candidate_orders[zone_idx] if zone_idx < len(self._zone_candidate_orders) else []
+            for i, cand in enumerate(candidates[: self._max_pending]):
+                # Intra-turn collision masking (D15): mask order if already claimed this turn
+                if cand["order_id"] not in getattr(self, "_claimed_orders_this_turn", set()):
+                    mask[1 + i] = True
+
+        # Relocate actions: only valid if there is a purely IDLE driver in this zone (D14)
         has_idle = bool(self._zone_idle_counts[zone_idx] > 0)
         if has_idle:
-            n_pending = int(self._zone_pending_mask[zone_idx].sum())
-            for i in range(min(n_pending, self._max_pending)):
-                mask[1 + i] = True
-            # Relocate to any OTHER zone (same-zone relocation is a no-op).
-            for j in range(self._num_zones):
-                if j != zone_idx:
+            neighbor_only = getattr(self._cfg, "neighbor_relocation_only", True)
+            neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
+            for j in neighbours:
+                if j != zone_idx and 0 <= j < self._num_zones:
                     mask[1 + self._max_pending + j] = True
         return mask
 
@@ -580,7 +627,7 @@ class RideGymAEC(AECEnv):
                     else:
                         local_rewards -= (cfg.beta * empty_km) / self._num_zones
 
-        # 3. Pending waiting time penalty (-alpha)
+        # 3. Pending waiting time penalty (-alpha) — volume-scaled (D15)
         if self._current_pending:
             zone_wait_times: dict[int, list[float]] = {
                 zi: [] for zi in range(self._num_zones)
@@ -591,10 +638,30 @@ class RideGymAEC(AECEnv):
                 zone_wait_times[zi].append(float(o.get("waiting_time", 0.0)))
             for zi in range(self._num_zones):
                 if zone_wait_times[zi]:
-                    w_norm = np.mean(zone_wait_times[zi]) / max(cfg.horizon, 1e-9)
-                    local_rewards[zi] -= cfg.alpha * w_norm
+                    w_sum_norm = float(np.sum(zone_wait_times[zi])) / max(cfg.order_timeout, 1e-9)
+                    local_rewards[zi] -= cfg.alpha * (w_sum_norm * 0.1)
 
-        # 4. Team cooperation blending (e.g. 80% local + 20% global team)
+        # 4. Cancellation penalty (D15)
+        cancel_penalty = float(getattr(cfg, "cancel_penalty", 5.0))
+        if cancel_penalty > 0.0:
+            current_cancelled = {
+                oid for oid, o in self.env.orders.items()
+                if o.status == OrderStatus.CANCELLED
+            }
+            newly_cancelled = current_cancelled - getattr(self, "_seen_cancelled_ids", set())
+            if not hasattr(self, "_seen_cancelled_ids"):
+                self._seen_cancelled_ids = set()
+            self._seen_cancelled_ids.update(newly_cancelled)
+            for oid in newly_cancelled:
+                order = self.env.orders.get(oid)
+                if order is not None:
+                    orig = np.asarray(order.origin, dtype=float)
+                    zi = int(np.argmin(np.sum((cents - orig) ** 2, axis=1)))
+                    local_rewards[zi] -= cancel_penalty
+                else:
+                    local_rewards -= cancel_penalty / self._num_zones
+
+        # 5. Team cooperation blending (e.g. 80% local + 20% global team)
         team_share = float(getattr(cfg, "team_share", 0.2))
         if team_share > 0.0:
             mean_r = float(np.mean(local_rewards))
@@ -612,16 +679,22 @@ class RideGymAEC(AECEnv):
         if self._terminated or self._last_obs is None:
             return
 
-        # Per-zone FIFO queues of idle drivers (driver-id order), consumed by
-        # the zone agents in shuffled first-come-first-served order.
+        # Per-zone FIFO queues of drivers (D14):
+        # Purely idle drivers are queued first; empty relocating drivers are queued second.
+        allow_reloc_disp = getattr(self._cfg, "allow_relocating_dispatch", True)
         zone_idle_queues: dict[int, deque[int]] = {
+            zi: deque() for zi in range(self._num_zones)
+        }
+        zone_relocating_queues: dict[int, deque[int]] = {
             zi: deque() for zi in range(self._num_zones)
         }
         for did in range(self._num_drivers):
             d = self._last_obs[did]["self"]
+            zi = max(0, min(int(d.get("current_region", 0)), self._num_zones - 1))
             if d["status"] == "idle":
-                zi = max(0, min(int(d.get("current_region", 0)), self._num_zones - 1))
                 zone_idle_queues[zi].append(did)
+            elif allow_reloc_disp and d["status"] == "relocating":
+                zone_relocating_queues[zi].append(did)
 
         ridegym_actions: dict[int, dict | None] = {}
         claimed_orders: set[int] = set()
@@ -633,21 +706,37 @@ class RideGymAEC(AECEnv):
             decoded = self._decode_action(action, zone_idx)
             if decoded is None:
                 continue
-            queue = zone_idle_queues[zone_idx]
-            if not queue:
-                continue  # masked out upstream; defensive no-op
-            driver_id = queue.popleft()
+
             if "orders" in decoded:
+                # Dispatch order: prefer purely idle driver; fallback to relocating driver
+                driver_id = None
+                from_queue = None
+                if zone_idle_queues[zone_idx]:
+                    driver_id = zone_idle_queues[zone_idx].popleft()
+                    from_queue = zone_idle_queues[zone_idx]
+                elif zone_relocating_queues[zone_idx]:
+                    driver_id = zone_relocating_queues[zone_idx].popleft()
+                    from_queue = zone_relocating_queues[zone_idx]
+
+                if driver_id is None:
+                    continue  # masked out upstream; defensive no-op
+
                 oid = decoded["orders"][0]
                 if oid in claimed_orders:
                     # Order claimed by an earlier zone agent this turn.
-                    zone_idle_queues[zone_idx].appendleft(driver_id)
+                    from_queue.appendleft(driver_id)
                     continue
+
                 claimed_orders.add(oid)
                 self._order_dispatcher[oid] = zone_idx
                 self._driver_commander[driver_id] = zone_idx
                 ridegym_actions[driver_id] = decoded
+
             elif "relocate" in decoded:
+                # Relocation actions only consume purely idle drivers
+                if not zone_idle_queues[zone_idx]:
+                    continue
+                driver_id = zone_idle_queues[zone_idx].popleft()
                 self._driver_commander[driver_id] = zone_idx
                 ridegym_actions[driver_id] = decoded
 
@@ -691,6 +780,7 @@ class RideGymAEC(AECEnv):
             self.agent_selection = self.agents[int(self._agent_order[0])]
             self._actions_this_turn = {}
             self._turn_complete = False
+            self._claimed_orders_this_turn = set()
 
     def _kpi_counts(self) -> dict[str, float]:
         from ride_gym.enums import OrderStatus
@@ -740,7 +830,16 @@ class RideGymAEC(AECEnv):
         current = self.agent_selection
         self.rewards[current] = 0.0
         self._cumulative_rewards[current] = 0.0
-        self._actions_this_turn[current] = 0 if action is None else int(action)
+        act_val = 0 if action is None else int(action)
+        self._actions_this_turn[current] = act_val
+        if 1 <= act_val <= self._max_pending:
+            zone_idx = self._zone_int_id(current)
+            candidates = self._zone_candidate_orders[zone_idx] if zone_idx < len(self._zone_candidate_orders) else []
+            cand_idx = act_val - 1
+            if cand_idx < len(candidates):
+                if not hasattr(self, "_claimed_orders_this_turn"):
+                    self._claimed_orders_this_turn = set()
+                self._claimed_orders_this_turn.add(candidates[cand_idx]["order_id"])
         self._advance_selection()
 
     def state(self) -> np.ndarray:
