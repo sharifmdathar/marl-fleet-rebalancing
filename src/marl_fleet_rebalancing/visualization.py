@@ -243,17 +243,9 @@ def _draw_frame(
         target_pct = getattr(recorder, "target_zone_pct", None)
         if target_zi is not None and 0 <= target_zi < len(reloc_pts):
             tx, ty = reloc_pts[target_zi]
-            pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else target_pct
-            pct_str = f" ({pct_val:.0f}% demand)" if pct_val else ""
             ax.scatter(
                 [tx], [ty], s=350, marker="o", facecolors="none",
                 edgecolors="#ffd700", linewidths=2.2, linestyle="--", zorder=3,
-            )
-            ax.text(
-                tx, ty - 0.003, f"★ ZONE {target_zi}{pct_str}",
-                fontsize=7, ha="center", va="top", color="#ffd700",
-                weight="bold", zorder=4,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="#1e1e1e", edgecolor="#ffd700", alpha=0.9),
             )
 
     if frame["pending"]:
@@ -313,8 +305,15 @@ def _draw_frame(
         ),
         loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=5, fontsize=6.8, framealpha=0.95,
     )
+    target_zi = getattr(recorder, "target_zone", None)
+    target_pct = getattr(recorder, "target_zone_pct", None)
+    surge_info = ""
+    if target_zi is not None:
+        pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else (target_pct or 0.0)
+        surge_info = f"  |  ★ Surge: Zone {target_zi} ({pct_val:.0f}% demand)"
+
     ax.set_title(
-        f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min",
+        f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min{surge_info}",
         fontsize=10, y=1.13,
     )
 
@@ -403,15 +402,19 @@ def interactive_view(
     """Open an interactive matplotlib window to explore the episode.
 
     Controls:
-      Space       play / pause / replay
-      Right/Left  step 1 frame forward/backward
-      Up/Down     jump 10 frames forward/backward
-      r           reset to start (frame 0)
-      z           toggle zone overlay
-      f           cycle playback speed (1x, 2x, 4x, 0.5x)
-      Click       select a vehicle to inspect
-      Escape      deselect current vehicle
-      q / close   quit
+      Scroll-wheel      zoom in / zoom out map
+      Right-click drag  pan map (or Shift + Left-click drag)
+      Double-click      reset zoom to city overview
+      0 / h             reset zoom
+      Space             play / pause / replay
+      Right/Left        step 1 frame forward/backward
+      Up/Down           jump 10 frames forward/backward
+      r                 reset to start (frame 0)
+      z                 toggle zone overlay
+      f / s             cycle playback speed (1x, 2x, 4x, 0.5x)
+      Click vehicle     select vehicle to inspect trajectory & tasks
+      Escape            deselect current vehicle
+      q / close         quit
     """
     if not recorder.frames:
         raise ValueError("recorder has no frames; call snapshot() during the run.")
@@ -435,6 +438,9 @@ def interactive_view(
         "updating_slider": False,
         "timer": None,
         "widgets": [],
+        "xlim": (lon0, lon1),
+        "ylim": (lat0, lat1),
+        "pan_start": None,
     }
 
     fig = plt.figure(figsize=(figsize[0], max(figsize[1], 8.5)), dpi=dpi)
@@ -452,12 +458,13 @@ def interactive_view(
     )
 
     # Control buttons
-    ax_btn_reset = fig.add_axes([0.08, 0.025, 0.07, 0.04])
-    ax_btn_prev = fig.add_axes([0.16, 0.025, 0.07, 0.04])
-    ax_btn_play = fig.add_axes([0.24, 0.025, 0.08, 0.04])
-    ax_btn_next = fig.add_axes([0.33, 0.025, 0.07, 0.04])
-    ax_btn_speed = fig.add_axes([0.41, 0.025, 0.08, 0.04])
-    ax_btn_zones = fig.add_axes([0.50, 0.025, 0.09, 0.04])
+    ax_btn_reset = fig.add_axes([0.06, 0.025, 0.065, 0.04])
+    ax_btn_prev = fig.add_axes([0.135, 0.025, 0.065, 0.04])
+    ax_btn_play = fig.add_axes([0.21, 0.025, 0.075, 0.04])
+    ax_btn_next = fig.add_axes([0.295, 0.025, 0.065, 0.04])
+    ax_btn_speed = fig.add_axes([0.37, 0.025, 0.075, 0.04])
+    ax_btn_zones = fig.add_axes([0.455, 0.025, 0.085, 0.04])
+    ax_btn_zoom = fig.add_axes([0.55, 0.025, 0.095, 0.04])
 
     btn_reset = Button(ax_btn_reset, "Reset")
     btn_prev = Button(ax_btn_prev, "« -10s")
@@ -465,9 +472,10 @@ def interactive_view(
     btn_next = Button(ax_btn_next, "» +10s")
     btn_speed = Button(ax_btn_speed, "Speed: 1x")
     btn_zones = Button(ax_btn_zones, f"Zones: {'ON' if state['show_zones'] else 'OFF'}")
+    btn_zoom = Button(ax_btn_zoom, "Reset Zoom")
 
     # Retain references on state so garbage collection never kills them
-    state["widgets"] = [slider, btn_reset, btn_prev, btn_play, btn_next, btn_speed, btn_zones]
+    state["widgets"] = [slider, btn_reset, btn_prev, btn_play, btn_next, btn_speed, btn_zones, btn_zoom]
 
     def _draw(idx: int, update_slider: bool = True):
         """Redraw map, drivers, zones, and statistics."""
@@ -476,11 +484,18 @@ def interactive_view(
 
         frame = frames[idx]
 
-        ax_map.set_xlim(lon0, lon1)
-        ax_map.set_ylim(lat0, lat1)
-        ax_map.set_aspect("equal", adjustable="box")
+        ax_map.set_xlim(state["xlim"])
+        ax_map.set_ylim(state["ylim"])
+        ax_map.set_aspect("equal", adjustable="datalim")
         ax_map.set_xticks([])
         ax_map.set_yticks([])
+
+        target_zi = getattr(recorder, "target_zone", None)
+        target_pct = getattr(recorder, "target_zone_pct", None)
+        surge_info = ""
+        if target_zi is not None:
+            pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else (target_pct or 0.0)
+            surge_info = f"  |  ★ Surge: Zone {target_zi} ({pct_val:.0f}% demand)"
 
         # Road network
         lc = LineCollection(precomputed_segs, colors="#dddddd", linewidths=0.4, zorder=0)
@@ -499,21 +514,11 @@ def interactive_view(
                     x, y, str(zi), fontsize=6, ha="center", va="center",
                     color="white", weight="bold", zorder=3,
                 )
-            target_zi = getattr(recorder, "target_zone", None)
-            target_pct = getattr(recorder, "target_zone_pct", None)
             if target_zi is not None and 0 <= target_zi < len(reloc_pts):
                 tx, ty = reloc_pts[target_zi]
-                pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else target_pct
-                pct_str = f" ({pct_val:.0f}% demand)" if pct_val else ""
                 ax_map.scatter(
                     [tx], [ty], s=350, marker="o", facecolors="none",
                     edgecolors="#ffd700", linewidths=2.5, linestyle="--", zorder=3,
-                )
-                ax_map.text(
-                    tx, ty - 0.003, f"★ ZONE {target_zi}{pct_str}",
-                    fontsize=8, ha="center", va="top", color="#ffd700",
-                    weight="bold", zorder=4,
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#1e1e1e", edgecolor="#ffd700", alpha=0.9),
                 )
 
         # Pending orders
@@ -533,7 +538,7 @@ def interactive_view(
         state["all_drivers"] = all_drivers
 
         if not all_drivers:
-            ax_map.set_title(f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min")
+            ax_map.set_title(f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min{surge_info}")
             _draw_stats(ax_stats, frame, recorder.horizon, None)
             fig.canvas.draw_idle()
             return
@@ -629,7 +634,7 @@ def interactive_view(
         sel_label = f"  |  selected: {sel_did}" if sel_did is not None else ""
         ax_map.set_title(
             f"[{status_str}]  t = {frame['time']:.1f} / {recorder.horizon:.0f} min"
-            f"  (frame {idx + 1}/{len(frames)})  [{speed_lbl}]{sel_label}",
+            f"  (frame {idx + 1}/{len(frames)})  [{speed_lbl}]{surge_info}{sel_label}",
             fontsize=10, y=1.13,
         )
 
@@ -734,9 +739,74 @@ def interactive_view(
             _toggle_zones()
         elif event.key in ("f", "s"):
             _toggle_speed()
+        elif event.key in ("0", "h"):
+            _reset_zoom()
         elif event.key == "escape":
             state["selected_id"] = None
             _draw(state["idx"], update_slider=False)
+
+    def _reset_zoom(event=None):
+        state["xlim"] = (lon0, lon1)
+        state["ylim"] = (lat0, lat1)
+        ax_map.set_xlim(state["xlim"])
+        ax_map.set_ylim(state["ylim"])
+        fig.canvas.draw_idle()
+
+    def _on_scroll(event):
+        if event.inaxes != ax_map or event.xdata is None or event.ydata is None:
+            return
+        if event.button == "up" or getattr(event, "step", 0) > 0:
+            scale = 0.8
+        elif event.button == "down" or getattr(event, "step", 0) < 0:
+            scale = 1.25
+        else:
+            return
+
+        cur_x0, cur_x1 = state["xlim"]
+        cur_y0, cur_y1 = state["ylim"]
+        xdata, ydata = event.xdata, event.ydata
+
+        new_x0 = xdata - (xdata - cur_x0) * scale
+        new_x1 = xdata + (cur_x1 - xdata) * scale
+        new_y0 = ydata - (ydata - cur_y0) * scale
+        new_y1 = ydata + (cur_y1 - ydata) * scale
+
+        state["xlim"] = (new_x0, new_x1)
+        state["ylim"] = (new_y0, new_y1)
+        ax_map.set_xlim(state["xlim"])
+        ax_map.set_ylim(state["ylim"])
+        fig.canvas.draw_idle()
+
+    def _on_mouse_down(event):
+        if event.inaxes != ax_map:
+            return
+        if event.dblclick:
+            _reset_zoom()
+            return
+        if event.button in (2, 3) or (event.button == 1 and event.key == "shift"):
+            state["pan_start"] = (event.x, event.y, state["xlim"], state["ylim"])
+
+    def _on_mouse_move(event):
+        if state.get("pan_start") is None:
+            return
+        if event.x is None or event.y is None:
+            return
+        px0, py0, orig_xlim, orig_ylim = state["pan_start"]
+        bbox = ax_map.bbox
+        if bbox.width <= 0 or bbox.height <= 0:
+            return
+        dx = (orig_xlim[1] - orig_xlim[0]) * ((event.x - px0) / bbox.width)
+        dy = (orig_ylim[1] - orig_ylim[0]) * ((event.y - py0) / bbox.height)
+        new_xlim = (orig_xlim[0] - dx, orig_xlim[1] - dx)
+        new_ylim = (orig_ylim[0] - dy, orig_ylim[1] - dy)
+        state["xlim"] = new_xlim
+        state["ylim"] = new_ylim
+        ax_map.set_xlim(new_xlim)
+        ax_map.set_ylim(new_ylim)
+        fig.canvas.draw_idle()
+
+    def _on_mouse_up(event):
+        state["pan_start"] = None
 
     def _on_click(event):
         if event.mouseevent.inaxes != ax_map:
@@ -766,10 +836,15 @@ def interactive_view(
     btn_next.on_clicked(lambda e: _step_next(e, 10))
     btn_speed.on_clicked(_toggle_speed)
     btn_zones.on_clicked(_toggle_zones)
+    btn_zoom.on_clicked(_reset_zoom)
 
     fig.canvas.mpl_connect("close_event", _on_close)
     fig.canvas.mpl_connect("key_press_event", _on_key)
     fig.canvas.mpl_connect("pick_event", _on_click)
+    fig.canvas.mpl_connect("scroll_event", _on_scroll)
+    fig.canvas.mpl_connect("button_press_event", _on_mouse_down)
+    fig.canvas.mpl_connect("motion_notify_event", _on_mouse_move)
+    fig.canvas.mpl_connect("button_release_event", _on_mouse_up)
 
     _draw(0, update_slider=True)
     try:
