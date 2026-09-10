@@ -226,8 +226,10 @@ def main() -> None:
                         help="Base seed for evaluation episodes (default: 1000)")
     parser.add_argument("--stochastic", action="store_true", default=False,
                         help="Sample actions stochastically instead of greedy argmax")
-    parser.add_argument("-o", "--output", type=str, default=None,
+    parser.add_argument("-o", "--output", "--out-mp4", dest="output", type=str, default=None,
                         help="Output MP4 path to render animation (e.g. rollout.mp4)")
+    parser.add_argument("--fps", type=int, default=10,
+                        help="Frames per second for rendered MP4 animation (default: 10)")
     parser.add_argument("-i", "--interactive", action="store_true", default=False,
                         help="Open interactive viewer for the evaluation episode")
     parser.add_argument("--target-zone", type=int, default=None,
@@ -312,8 +314,8 @@ def main() -> None:
             print("\nOpening interactive viewer...")
             interactive_view(recorder, detailed=True)
         elif args.output:
-            print(f"\nRendering {len(recorder.frames)} frames to {args.output}...")
-            render_animation(recorder, out_path=args.output, detailed=True)
+            print(f"\nRendering {len(recorder.frames)} frames to {args.output} (fps={args.fps})...")
+            render_animation(recorder, out_path=args.output, fps=args.fps, detailed=True)
             print(f"Saved {args.output}")
 
 

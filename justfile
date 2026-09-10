@@ -19,7 +19,7 @@ train-ippo env="bandra" iters="20" rollouts="3" target_zone="" target_pct="" nam
     $CMD
 
 # 2. Train centralized-critic MAPPO policy
-train-mappo env="bandra" iters="50" rollouts="3" target_zone="" target_pct="" name="":
+train-mappo env="bandra" iters="20" rollouts="3" target_zone="" target_pct="" name="":
     #!/usr/bin/env bash
     CMD="uv run python -m marl_fleet_rebalancing.experiments.train --env {{env}} --algo mappo --iterations {{iters}} --rollout-episodes {{rollouts}}"
     if [ -n "{{target_zone}}" ]; then CMD="$CMD --target-zone {{target_zone}}"; fi
@@ -29,9 +29,9 @@ train-mappo env="bandra" iters="50" rollouts="3" target_zone="" target_pct="" na
     $CMD
 
 # 3. Evaluate a checkpoint and render an MP4 visualization
-render-mp4 checkpoint out="episode.mp4" fps="10" target_zone="" target_pct="":
+render-mp4 checkpoint target_zone="" target_pct="" out="episode.mp4" fps="10":
     #!/usr/bin/env bash
-    CMD="uv run python -m marl_fleet_rebalancing.experiments.evaluate --checkpoint {{checkpoint}} --out-mp4 {{out}} --fps {{fps}}"
+    CMD="uv run python -m marl_fleet_rebalancing.experiments.evaluate --checkpoint {{checkpoint}} --output {{out}} --fps {{fps}}"
     if [ -n "{{target_zone}}" ]; then CMD="$CMD --target-zone {{target_zone}}"; fi
     if [ -n "{{target_pct}}" ]; then CMD="$CMD --target-zone-demand-pct {{target_pct}}"; fi
     echo "Executing: $CMD"
