@@ -89,6 +89,7 @@ class EnvConfig:
     alpha: float = 1.0   # weight for passenger waiting time
     beta: float = 0.1    # weight for empty repositioning distance (cost per empty km)
     gamma: float = 5.0   # weight for served demand (payoff per completed order)
+    team_share: float = 0.2  # 80% local credit assignment + 20% team cooperation
 
     # --- Seeding ---
     seed: int | None = None
@@ -135,6 +136,7 @@ class NYCConfig(EnvConfig):
     alpha: float = 1.0
     beta: float = 0.1
     gamma: float = 5.0
+    team_share: float = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +149,7 @@ class BandraConfig(EnvConfig):
 
     Zone count: 25 relocation zones from RideGym defaults.
     Fleet size: 30 drivers, 30-minute episode.
+    num_orders: 200 (achievable demand profile for a 30-vehicle fleet).
     max_pending: 80 (measured max ~70 in Bandra West testing).
     """
 
@@ -155,7 +158,7 @@ class BandraConfig(EnvConfig):
     dt: float = 0.1
     horizon: float = 30.0
     order_timeout: float = 2.0
-    num_orders: int = 400
+    num_orders: int = 200
     max_party_size: int = 3
     network_path: str = "data/bandra_west.gpickle"
     speed_kmh: float = 30.0
@@ -163,3 +166,4 @@ class BandraConfig(EnvConfig):
     alpha: float = 1.0
     beta: float = 0.1
     gamma: float = 5.0
+    team_share: float = 0.2

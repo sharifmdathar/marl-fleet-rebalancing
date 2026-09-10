@@ -157,6 +157,21 @@ class RideGymAEC(AECEnv):
         )
         self._zone_centroids_norm = self._normalized_centroids()
 
+        # Per-zone candidate orders (Point B: sorted closest-first per zone)
+        self._zone_candidate_orders: list[list[dict]] = [[] for _ in range(self._num_zones)]
+        self._zone_pending_features = np.zeros(
+            (self._num_zones, self._max_pending, 6), dtype=np.float32,
+        )
+        self._zone_pending_mask = np.zeros(
+            (self._num_zones, self._max_pending), dtype=np.float32,
+        )
+
+        # Local credit assignment mappings (Point A):
+        # order_id -> zone_idx (which zone controller dispatched this order)
+        self._order_dispatcher: dict[int, int] = {}
+        # driver_id -> zone_idx (which zone controller commanded this driver)
+        self._driver_commander: dict[int, int] = {}
+
     # ------------------------------------------------------------------ setup
 
     def _make_order_generator(self, config: EnvConfig, network: OSMnxNetwork):
@@ -326,6 +341,50 @@ class RideGymAEC(AECEnv):
                 self._pending_per_zone[zi] += 1.0
         self._pending_per_zone /= max(self._max_pending, 1)
 
+        # --- Per-zone candidate orders (Point B: sorted closest-first per zone) ---
+        cents = np.asarray(self.env.relocation_points, dtype=float)
+        self._zone_pending_features[:] = 0.0
+        self._zone_pending_mask[:] = 0.0
+        self._zone_candidate_orders = [[] for _ in range(self._num_zones)]
+
+        if self._current_pending:
+            pending_origins = np.asarray(
+                [o["origin"] for o in self._current_pending], dtype=float
+            ).reshape(-1, 2)
+            for zi in range(self._num_zones):
+                zc = cents[zi]
+                # Euclidean distance squared from zone centroid zi to order origins
+                dists_sq = np.sum((pending_origins - zc) ** 2, axis=1)
+                # Sort orders: primary key distance ascending, secondary key wait time descending
+                order_indices = list(range(len(self._current_pending)))
+                order_indices.sort(
+                    key=lambda idx: (
+                        dists_sq[idx],
+                        -float(self._current_pending[idx].get("waiting_time", 0.0)),
+                    )
+                )
+                candidates = [
+                    self._current_pending[idx]
+                    for idx in order_indices[: self._max_pending]
+                ]
+                self._zone_candidate_orders[zi] = candidates
+
+                for slot, order in enumerate(candidates):
+                    ox, oy = _normalize_xy(
+                        order["origin"][0], order["origin"][1],
+                        self._geo_min, self._geo_range,
+                    )
+                    dx, dy = _normalize_xy(
+                        order["destination"][0], order["destination"][1],
+                        self._geo_min, self._geo_range,
+                    )
+                    self._zone_pending_features[zi, slot] = (
+                        ox, oy, dx, dy,
+                        float(order["num_passengers"]) / capacity,
+                        min(float(order.get("waiting_time", 0.0)) / timeout, 1.0),
+                    )
+                    self._zone_pending_mask[zi, slot] = 1.0
+
         # --- Per-zone fleet state -------------------------------------------
         zone_totals = np.zeros(self._num_zones, dtype=np.float32)
         zone_idle = np.zeros(self._num_zones, dtype=np.float32)
@@ -357,9 +416,11 @@ class RideGymAEC(AECEnv):
         self._current_pending = self._extract_pending(obs)
         self._terminated = False
 
-        # Reset reward tracking
+        # Reset reward tracking and attribution
         self._prev_served = 0
         self._episode_empty_m = 0.0
+        self._order_dispatcher.clear()
+        self._driver_commander.clear()
 
         self._rebuild_caches()
 
@@ -402,9 +463,9 @@ class RideGymAEC(AECEnv):
             "zone_location": self._zone_centroids_norm[zone_idx],
             "zone_state": zone_state,
             "all_zone_state": self._zone_fleet_state,
-            "pending_orders": self._pending_features,
-            "pending_mask": self._pending_mask,
-            "pending_passengers": self._pending_features[:, 4],
+            "pending_orders": self._zone_pending_features[zone_idx],
+            "pending_mask": self._zone_pending_mask[zone_idx],
+            "pending_passengers": self._zone_pending_features[zone_idx, :, 4],
             "time_frac": np.array(
                 [min(self.env.time / max(self.env.horizon, 1e-9), 1.0)],
                 dtype=np.float32,
@@ -420,7 +481,7 @@ class RideGymAEC(AECEnv):
         zone_idx = self._zone_int_id(agent)
         has_idle = bool(self._zone_idle_counts[zone_idx] > 0)
         if has_idle:
-            n_pending = int(self._pending_mask.sum())
+            n_pending = int(self._zone_pending_mask[zone_idx].sum())
             for i in range(min(n_pending, self._max_pending)):
                 mask[1 + i] = True
             # Relocate to any OTHER zone (same-zone relocation is a no-op).
@@ -431,17 +492,21 @@ class RideGymAEC(AECEnv):
 
     # ---------------------------------------------------------------- actions
 
-    def _decode_action(self, action: int) -> dict | None:
+    def _decode_action(self, action: int, zone_idx: int = 0) -> dict | None:
         if action is None or action == 0:
             return None
         if 1 <= action <= self._max_pending:
             idx = action - 1
-            if idx < len(self._current_pending):
+            if 0 <= zone_idx < len(self._zone_candidate_orders):
+                candidates = self._zone_candidate_orders[zone_idx]
+                if idx < len(candidates):
+                    return {"orders": [candidates[idx]["order_id"]]}
+            elif idx < len(self._current_pending):
                 return {"orders": [self._current_pending[idx]["order_id"]]}
             return None
-        zone_idx = action - self._max_pending - 1
-        if 0 <= zone_idx < self._num_zones:
-            return {"relocate": int(zone_idx)}
+        target_zone = action - self._max_pending - 1
+        if 0 <= target_zone < self._num_zones:
+            return {"relocate": int(target_zone)}
         return None
 
     def _advance_selection(self) -> None:
@@ -457,48 +522,91 @@ class RideGymAEC(AECEnv):
         self._turn_complete = True
         self._flush_turn()
 
-    def _compute_reward(self, events: dict[int, dict]) -> float:
-        """Compute the rebalancing reward: R = -alpha*wait - beta*empty + gamma*served.
+    def _compute_zone_rewards(self, events: dict[int, dict]) -> np.ndarray:
+        """Compute localized credit assignment rewards per zone controller.
 
-        Components (per turn, shared by all zone agents):
-        - waiting_time: mean waiting time of currently pending orders,
-          normalized by the horizon.
-        - empty_distance: total distance moved by drivers without passengers
-          onboard this turn (deadhead: to-pickup + repositioning), taken
-          exactly from the RideGym step event log, normalized to km.
-        - served_demand: number of orders completed this turn (delta).
+        R_z = (1 - team_share) * R_local,z + team_share * R_global_mean
+
+        Local credit assignment:
+        1. Served demand (+gamma): credited directly to the zone controller that
+           dispatched the completed order (via self._order_dispatcher[order_id]).
+           Fallback: nearest zone centroid to order origin.
+        2. Empty deadhead distance penalty (-beta): charged directly to the zone
+           controller that commanded the driver (via self._driver_commander[driver_id]).
+           Fallback: driver's current_region.
+        3. Pending waiting time penalty (-alpha): charged to the zone containing
+           the pending order's origin (nearest zone centroid).
         """
         from ride_gym.enums import OrderStatus
 
         cfg = self._cfg
+        local_rewards = np.zeros(self._num_zones, dtype=np.float32)
+        cents = np.asarray(self.env.relocation_points, dtype=float)
 
-        current_served = sum(
+        self._prev_served = sum(
             1 for o in self.env.orders.values()
             if o.status == OrderStatus.COMPLETED
         )
-        delta_served = current_served - self._prev_served
-        self._prev_served = current_served
 
-        pending_wait = 0.0
-        if self._current_pending:
-            wait_times = [
-                o.get("waiting_time", 0.0) for o in self._current_pending
-            ]
-            pending_wait = np.mean(wait_times) / max(cfg.horizon, 1e-9)
+        # 1. Served demand attribution (+gamma)
+        for did, event in events.items():
+            for oid in event.get("completed_orders", []):
+                dispatcher = self._order_dispatcher.get(oid)
+                if dispatcher is not None and 0 <= dispatcher < self._num_zones:
+                    local_rewards[dispatcher] += cfg.gamma
+                else:
+                    order = self.env.orders.get(oid)
+                    if order is not None:
+                        orig = np.asarray(order.origin, dtype=float)
+                        zi = int(np.argmin(np.sum((cents - orig) ** 2, axis=1)))
+                        local_rewards[zi] += cfg.gamma
+                    else:
+                        local_rewards += cfg.gamma / self._num_zones
 
-        empty_m = 0.0
-        for event in events.values():
+        # 2. Empty deadhead distance penalty (-beta)
+        for did, event in events.items():
             if event.get("is_empty_move", False):
-                empty_m += float(event.get("distance_moved", 0.0))
-        self._episode_empty_m += empty_m
-        empty_km = empty_m / _M_PER_KM / max(cfg.empty_distance_norm_km, 1e-9)
+                empty_m = float(event.get("distance_moved", 0.0))
+                self._episode_empty_m += empty_m
+                empty_km = empty_m / _M_PER_KM / max(cfg.empty_distance_norm_km, 1e-9)
+                commander = self._driver_commander.get(did)
+                if commander is not None and 0 <= commander < self._num_zones:
+                    local_rewards[commander] -= cfg.beta * empty_km
+                else:
+                    if self._last_obs is not None and did in self._last_obs:
+                        d = self._last_obs[did]["self"]
+                        zr = max(0, min(int(d.get("current_region", 0)), self._num_zones - 1))
+                        local_rewards[zr] -= cfg.beta * empty_km
+                    else:
+                        local_rewards -= (cfg.beta * empty_km) / self._num_zones
 
-        reward = (
-            -cfg.alpha * pending_wait
-            - cfg.beta * empty_km
-            + cfg.gamma * delta_served
-        )
-        return float(reward)
+        # 3. Pending waiting time penalty (-alpha)
+        if self._current_pending:
+            zone_wait_times: dict[int, list[float]] = {
+                zi: [] for zi in range(self._num_zones)
+            }
+            for o in self._current_pending:
+                orig = np.asarray(o["origin"], dtype=float)
+                zi = int(np.argmin(np.sum((cents - orig) ** 2, axis=1)))
+                zone_wait_times[zi].append(float(o.get("waiting_time", 0.0)))
+            for zi in range(self._num_zones):
+                if zone_wait_times[zi]:
+                    w_norm = np.mean(zone_wait_times[zi]) / max(cfg.horizon, 1e-9)
+                    local_rewards[zi] -= cfg.alpha * w_norm
+
+        # 4. Team cooperation blending (e.g. 80% local + 20% global team)
+        team_share = float(getattr(cfg, "team_share", 0.2))
+        if team_share > 0.0:
+            mean_r = float(np.mean(local_rewards))
+            blended_rewards = (1.0 - team_share) * local_rewards + team_share * mean_r
+        else:
+            blended_rewards = local_rewards
+
+        return blended_rewards
+
+    def _compute_reward(self, events: dict[int, dict]) -> float:
+        """Scalar global mean reward (kept for backward compatibility)."""
+        return float(np.mean(self._compute_zone_rewards(events)))
 
     def _flush_turn(self) -> None:
         if self._terminated or self._last_obs is None:
@@ -522,7 +630,7 @@ class RideGymAEC(AECEnv):
             agent = self.agents[int(order_pos)]
             zone_idx = self._zone_int_id(agent)
             action = self._actions_this_turn.get(agent, 0)
-            decoded = self._decode_action(action)
+            decoded = self._decode_action(action, zone_idx)
             if decoded is None:
                 continue
             queue = zone_idle_queues[zone_idx]
@@ -536,8 +644,11 @@ class RideGymAEC(AECEnv):
                     zone_idle_queues[zone_idx].appendleft(driver_id)
                     continue
                 claimed_orders.add(oid)
+                self._order_dispatcher[oid] = zone_idx
+                self._driver_commander[driver_id] = zone_idx
                 ridegym_actions[driver_id] = decoded
             elif "relocate" in decoded:
+                self._driver_commander[driver_id] = zone_idx
                 ridegym_actions[driver_id] = decoded
 
         obs, _rewards, dones, info = self.env.step(ridegym_actions)
@@ -545,14 +656,13 @@ class RideGymAEC(AECEnv):
         self._current_pending = self._extract_pending(obs)
         self._rebuild_caches()
 
-        # Compute our custom reward (same for all zone agents — global task)
-        custom_reward = self._compute_reward(info.get("events", {}))
+        # Compute localized credit assignment rewards
+        zone_rewards = self._compute_zone_rewards(info.get("events", {}))
 
-        # Standard AEC delivery: the turn reward lands in rewards/cumulative
-        # now, so each agent reads exactly this turn's reward at its NEXT
-        # selection (single-turn delayed-close). last() serves cumulative.
+        # Standard AEC delivery: each agent reads its attributed reward
         for a in self.agents:
-            self.rewards[a] += custom_reward
+            zi = self._zone_int_id(a)
+            self.rewards[a] += float(zone_rewards[zi])
         self._accumulate_rewards()
 
         done_flag = bool(dones["__all__"])

@@ -329,6 +329,8 @@ def main() -> None:
                         help="Weight for empty distance penalty (default: 0.1)")
     parser.add_argument("--gamma", type=float, default=None,
                         help="Weight for served orders reward (default: 5.0)")
+    parser.add_argument("--team-share", type=float, default=None,
+                        help="Weight for shared global reward vs local credit (default: 0.2)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
@@ -349,6 +351,8 @@ def main() -> None:
         env_cfg.beta = args.beta
     if args.gamma is not None:
         env_cfg.gamma = args.gamma
+    if args.team_share is not None:
+        env_cfg.team_share = args.team_share
 
     train_cfg = TrainConfig(
         env_config=env_cfg,

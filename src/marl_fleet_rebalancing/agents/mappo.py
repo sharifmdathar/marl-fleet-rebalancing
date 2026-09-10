@@ -32,7 +32,7 @@ class MAPPOConfig:
     hidden_dim: int = 256
 
     # --- Rollout / optimization ---
-    rollout_episodes: int = 2      # episodes collected per PPO update
+    rollout_episodes: int = 6      # episodes collected per PPO update
     epochs: int = 4                # passes over the rollout per update
     minibatches: int = 4
     clip_coef: float = 0.2
