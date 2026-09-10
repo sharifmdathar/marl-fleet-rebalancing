@@ -43,6 +43,7 @@ def load_trained_policy(
     max_dispatch_radius_km: float | None = None,
 ) -> tuple[IPPO | MAPPO, dict, RideGymAEC]:
     """Load policy weights, run manifest, and an aligned evaluation env."""
+    checkpoint_path = Path(checkpoint_path)
     run_dir = checkpoint_path.parent
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
@@ -85,8 +86,13 @@ def load_trained_policy(
     action_dim = eval_env._action_dim
     use_state = algo == "mappo"
 
-    # Pre-inspect checkpoint weights to accurately size the critic (backward compatibility)
+    # Pre-inspect checkpoint weights to accurately size actor and critic (backward compatibility)
     weights = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=True)
+
+    if "actor" in weights and "trunk.0.weight" in weights["actor"]:
+        ckpt_obs_dim = weights["actor"]["trunk.0.weight"].shape[1]
+        if ckpt_obs_dim != observation_dim:
+            observation_dim = ckpt_obs_dim
 
     state_dim = None
     if use_state:
@@ -160,7 +166,13 @@ def evaluate_policy(
                 continue
 
             obs = env.observe(agent)
-            obs_vec = obs_to_vector(obs)
+            # Backward compatibility: if checkpoint was trained with legacy (Z, 2) fleet state
+            if hasattr(learner, "actor") and learner.actor.trunk[0].in_features < obs_dim(env.observation_space(agent)):
+                obs_in = dict(obs)
+                obs_in["all_zone_state"] = obs["all_zone_state"][:, :2]
+                obs_vec = obs_to_vector(obs_in)
+            else:
+                obs_vec = obs_to_vector(obs)
             mask = env.action_mask(agent)
 
             action, _logprob, _val = learner.act(
