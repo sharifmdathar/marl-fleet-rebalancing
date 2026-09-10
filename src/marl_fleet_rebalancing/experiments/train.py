@@ -267,9 +267,11 @@ def train(
         losses = learner.update(buffer)
         ep = max(kpis["episodes"], 1)
         sr = kpis["served_total"] / max(kpis["served_total"] + kpis["cancelled_total"], 1)
+        reward_per_ep = float(buffer.rewards[buffer.filled].sum() / ep)
         record = {
             "iteration": it,
             "episodes": kpis["episodes"],
+            "reward_per_ep": reward_per_ep,
             "mean_reward_per_turn": float(buffer.rewards[buffer.filled].mean()),
             "service_rate": sr,
             "served_per_ep": kpis["served_total"] / ep,
@@ -291,7 +293,7 @@ def train(
                 f"wait={kpis['avg_wait']:4.2f}m | "
                 f"empty={record['empty_km_per_ep']:5.1f}km | "
                 f"acts: disp={kpis['pct_dispatch']:4.1f}% reloc={kpis['pct_relocate']:4.1f}% idle={kpis['pct_idle']:4.1f}% | "
-                f"R/t={record['mean_reward_per_turn']:+.3f} "
+                f"reward={reward_per_ep:+6.1f}/ep "
                 f"V-loss={losses['value_loss']:6.2f} "
                 f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
             )
@@ -301,7 +303,7 @@ def train(
                 f"served={record['served_per_ep']:4.0f}/ep (sr={sr*100:4.1f}%) | "
                 f"wait={kpis['avg_wait']:4.2f}m | "
                 f"empty={record['empty_km_per_ep']:5.1f}km | "
-                f"reward={record['mean_reward_per_turn']:+.2f}"
+                f"reward={reward_per_ep:+6.1f}/ep"
             )
 
         if it % train_cfg.checkpoint_interval == 0 or it == train_cfg.iterations:
