@@ -192,6 +192,7 @@ def train(
     env_name: str,
     nyc_window_limit: int | None,
     algo_name: str,
+    resume_from: str | None = None,
 ) -> Path:
     env, env_cfg, scenario_id = _make_env(env_name, train_cfg.seed, nyc_window_limit)
     train_cfg.env_config = env_cfg
@@ -242,6 +243,15 @@ def train(
         "num_drivers": env._num_drivers,
         "episode_turns": _episode_turns(env_cfg),
     }
+    if resume_from is not None:
+        ckpt_path = Path(resume_from)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {ckpt_path}")
+        learner.load_state_dict(
+            torch.load(ckpt_path, map_location=learner.device, weights_only=True)
+        )
+        manifest["resumed_from"] = str(ckpt_path)
+        print(f"[train] resumed weights from {ckpt_path} (fresh optimizer)")
     if state_dim is not None:
         manifest["state_dim"] = state_dim
     with open(run_dir / "config.json", "w") as f:
@@ -337,6 +347,9 @@ def main() -> None:
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
                         help="Episodes per PPO update (default: algo config)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Checkpoint.pt to warm-start from (fresh optimizer, "
+                             "parent recorded in manifest)")
     parser.add_argument("--out-root", type=str, default="runs")
     args = parser.parse_args()
 
@@ -366,7 +379,8 @@ def main() -> None:
         checkpoint_interval=args.checkpoint_interval,
         verbose=args.verbose,
     )
-    train(train_cfg, args.env, args.nyc_window_limit, args.algo)
+    train(train_cfg, args.env, args.nyc_window_limit, args.algo,
+          resume_from=args.resume)
 
 
 if __name__ == "__main__":

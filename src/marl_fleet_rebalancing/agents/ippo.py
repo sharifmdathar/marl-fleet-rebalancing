@@ -215,15 +215,17 @@ class IPPO:
         cfg = self.config
         advantages, returns = buffer.compute_gae(cfg.gamma, cfg.gae_lambda)
         flat = buffer.flatten()
-        b_obs = torch.as_tensor(flat["obs"], device=self.device)
-        b_mask = torch.as_tensor(flat["action_mask"], device=self.device)
-        b_actions = torch.as_tensor(flat["actions"], device=self.device)
-        b_logprobs = torch.as_tensor(flat["logprobs"], device=self.device)
+        # CPU-resident: a full NYC rollout (62 zones x 3600 turns x 5454 obs)
+        # is ~5 GB, larger than most GPUs. Only minibatches move to device.
+        b_obs = torch.as_tensor(flat["obs"])
+        b_mask = torch.as_tensor(flat["action_mask"])
+        b_actions = torch.as_tensor(flat["actions"])
+        b_logprobs = torch.as_tensor(flat["logprobs"])
         b_advantages = torch.as_tensor(
-            advantages.ravel()[buffer.filled.ravel()], device=self.device,
+            advantages.ravel()[buffer.filled.ravel()],
         )
         b_returns = torch.as_tensor(
-            returns.ravel()[buffer.filled.ravel()], device=self.device,
+            returns.ravel()[buffer.filled.ravel()],
         )
         # Advantage normalization (standard PPO practice).
         b_advantages = (b_advantages - b_advantages.mean()) / (
@@ -238,23 +240,27 @@ class IPPO:
         }
         update_steps = 0
         for _epoch in range(cfg.epochs):
-            perm = torch.randperm(num_samples, device=self.device)
+            perm = torch.randperm(num_samples)
             for start in range(0, num_samples, batch_size):
                 idx = perm[start : start + batch_size]
-                logits, values = self.policy.forward(b_obs[idx], b_mask[idx])
+                dev = self.device
+                logits, values = self.policy.forward(
+                    b_obs[idx].to(dev), b_mask[idx].to(dev),
+                )
                 dist = torch.distributions.Categorical(logits=logits)
-                logprobs = dist.log_prob(b_actions[idx])
+                logprobs = dist.log_prob(b_actions[idx].to(dev))
                 entropy = dist.entropy().mean()
 
-                ratio = torch.exp(logprobs - b_logprobs[idx])
-                surr1 = ratio * b_advantages[idx]
+                ratio = torch.exp(logprobs - b_logprobs[idx].to(dev))
+                adv_idx = b_advantages[idx].to(dev)
+                surr1 = ratio * adv_idx
                 surr2 = torch.clamp(
                     ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef,
-                ) * b_advantages[idx]
+                ) * adv_idx
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 value_loss = nn.functional.mse_loss(
-                    values, b_returns[idx],
+                    values, b_returns[idx].to(dev),
                 )
 
                 loss = (
