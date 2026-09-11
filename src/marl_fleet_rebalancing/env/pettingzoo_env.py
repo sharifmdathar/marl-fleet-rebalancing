@@ -283,6 +283,11 @@ class RideGymAEC(AECEnv):
         ys = (np.arange(rows) + 0.5) / rows * (ymax - ymin) + ymin
         return [(float(x), float(y)) for y in ys for x in xs]
 
+    @property
+    def relocation_points(self) -> list[tuple[float, float]]:
+        """Centroid coordinates of all regions/zones."""
+        return list(self.env.relocation_points)
+
     def _normalized_centroids(self) -> np.ndarray:
         pts = np.zeros((self._num_zones, 2), dtype=np.float32)
         for i, (rx, ry) in enumerate(self.env.relocation_points):

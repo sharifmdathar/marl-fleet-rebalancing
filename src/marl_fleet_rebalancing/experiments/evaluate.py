@@ -28,6 +28,7 @@ import torch
 
 from marl_fleet_rebalancing.agents.ippo import IPPO, IPPOConfig
 from marl_fleet_rebalancing.agents.mappo import MAPPO, MAPPOConfig
+from marl_fleet_rebalancing.baselines import GreedyZoneDispatcher, ZoneLPRebalancer
 from marl_fleet_rebalancing.config import BandraConfig, EnvConfig, NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.networks.encoder import obs_dim, obs_to_vector
@@ -125,8 +126,9 @@ def load_trained_policy(
 
 
 def evaluate_policy(
-    learner: IPPO | MAPPO,
+    policy: Any,
     env: RideGymAEC,
+    policy_type: str = "checkpoint",
     num_episodes: int = 5,
     base_seed: int = 1000,
     deterministic: bool = True,
@@ -140,6 +142,8 @@ def evaluate_policy(
     for ep in range(num_episodes):
         seed = base_seed + ep
         env.reset(seed=seed)
+        if hasattr(policy, "reset"):
+            policy.reset(seed=seed)
         should_record = recorder is not None and ep == 0
 
         acts_idle = 0
@@ -166,19 +170,29 @@ def evaluate_policy(
                 continue
 
             obs = env.observe(agent)
-            # Backward compatibility: if checkpoint was trained with legacy (Z, 2) fleet state
-            if hasattr(learner, "actor") and learner.actor.trunk[0].in_features < obs_dim(env.observation_space(agent)):
-                obs_in = dict(obs)
-                obs_in["all_zone_state"] = obs["all_zone_state"][:, :2]
-                obs_vec = obs_to_vector(obs_in)
-            else:
-                obs_vec = obs_to_vector(obs)
             mask = env.action_mask(agent)
 
-            action, _logprob, _val = learner.act(
-                obs_vec[None, :], mask[None, :], deterministic=deterministic,
-            )
-            act_val = int(action[0])
+            if policy_type == "checkpoint":
+                learner = policy
+                # Backward compatibility: if checkpoint was trained with legacy (Z, 2) fleet state
+                if hasattr(learner, "actor") and learner.actor.trunk[0].in_features < obs_dim(env.observation_space(agent)):
+                    obs_in = dict(obs)
+                    obs_in["all_zone_state"] = obs["all_zone_state"][:, :2]
+                    obs_vec = obs_to_vector(obs_in)
+                else:
+                    obs_vec = obs_to_vector(obs)
+
+                action, _logprob, _val = learner.act(
+                    obs_vec[None, :], mask[None, :], deterministic=deterministic,
+                )
+                act_val = int(action[0])
+            elif policy_type in ("greedy", "lp"):
+                act_val = policy.select_action(agent, env, obs)
+            elif policy_type == "random":
+                valid_acts = np.where(mask)[0]
+                act_val = int(np.random.choice(valid_acts)) if len(valid_acts) > 0 else 0
+            else:
+                raise ValueError(f"Unknown policy_type: {policy_type}")
 
             if act_val == 0:
                 acts_idle += 1
@@ -217,9 +231,14 @@ def evaluate_policy(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a trained MARL rebalancing checkpoint")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to checkpoint.pt file")
+    parser = argparse.ArgumentParser(description="Evaluate a MARL checkpoint or baseline policy")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to checkpoint.pt file (required if --policy is checkpoint)")
+    parser.add_argument("--policy", type=str, default=None,
+                        choices=["checkpoint", "greedy", "lp", "random"],
+                        help="Policy to evaluate: checkpoint, greedy, lp, or random (default: checkpoint if --checkpoint given, else greedy)")
+    parser.add_argument("--env", type=str, default="bandra", choices=["bandra", "nyc"],
+                        help="Environment preset for baseline policies: bandra or nyc (default: bandra)")
     parser.add_argument("--episodes", type=int, default=5,
                         help="Number of evaluation episodes (default: 5)")
     parser.add_argument("--base-seed", type=int, default=1000,
@@ -242,20 +261,59 @@ def main() -> None:
                         help="Override maximum pickup distance in km from zone centroid")
     args = parser.parse_args()
 
-    ckpt_path = Path(args.checkpoint)
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
+    policy_type = args.policy
+    if policy_type is None:
+        policy_type = "checkpoint" if args.checkpoint is not None else "greedy"
 
-    print(f"Loading policy from {ckpt_path}...")
-    learner, manifest, env = load_trained_policy(
-        ckpt_path,
-        target_zone=args.target_zone,
-        target_zone_demand_pct=args.target_zone_demand_pct,
-        num_drivers=args.num_drivers,
-        max_dispatch_radius_km=args.max_dispatch_radius,
-    )
-    algo = manifest.get("algo", "unknown").upper()
-    scenario = manifest.get("scenario_id", "unknown")
+    if policy_type == "checkpoint":
+        if not args.checkpoint:
+            raise ValueError("--checkpoint <path> is required when --policy is checkpoint")
+        ckpt_path = Path(args.checkpoint)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found at: {ckpt_path}")
+
+        print(f"Loading policy from {ckpt_path}...")
+        policy, manifest, env = load_trained_policy(
+            ckpt_path,
+            target_zone=args.target_zone,
+            target_zone_demand_pct=args.target_zone_demand_pct,
+            num_drivers=args.num_drivers,
+            max_dispatch_radius_km=args.max_dispatch_radius,
+        )
+        algo = manifest.get("algo", "unknown").upper()
+        scenario = manifest.get("scenario_id", "unknown")
+    else:
+        # Build baseline policy and environment
+        if args.env == "nyc":
+            env_cfg = NYCConfig()
+        else:
+            env_cfg = BandraConfig()
+
+        if args.target_zone is not None:
+            env_cfg.target_zone = args.target_zone
+        if args.target_zone_demand_pct is not None:
+            pct = args.target_zone_demand_pct
+            if pct > 1.0:
+                pct = pct / 100.0
+            env_cfg.target_zone_demand_pct = pct
+        if args.num_drivers is not None:
+            env_cfg.num_drivers = args.num_drivers
+        if args.max_dispatch_radius is not None:
+            env_cfg.max_dispatch_radius_km = args.max_dispatch_radius
+
+        env = RideGymAEC(config=env_cfg, seed=args.base_seed)
+        algo = policy_type.upper()
+        scenario = f"base-{args.env}"
+
+        if policy_type == "greedy":
+            policy = GreedyZoneDispatcher()
+        elif policy_type == "lp":
+            policy = ZoneLPRebalancer()
+        elif policy_type == "random":
+            policy = None
+        else:
+            raise ValueError(f"Unknown policy type: {policy_type}")
+
     print(f"Config loaded: Algo={algo} | Scenario={scenario} | Zones={env._num_zones} | Drivers={env._num_drivers}")
 
     record_animation = args.output is not None or args.interactive
@@ -263,8 +321,9 @@ def main() -> None:
 
     print(f"\nRunning {args.episodes} evaluation episodes (deterministic={deterministic}, base_seed={args.base_seed})...")
     results, recorder = evaluate_policy(
-        learner=learner,
+        policy=policy,
         env=env,
+        policy_type=policy_type,
         num_episodes=args.episodes,
         base_seed=args.base_seed,
         deterministic=deterministic,

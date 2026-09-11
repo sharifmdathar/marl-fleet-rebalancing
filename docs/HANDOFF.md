@@ -196,8 +196,8 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 5. Train on NYC base demand, verify agents learn something
 
 ### Phase 3: Baselines
-1. Implement greedy nearest-idle dispatch (the floor)
-2. Port LP rebalancer (`baselines/heuristic_baseline.py`) to the wrapper env
+1. Implement greedy nearest-idle dispatch (the floor) — **DONE 2026-09-11** (`baselines/greedy_baseline.py`)
+2. Port LP rebalancer to the wrapper env — **DONE 2026-09-11** (`baselines/lp_baseline.py` + integrated in `experiments/evaluate.py`)
 3. Tune all baselines with comparable effort to RL (D3 / RLSCALE-BENCH lesson)
 
 ### Phase 4: Demand shift experiments

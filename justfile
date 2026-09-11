@@ -45,3 +45,22 @@ view-interactive checkpoint target_zone="" target_pct="":
     if [ -n "{{target_pct}}" ]; then CMD="$CMD --target-zone-demand-pct {{target_pct}}"; fi
     echo "Executing: $CMD"
     $CMD
+
+# 5. Evaluate greedy nearest-idle dispatch baseline
+eval-greedy env="bandra" episodes="5" target_zone="" target_pct="":
+    #!/usr/bin/env bash
+    CMD="uv run python -m marl_fleet_rebalancing.experiments.evaluate --policy greedy --env {{env}} --episodes {{episodes}}"
+    if [ -n "{{target_zone}}" ]; then CMD="$CMD --target-zone {{target_zone}}"; fi
+    if [ -n "{{target_pct}}" ]; then CMD="$CMD --target-zone-demand-pct {{target_pct}}"; fi
+    echo "Executing: $CMD"
+    $CMD
+
+# 6. Evaluate LP rebalancer baseline
+eval-lp env="bandra" episodes="5" target_zone="" target_pct="":
+    #!/usr/bin/env bash
+    CMD="uv run python -m marl_fleet_rebalancing.experiments.evaluate --policy lp --env {{env}} --episodes {{episodes}}"
+    if [ -n "{{target_zone}}" ]; then CMD="$CMD --target-zone {{target_zone}}"; fi
+    if [ -n "{{target_pct}}" ]; then CMD="$CMD --target-zone-demand-pct {{target_pct}}"; fi
+    echo "Executing: $CMD"
+    $CMD
+
