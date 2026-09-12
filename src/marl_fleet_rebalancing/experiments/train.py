@@ -65,6 +65,8 @@ def _make_env(
 ) -> tuple[RideGymAEC, EnvConfig, str]:
     if base_env_cfg is not None:
         env_cfg = base_env_cfg
+        if nyc_window_limit is not None and hasattr(env_cfg, "nyc_window_limit"):
+            env_cfg.nyc_window_limit = nyc_window_limit
         scenario = "S0-base-bandra" if name == "bandra" else "S0-base-nyc-train"
     elif name == "bandra":
         env_cfg = BandraConfig()
@@ -402,6 +404,8 @@ def main() -> None:
         env_cfg.num_drivers = args.num_drivers
     if args.max_dispatch_radius is not None:
         env_cfg.max_dispatch_radius_km = args.max_dispatch_radius
+    if args.nyc_window_limit is not None:
+        env_cfg.nyc_window_limit = args.nyc_window_limit
     if args.target_zone is not None:
         env_cfg.target_zone = args.target_zone
     if args.target_zone_demand_pct is not None:
