@@ -57,3 +57,4 @@ dataset/
 # Training outputs (AGENTS.md: never commit checkpoints)
 runs/
 *.pt
+*log.txt

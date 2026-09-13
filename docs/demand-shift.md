@@ -51,6 +51,12 @@ zone count and method. Zone count: 12 zones via 3×4 spatial grid partition.>
    ∫ KPI(severity) d(severity) / KPI(S0). <TODO: finalize formula after
    first results.>
 
+## Results
+
+Phase 4 evaluation (2026-09-13) for S0/S2/S1/S4 is recorded in
+`docs/shift-results.md` (raw data: `results/shift_eval/summary.json`).
+S3/S5/S6 not yet implemented.
+
 ## Fair-comparison checklist
 
 - [ ] Same seeds and same scenario instances across all methods.

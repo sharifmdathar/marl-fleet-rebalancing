@@ -201,10 +201,11 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 3. Tune all baselines with comparable effort to RL (D3 / RLSCALE-BENCH lesson)
 
 ### Phase 4: Demand shift experiments
-1. Implement shift injection (spatial, magnitude, event)
-2. Freeze trained policies, evaluate on shifted scenarios
-3. Plot degradation curves
-4. IPPO vs MAPPO head-to-head
+1. Implement shift injection (spatial, magnitude) — **DONE 2026-09-13** (`experiments/shift_eval.py`; S0/S2/S1/S4)
+2. Freeze trained policies, evaluate on shifted scenarios — **DONE 2026-09-13** (4 policies x 9 shifts x 5 seeds; raw data `results/shift_eval/summary.json`)
+3. Findings recorded — **DONE 2026-09-13** (`docs/shift-results.md`: spatial collapse to 18-28% SR, MAPPO-seed1 flagged degenerate)
+4. IPPO vs MAPPO head-to-head — done, curves overlap on magnitude (H3)
+5. Remaining: S3 (temporal), S5 (event), S6 (held-out test split) not yet implemented
 
 ---
 
