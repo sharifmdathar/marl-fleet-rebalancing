@@ -1,0 +1,19 @@
+Loading policy from runs/mappo-nyc-proper-seed1/checkpoint.pt...
+Config loaded: Algo=MAPPO | Scenario=S0-base-nyc-train | Zones=62 | Drivers=50
+
+Running 5 evaluation episodes (deterministic=True, base_seed=1000)...
+
+==============================================================================
+EVALUATION SUMMARY (MAPPO on S0-base-nyc-train over 5 seeds)
+==============================================================================
+Metric                    | Mean ± Std           | Range [Min, Max]
+------------------------------------------------------------------------------
+Served Orders             |  228.6 ± 10.5       | [221, 249]
+Cancelled Orders          |  232.8 ± 14.0       | [212, 256]
+Service Rate (%)          |   49.6% ± 2.5      % | [46.3%, 54.0%]
+Avg Waiting Time (min)    |   1.83 ± 0.13       | [1.66, 2.07]
+Empty Distance (km)       |  216.1 ± 15.2       | [188.7, 233.6]
+Cumulative Reward         |  365.3 ± 88.7       | [253.8, 526.4]
+Dispatch Actions (%)      |    0.7% ± 0.0      % | [0.7%, 0.8%]
+Relocate Actions (%)      |    0.1% ± 0.0      % | [0.0%, 0.1%]
+==============================================================================
