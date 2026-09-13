@@ -43,7 +43,10 @@ from ride_gym.order_generator import (
 from ride_gym.osmnx_network import OSMnxNetwork
 
 from marl_fleet_rebalancing.config import EnvConfig
-from marl_fleet_rebalancing.demand.generators import ParameterizedZoneOrderGenerator
+from marl_fleet_rebalancing.demand.generators import (
+    ParameterizedZoneOrderGenerator,
+    UniformSampledNYCOrderGenerator,
+)
 
 _M_PER_KM = 1000.0
 
@@ -196,7 +199,7 @@ class RideGymAEC(AECEnv):
             )
         elif config.order_source == "nyc":
             paths = self._nyc_split_paths(config)
-            gen = MultiWindowNYCOrderGenerator(
+            gen = UniformSampledNYCOrderGenerator(
                 network=network,
                 order_paths=paths,
                 horizon=config.horizon,

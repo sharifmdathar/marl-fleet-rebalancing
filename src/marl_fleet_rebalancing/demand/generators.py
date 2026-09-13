@@ -2,10 +2,79 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+import tempfile
+from pathlib import Path
+from typing import Any, List, Optional, Sequence
+
 import numpy as np
 from ride_gym import Order
+from ride_gym.order_generator import MultiWindowNYCOrderGenerator, NYCOrderGenerator
 from ride_gym.osmnx_network import OSMnxNetwork
+
+
+class UniformSampledNYCOrderGenerator(MultiWindowNYCOrderGenerator):
+    """Uniformly samples orders across the full time horizon for NYC windows.
+
+    Prevents the chronological truncation artifact where limit=N takes only the
+    first N arrivals (minutes 0 to 4), leaving the rest of the episode dead.
+
+    Samples uniformly from the DataFrame BEFORE snapping to the road network,
+    so only the sampled subset pays the snapping cost.
+    """
+
+    def generate(self) -> List[Order]:
+        import pandas as pd
+
+        idx = self._pick_window_index()
+        path = self.order_paths[idx]
+        self.last_window_index = idx
+        self.last_window_path = path
+
+        if path.endswith(".parquet"):
+            df = pd.read_parquet(path)
+        else:
+            df = pd.read_csv(path)
+
+        df = df[df["request_time"] < self.horizon]
+        df = df.sort_values("request_time").reset_index(drop=True)
+
+        # Sample BEFORE snapping — saves ~90% of the snap computation
+        if self.limit is not None and len(df) > self.limit:
+            chosen = np.sort(
+                self._rng.choice(len(df), size=self.limit, replace=False)
+            )
+            df = df.iloc[chosen].reset_index(drop=True)
+
+        suffix = ".parquet" if path.endswith(".parquet") else ".csv"
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix, delete=False, dir=Path(path).parent
+        ) as tmp:
+            if suffix == ".parquet":
+                df.to_parquet(tmp.name, index=False)
+            else:
+                df.to_csv(tmp.name, index=False)
+            tmp_path = tmp.name
+
+        try:
+            window_gen = NYCOrderGenerator(
+                network=self.network,
+                order_path=tmp_path,
+                horizon=self.horizon,
+                limit=None,
+                random_party_size=self.random_party_size,
+                max_party_size=self.max_party_size,
+                perturb_od_radius_km=self.perturb_od_radius_km,
+                rng=self._rng,
+            )
+            orders = window_gen.generate()
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        # Re-index order_ids consecutively
+        for new_id, o in enumerate(orders):
+            o.order_id = new_id
+
+        return orders
 
 
 class ParameterizedZoneOrderGenerator:
