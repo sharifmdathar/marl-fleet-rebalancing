@@ -35,19 +35,27 @@ CHECKPOINTS = {
     "mappo-proper-seed1": "runs/mappo-nyc-proper-seed1/checkpoint.pt",
 }
 
-# Shift scenarios: (label, nyc_window_limit, target_zone, target_zone_pct)
+# Shift scenarios: (label, nyc_window_limit, target_zone, target_zone_pct, shift_param)
+# shift_param is shift-type-specific:
+#   S3: temporal phase shift — change nyc_split to simulate shifted peak window
+#   S5: event spike — target_zone + target_zone_pct concentrates demand in one zone
+#   S6: real held-out — nyc_split="test" uses real FHVHV test-split windows
 # None target_zone means uniform demand (no spatial shift)
 SHIFTS = [
-    ("S0",  500, None,  None),    # In-distribution control
-    ("S2a", 250, None,  None),    # Magnitude ×0.5
-    ("S2b", 375, None,  None),    # Magnitude ×0.75
-    ("S2c", 500, None,  None),    # Magnitude ×1.0
-    ("S2d", 750, None,  None),    # Magnitude ×1.5
-    ("S2e", 1000, None, None),    # Magnitude ×2.0
-    ("S1a", 500, 0,    70),       # Spatial concentration (70% zone 0)
-    ("S1b", 500, 30,   70),       # Spatial concentration (70% zone 30)
-    ("S4a", 500, 60,   60),       # New hotspot (60% zone 60)
+    ("S0",  500, None,  None, None),    # In-distribution control
+    ("S1a", 500, 0,    70, None),       # Spatial concentration (70% zone 0)
+    ("S1b", 500, 30,   70, None),       # Spatial concentration (70% zone 30)
+    ("S2a", 250, None,  None, None),    # Magnitude ×0.5
+    ("S2b", 375, None,  None, None),    # Magnitude ×0.75
+    ("S2d", 750, None,  None, None),    # Magnitude ×1.5
+    ("S2e", 1000, None, None, None),    # Magnitude ×2.0
+    ("S3",  500, None,  None, "temporal"),   # Temporal phase shift (val split)
+    ("S4a", 500, 60,   60, None),       # New hotspot (60% zone 60)
+    ("S5",  500, 0,    20, "event"),       # Event spike: 20% zone 0 burst
+    ("S6",  500, None,  None, "real"),      # Real held-out demand (test split)
 ]
+# Note: S2c (magnitude ×1.0) removed 2026-09-14 — byte-identical config to S0
+# (verified: S2c reproduced S0 exactly), pure compute waste. See docs/demand-shift.md.
 
 EVAL_EPISODES = 5
 BASE_SEED = 1000
@@ -58,6 +66,7 @@ def make_shifted_env(
     nyc_window_limit: int,
     target_zone: int | None,
     target_zone_pct: float | None,
+    shift_param: str | None = None,
     seed: int = 0,
 ) -> RideGymAEC:
     """Create an environment with shifted demand configuration."""
@@ -70,6 +79,29 @@ def make_shifted_env(
     if target_zone is not None and target_zone_pct is not None:
         cfg.target_zone = target_zone
         cfg.target_zone_demand_pct = target_zone_pct
+
+    # Apply shift-type-specific parameters
+    if shift_param is not None:
+        if shift_param == "temporal":
+            # S3: Temporal phase shift — shift peak window by changing split
+            # The nyc_window_limit controls per-window order cap;
+            # temporal shift changes which window (peak vs off-peak) is used.
+            # We shift the split cyclic index to simulate a shifted peak.
+            if shift_label == "S3":
+                # S3 uses val split to simulate shifted peak window
+                cfg.nyc_split = "val"
+            elif shift_label == "S3b":
+                cfg.nyc_split = "test"
+            # Note: S3 gets nyc_window_limit=500 same as baseline;
+            # the split change simulates a temporal shift of the demand peak.
+        elif shift_param == "event":
+            # S5: Event spike — 20% of orders concentrated in target_zone as a burst
+            # target_zone and target_zone_pct already set above
+            pass
+        elif shift_param == "real":
+            # S6: Real held-out demand — use the test split of real FHVHV data
+            cfg.nyc_split = "test"
+            # nyc_window_limit=500 already set above; test split has its own windows
 
     env = RideGymAEC(config=cfg, seed=seed)
     env.reset(seed=seed)
@@ -160,7 +192,7 @@ def evaluate_checkpoint(
 
     results: dict[str, Any] = {}
 
-    for shift_label, w_limit, t_zone, t_pct in shifts:
+    for shift_label, w_limit, t_zone, t_pct, shift_param in shifts:
         shift_key = shift_label
         if t_zone is not None:
             shift_key += f"_z{t_zone}"
@@ -174,7 +206,7 @@ def evaluate_checkpoint(
 
         for seed_idx in range(num_episodes):
             env = make_shifted_env(
-                shift_label, w_limit, t_zone, t_pct, seed=seed_idx,
+                shift_label, w_limit, t_zone, t_pct, shift_param=shift_param, seed=seed_idx,
             )
             ep_results = evaluate_policy(
                 learner, env, num_episodes=1,
@@ -241,37 +273,39 @@ def main() -> None:
     print("DEGRADATION SUMMARY (Service Rate % vs Shift)")
     print("="*100)
     header = f"{'Policy':<20}"
-    for shift_label, _, _, _ in SHIFTS:
+    for shift_label, _, _, _, _ in SHIFTS:
         header += f"{shift_label:<10}"
     print(header)
     print("-"*100)
     for policy_name, policy_results in all_results.items():
         row = f"{policy_name:<20}"
-        for shift_label, _, _, _ in SHIFTS:
-            sr = policy_results.get(shift_label, {}).get("service_rate", {}).get("mean", None)
+        for shift_label, _, t_zone, _, _ in SHIFTS:
+            key = shift_label + (f"_z{t_zone}" if t_zone is not None else "")
+            sr = policy_results.get(key, {}).get("service_rate", {}).get("mean", None)
             if sr is not None:
                 row += f"{sr*100:>7.1f}%   "
             else:
                 row += f"{'N/A':>10}  "
         print(row)
-
     print("\n" + "="*100)
     print("EMPTY DISTANCE (km) vs Shift")
     print("="*100)
     header = f"{'Policy':<20}"
-    for shift_label, _, _, _ in SHIFTS:
+    for shift_label, _, _, _, _ in SHIFTS:
         header += f"{shift_label:<10}"
     print(header)
     print("-"*100)
     for policy_name, policy_results in all_results.items():
         row = f"{policy_name:<20}"
-        for shift_label, _, _, _ in SHIFTS:
-            empty = policy_results.get(shift_label, {}).get("empty_km", {}).get("mean", None)
+        for shift_label, _, t_zone, _, _ in SHIFTS:
+            key = shift_label + (f"_z{t_zone}" if t_zone is not None else "")
+            empty = policy_results.get(key, {}).get("empty_km", {}).get("mean", None)
             if empty is not None:
                 row += f"{empty:>7.0f}km  "
             else:
                 row += f"{'N/A':>10}  "
         print(row)
+    print("\n" + "="*100)
 
 
 if __name__ == "__main__":

@@ -51,11 +51,26 @@ zone count and method. Zone count: 12 zones via 3×4 spatial grid partition.>
    ∫ KPI(severity) d(severity) / KPI(S0). <TODO: finalize formula after
    first results.>
 
+## Implemented parameterizations (Phase 4, 2026-09-14)
+
+Concrete settings used in `experiments/shift_eval.py` (`nyc_window_limit=500`
+unless noted, frozen policy, 5 episodes, `base_seed=1000`):
+
+- S3 (temporal phase shift): `nyc_split="val"` — evaluation windows drawn
+  from the validation split (different hours than the train split), simulating
+  a shifted peak. Same order cap (500) as S0/S2c so only timing changes.
+- S5 (event-like spike): `target_zone=0`, `target_zone_demand_pct=20` on the
+  train split — a mild concentrated burst, distinct from S1's sustained 70%
+  concentration and S4's 60% unseen hotspot.
+- S6 (real held-out demand): `nyc_split="test"` — real FHVHV test-split
+  windows never touched during training or tuning.
+
 ## Results
 
-Phase 4 evaluation (2026-09-13) for S0/S2/S1/S4 is recorded in
+Phase 4 evaluation (2026-09-13/14) for all 11 shifts is recorded in
 `docs/shift-results.md` (raw data: `results/shift_eval/summary.json`).
-S3/S5/S6 not yet implemented.
+S2c (magnitude ×1.0) was dropped 2026-09-14: byte-identical config to S0,
+verified reproducing S0 exactly — pure compute waste.
 
 ## Fair-comparison checklist
 

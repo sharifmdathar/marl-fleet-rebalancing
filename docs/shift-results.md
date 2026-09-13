@@ -11,30 +11,51 @@ in-distribution control (same config as training).
 
 ## Degradation curves: service rate (mean ± std, %)
 
-| Policy | S0 | S2a 0.5x | S2b 0.75x | S2d 1.5x | S2e 2.0x | S1a z0 | S1b z30 | S4a z60 |
-|---|---|---|---|---|---|---|---|---|
-| ippo-s0 | 51.3±2.9 | 63.9±3.4 | 60.4±4.1 | 41.4±2.6 | 32.0±1.1 | 21.8±2.0 | 23.3±1.8 | 26.1±2.0 |
-| ippo-s1 | 53.8±4.1 | 61.7±4.4 | 60.7±3.2 | 41.8±2.0 | 33.3±1.3 | 22.6±2.6 | 27.1±2.6 | 25.6±3.1 |
-| mappo-s0 | 51.1±3.0 | 66.0±4.2 | 61.6±2.8 | 41.6±2.7 | 33.5±1.2 | 18.7±0.9 | 21.2±1.5 | 26.7±1.5 |
-| mappo-s1 | 49.6±2.5 | 62.9±3.8 | 58.7±4.0 | 38.9±2.5 | 31.2±2.2 | 21.1±1.4 | 22.6±1.9 | 28.2±2.4 |
+| Shift | Description | ippo-s0 | ippo-s1 | mappo-s0 | mappo-s1 |
+|---|---|---|---|---|---|
+| S0 | In-distribution control | 51.3±2.9 | 53.8±4.1 | 51.1±3.0 | 49.6±2.5 |
+| S1a | Spatial 70% zone 0 | 21.8±2.0 | 22.6±2.6 | 18.7±0.9 | 21.1±1.4 |
+| S1b | Spatial 70% zone 30 | 23.3±1.8 | 27.1±2.6 | 21.2±1.5 | 22.6±1.9 |
+| S2a | Magnitude 0.5x | 63.9±3.4 | 61.7±4.4 | 66.0±4.2 | 62.9±3.8 |
+| S2b | Magnitude 0.75x | 60.4±4.1 | 60.7±3.2 | 61.6±2.8 | 58.7±4.0 |
+| S2d | Magnitude 1.5x | 41.4±2.6 | 41.8±2.0 | 41.6±2.7 | 38.9±2.5 |
+| S2e | Magnitude 2.0x | 32.0±1.1 | 33.3±1.3 | 33.5±1.2 | 31.2±2.2 |
+| S3 | Temporal (val split) | 49.8±1.2 | 54.1±1.9 | 51.5±3.0 | 48.9±2.9 |
+| S4a | Hotspot 60% zone 60 | 26.1±2.0 | 25.6±3.1 | 26.7±1.5 | 28.2±2.4 |
+| S5 | Event 20% zone 0 | 46.5±4.2 | 49.0±3.3 | 46.0±3.3 | 43.3±2.4 |
+| S6 | Real held-out (test) | 51.1±3.0 | 52.9±3.2 | 52.3±4.0 | 48.6±3.2 |
 
 ## Empty distance (km/ep, mean)
 
-| Policy | S0 | S2a | S2b | S2d | S2e | S1a | S1b | S4a |
-|---|---|---|---|---|---|---|---|---|
-| ippo-s0 | 659 | 972 | 770 | 486 | 417 | 1080 | 1047 | 1010 |
-| ippo-s1 | 639 | 1000 | 761 | 478 | 400 | 1088 | 982 | 1030 |
-| mappo-s0 | 599 | 671 | 622 | 438 | 383 | 799 | 892 | 652 |
-| mappo-s1 | 216 | 167 | 217 | 224 | 220 | 118 | 120 | 164 |
+| Shift | Description | ippo-s0 | ippo-s1 | mappo-s0 | mappo-s1 |
+|---|---|---|---|---|---|
+| S0 | In-distribution control | 659 | 639 | 599 | 216 |
+| S1a | Spatial 70% zone 0 | 1080 | 1088 | 799 | 118 |
+| S1b | Spatial 70% zone 30 | 1047 | 982 | 892 | 120 |
+| S2a | Magnitude 0.5x | 972 | 1000 | 671 | 167 |
+| S2b | Magnitude 0.75x | 770 | 761 | 622 | 217 |
+| S2d | Magnitude 1.5x | 486 | 478 | 438 | 224 |
+| S2e | Magnitude 2.0x | 417 | 400 | 383 | 220 |
+| S3 | Temporal (val split) | 677 | 649 | 588 | 223 |
+| S4a | Hotspot 60% zone 60 | 1010 | 1030 | 652 | 164 |
+| S5 | Event 20% zone 0 | 708 | 681 | 646 | 192 |
+| S6 | Real held-out (test) | 717 | 693 | 609 | 218 |
 
 ## Avg wait (min/ep, mean)
 
-| Policy | S0 | S2a | S2b | S2d | S2e | S1a | S1b | S4a |
-|---|---|---|---|---|---|---|---|---|
-| ippo-s0 | 2.50 | 2.47 | 2.45 | 2.27 | 2.27 | 2.79 | 2.73 | 2.75 |
-| ippo-s1 | 2.40 | 2.47 | 2.38 | 2.24 | 2.15 | 2.84 | 2.69 | 2.59 |
-| mappo-s0 | 2.28 | 2.17 | 2.24 | 2.18 | 2.13 | 2.25 | 2.33 | 2.49 |
-| mappo-s1 | 1.83 | 1.84 | 1.95 | 1.87 | 1.87 | 1.95 | 1.99 | 1.96 |
+| Shift | Description | ippo-s0 | ippo-s1 | mappo-s0 | mappo-s1 |
+|---|---|---|---|---|---|
+| S0 | In-distribution control | 2.50 | 2.40 | 2.28 | 1.83 |
+| S1a | Spatial 70% zone 0 | 2.79 | 2.84 | 2.25 | 1.95 |
+| S1b | Spatial 70% zone 30 | 2.73 | 2.69 | 2.33 | 1.99 |
+| S2a | Magnitude 0.5x | 2.47 | 2.47 | 2.17 | 1.84 |
+| S2b | Magnitude 0.75x | 2.45 | 2.38 | 2.24 | 1.95 |
+| S2d | Magnitude 1.5x | 2.27 | 2.24 | 2.18 | 1.87 |
+| S2e | Magnitude 2.0x | 2.27 | 2.15 | 2.13 | 1.87 |
+| S3 | Temporal (val split) | 2.49 | 2.38 | 2.27 | 1.94 |
+| S4a | Hotspot 60% zone 60 | 2.75 | 2.59 | 2.49 | 1.96 |
+| S5 | Event 20% zone 0 | 2.53 | 2.51 | 2.26 | 1.80 |
+| S6 | Real held-out (test) | 2.48 | 2.39 | 2.25 | 1.87 |
 
 ## Findings
 
@@ -79,12 +100,25 @@ in-distribution control (same config as training).
    converges to a usable but brittle policy — worth a hyperparameter
    note (entropy_coef 0.01 → 0.02+) before any retraining.
 
+6. **Temporal, event, and held-out shifts barely hurt (2026-09-14,
+   all four policies).** S3 (val-split windows, shifted peak timing)
+   holds SR at 48.9-54.1% vs 49.6-53.8% in-distribution; S6 (real
+   test-split windows) at 48.6-52.9% — the frozen policies generalize
+   across real time windows. S5 (mild 20% event burst in zone 0) dips
+   only to 43.3-49.0%. Ranking of shift severity is now clear:
+   spatial concentration (18-28%) >> 2x magnitude (~31-34%) >
+   mild event (~43-49%) ≈ temporal ≈ held-out (≈S0). RQ1 answer:
+   policies are robust to *when* demand arrives, fragile to *where*.
+
 ## H1–H4 reading (preliminary, 2 seeds each)
 
 - H1 (MAPPO more robust): not supported — curves overlap.
 - H2 (IPPO more robust): not supported — curves overlap.
-- H3 (no difference): supported on magnitude shifts.
-- H4 (depends on shift type): partially — spatial shifts hurt
-  everyone equally, so the "difference" is between shift types,
-  not between methods. With MAPPO-seed1 excluded as degenerate,
-  the honest headline is H3 with a strong RQ1 spatial-collapse result.
+- H3 (no difference): supported on magnitude, temporal, event,
+  and held-out shifts alike.
+- H4 (depends on shift type): supported in the RQ1 sense — shift
+  *type* matters enormously (spatial collapse vs temporal
+  invariance), but the IPPO-vs-MAPPO *difference* does not appear
+  under any tested type. With MAPPO-seed1 excluded as degenerate,
+  the honest headline is H3 with a strong RQ1 ranking result:
+  where >> how-much >> when.
