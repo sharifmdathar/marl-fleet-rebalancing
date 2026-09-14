@@ -15,6 +15,8 @@ import argparse
 import dataclasses
 import datetime as _dt
 import json
+import multiprocessing as mp
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +43,7 @@ class TrainConfig:
     run_name: str | None = None
     checkpoint_interval: int = 10
     verbose: bool = False
+    num_workers: int = 1  # parallel rollout envs (1 = serial, current behavior)
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +53,7 @@ class TrainConfig:
             "iterations": self.iterations,
             "scenario_id": self.scenario_id,
             "checkpoint_interval": self.checkpoint_interval,
+            "num_workers": self.num_workers,
         }
 
 
@@ -91,6 +95,10 @@ def collect_rollout(
 ) -> dict:
     """Collect agent transitions for ``total_turns`` env turns (AEC pattern).
 
+    **Optimized**: all zone agents are batched into a single forward pass
+    per turn instead of calling ``learner.act()`` once per zone. This keeps
+    the GPU busy processing batch_size=N_zones instead of batch_size=1.
+
     Rewards close at the agent's next selection (PettingZoo delayed-close
     semantics): the reward read for an agent is the one produced by the env
     step that followed its previous action. Rollouts must end exactly at
@@ -104,6 +112,8 @@ def collect_rollout(
     Episode accounting: when the AEC termination dance empties ``env.agents``,
     the ended episode's KPIs are read from the env BEFORE the next reset.
     """
+    if total_turns <= 0:
+        raise ValueError(f"collect_rollout requires total_turns > 0, got {total_turns}")
     num_zones = env._num_zones
     counts = np.zeros(num_zones, dtype=int)
     pending: dict[str, tuple[int, int]] = {}
@@ -115,7 +125,30 @@ def collect_rollout(
     acts_idle = 0
     acts_dispatch = 0
     acts_relocate = 0
-    episode_ended = False  # an episode finished; KPIs not yet accounted
+    episode_ended = False
+
+    # Per-agent observation/mask buffers for batch collection.
+    # Each slot is a single observation vector (obs_dim,) not a full
+    # episode rollout, so allocate (num_zones, obs_dim).
+    _obs_dim = obs_dim  # for the closure below
+    obs_batch = np.empty(
+        (num_zones, buffer.obs.shape[2]), dtype=np.float32,
+    )
+    mask_batch = np.empty(
+        (num_zones, buffer.action_mask.shape[2]), dtype=bool,
+    )
+    # MAPPO centralized-state batch (D18 fix): per-agent state = global
+    # state + own zone_location, matching train.py's state_dim. IPPO leaves
+    # this None and uses decentralized actor values.
+    if use_state:
+        assert buffer.states is not None, (
+            "use_state=True requires a RolloutBuffer with state_dim (MAPPO)."
+        )
+        state_batch: np.ndarray | None = np.empty(
+            (num_zones, buffer.states.shape[2]), dtype=np.float32,
+        )
+    else:
+        state_batch = None
 
     while counts.min() < total_turns or env.agents:
         if not env.agents:
@@ -131,47 +164,137 @@ def collect_rollout(
             if counts.min() < total_turns:
                 env.reset(seed=None)
             continue
-        agent = env.agent_selection
-        _obs, reward, term, trunc, _info = env.last()
-        slot = int(agent.split("_")[1])
-        if agent in pending:
-            s_slot, s_turn = pending.pop(agent)
-            buffer.close(s_slot, s_turn, reward, done=term or trunc)
-        if term or trunc:
-            episode_ended = True
-            env.step(None)
+
+        # Selection-ordered turn (AEC correctness): env.step() records the
+        # action for the CURRENTLY SELECTED agent, so a turn's 25 steps must
+        # walk env._agent_order exactly. The pre-batching loop stepped
+        # agent_selection directly; batching must preserve that walk, or zone
+        # actions silently execute on the wrong zones (found by audit).
+        sel_order = [int(z) for z in env._agent_order]
+
+        if not any(counts[s] < total_turns for s in sel_order):
+            # All turns collected but agents remain: drain without acting.
+            # The episode's KPIs are accounted BEFORE the drain flush below
+            # (an extra RideGym step) can pollute them. Pending delayed
+            # rewards are closed from the per-agent reward tables directly.
+            if not episode_ended:
+                kpi = env.kpi_summary()
+                served_total += int(kpi["served"])
+                cancelled_total += int(kpi["cancelled"])
+                empty_km_total += float(kpi["empty_km"])
+                if kpi["avg_wait"] > 0:
+                    wait_times_all.append(kpi["avg_wait"])
+                episodes += 1
+            for agent in list(env.agents):
+                if agent in pending:
+                    s_slot, s_turn = pending.pop(agent)
+                    buffer.close(
+                        s_slot, s_turn,
+                        float(env.rewards.get(agent, 0.0)),
+                        done=bool(
+                            env.terminations.get(agent, False)
+                            or env.truncations.get(agent, False)
+                        ),
+                    )
+                env.step(None)
+            episode_ended = False
             continue
-        obs = env.observe(agent)
-        obs_vec = obs_to_vector(obs)
-        mask = env.action_mask(agent)
-        action, logprob, decentral_value = learner.act(obs_vec[None, :], mask[None, :])
-        act_val = int(action[0])
-        if act_val == 0:
-            acts_idle += 1
-        elif 1 <= act_val <= env._max_pending:
-            acts_dispatch += 1
-        else:
-            acts_relocate += 1
 
-        if use_state:
-            zone_loc = obs["zone_location"].ravel()
-            state_vec = np.concatenate([env.state(), zone_loc]).astype(np.float32)
-            value = float(learner.value(state_vec[None, :])[0])
-        else:
-            state_vec = None
-            value = float(decentral_value[0])
-        turn = int(counts[slot])
-        buffer.store(
-            slot, turn, obs_vec, mask,
-            act_val, float(logprob[0]), value,
-            state=state_vec,
-        )
-        counts[slot] += 1
-        pending[agent] = (slot, turn)
-        env.step(act_val)
+        # Phase 1: close delayed rewards + observe. No env steps here, so the
+        # Per-agent tables are read directly (D18 fix): env.last() reports
+        # only the currently-selected agent, so calling it per zone
+        # misattributes rewards and done-flags. Skipping the second
+        # env.last() build also removes a redundant observation per agent.
+        # MAPPO (use_state): values come from the centralized critic over
+        # per-agent global states; the actor head's decentralized values are
+        # discarded, per MAPPO.act's documented contract.
+        g_state = env.state() if use_state else None
+        dead: set[int] = set()
+        live_idx: list[int] = []
+        for i, slot in enumerate(sel_order):
+            agent = f"zone_{slot}"
+            if agent in pending:
+                s_slot, s_turn = pending.pop(agent)
+                buffer.close(
+                    s_slot, s_turn,
+                    float(env.rewards.get(agent, 0.0)),
+                    done=bool(
+                        env.terminations.get(agent, False)
+                        or env.truncations.get(agent, False)
+                    ),
+                )
+            if (
+                counts[slot] >= total_turns
+                or env.terminations.get(agent, False)
+                or env.truncations.get(agent, False)
+            ):
+                if env.terminations.get(agent, False) or env.truncations.get(agent, False):
+                    episode_ended = True
+                    dead.add(slot)
+                continue
+            obs_dict = env.observe(agent)
+            obs_batch[i] = obs_to_vector(obs_dict)
+            mask_batch[i] = env.action_mask(agent)
+            if use_state:
+                assert g_state is not None and state_batch is not None
+                state_batch[i] = np.concatenate(
+                    [g_state, np.asarray(
+                        obs_dict["zone_location"].ravel(), dtype=np.float32,
+                    )],
+                )
+            live_idx.append(i)
 
-    # The rollout ends inside the final episode's termination dance; account
-    # its KPIs now (env still holds the finished episode's orders until reset).
+        # Single batched forward pass for the live zones (if any).
+        # act_of maps zone slot -> (batch position, action, logprob, value).
+        act_of: dict[int, tuple[int, int, float, float]] = {}
+        if live_idx:
+            _act_t, _logp_t, _val_t = learner.act(
+                obs_batch[live_idx], mask_batch[live_idx],
+            )
+            act_values = _act_t.astype(np.int64)
+            logprobs = _logp_t.astype(np.float64)
+            if use_state:
+                # Centralized critic values (D18 fix).
+                assert isinstance(learner, MAPPO)
+                assert state_batch is not None
+                values = learner.value(state_batch[live_idx]).astype(np.float64)
+            else:
+                values = _val_t.astype(np.float64)
+            for j, i in enumerate(live_idx):
+                act_of[sel_order[i]] = (
+                    i, int(act_values[j]), float(logprobs[j]), float(values[j]),
+                )
+
+        # Phase 2: walk the selection order, stepping each agent exactly
+        # once. Dead/completed zones step None (no-op that keeps the walk
+        # aligned); live zones step their batched action. This preserves the
+        # pre-batching attribute-every-action-to-the-selected-agent semantics.
+        for slot in sel_order:
+            agent = f"zone_{slot}"
+            if slot in act_of:
+                i, act_val, logprob, value = act_of[slot]
+                turn = int(counts[slot])
+
+                if act_val == 0:
+                    acts_idle += 1
+                elif 1 <= act_val <= env._max_pending:
+                    acts_dispatch += 1
+                else:
+                    acts_relocate += 1
+
+                buffer.store(
+                    slot, turn, obs_batch[i], mask_batch[i],
+                    act_val, logprob, value,
+                    state=(state_batch[i] if (
+                        use_state and state_batch is not None) else None),
+                )
+                counts[slot] += 1
+                pending[agent] = (slot, turn)
+                env.step(act_val)
+            else:
+                env.step(None)
+
+    # Account final episode's KPIs
     if episode_ended:
         kpi = env.kpi_summary()
         served_total += int(kpi["served"])
@@ -199,6 +322,132 @@ def collect_rollout(
 def _episode_kpis(env: RideGymAEC) -> dict[str, float]:
     """KPIs of the episode that just ended."""
     return env.kpi_summary()
+
+
+# ---------------------------------------------------------------------------
+# Parallel rollout workers.
+#
+# Parallelism is across EPISODES, never across zones within a turn: zones in
+# one turn share a single RideGym instance (claimed-order set, FIFO driver
+# queues, one _flush_turn, zone reward attribution) and must stay sequential.
+# Each worker owns an independent RideGymAEC copy, runs the standard
+# sequential AEC loop (with the same per-turn zone batching as
+# collect_rollout), and returns its buffer shard. The parent concatenates
+# shards and runs the PPO update. Learning semantics are unchanged — same
+# MDP, just more diverse samples per update.
+# Workers run on CPU (spawn context; no CUDA in forks) and receive the
+# current policy weights each iteration.
+# ---------------------------------------------------------------------------
+
+_WORKER_CTX: dict = {}
+
+
+def _worker_init(
+    env_name: str,
+    env_cfg: EnvConfig,
+    algo_name: str,
+    algo_cfg: IPPOConfig | MAPPOConfig,
+    observation_dim: int,
+    action_dim: int,
+    state_dim: int | None,
+    use_state: bool,
+) -> None:
+    """Build one persistent env + CPU learner per worker process."""
+    # One thread per worker: with N workers on N cores, torch's default
+    # multi-threading oversubscribes and slows everything down.
+    torch.set_num_threads(1)
+    env, _, _ = _make_env(env_name, 0, None, base_env_cfg=env_cfg)
+    cpu = torch.device("cpu")
+    if use_state:
+        assert isinstance(algo_cfg, MAPPOConfig)
+        learner: IPPO | MAPPO = MAPPO(
+            observation_dim=observation_dim,
+            state_dim=state_dim or 0,
+            action_dim=action_dim,
+            config=algo_cfg,
+            device=cpu,
+        )
+    else:
+        assert isinstance(algo_cfg, IPPOConfig)
+        learner = IPPO(
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+            config=algo_cfg,
+            device=cpu,
+        )
+    _WORKER_CTX.update(
+        env=env,
+        learner=learner,
+        use_state=use_state,
+        observation_dim=observation_dim,
+        action_dim=action_dim,
+        state_dim=state_dim,
+    )
+
+
+def _worker_collect(job: tuple[dict, int, int]) -> dict:
+    """Run one rollout shard. Job = (policy state_dict, episodes, seed)."""
+    state_dict, episodes, seed = job
+    env: RideGymAEC = _WORKER_CTX["env"]
+    learner = _WORKER_CTX["learner"]
+    use_state: bool = _WORKER_CTX["use_state"]
+    episode_turns = _episode_turns(env._cfg)
+    total_turns = episodes * episode_turns
+    if episodes <= 0:
+        # Defensive: collect_rollout's loop assumes total_turns > 0
+        # (empty env.agents with counts at 0 would spin forever).
+        return {"arrays": {}, "kpis": _merge_kpis([]), "shard_turns": 0}
+    learner.load_state_dict(state_dict)
+    torch.manual_seed(seed)
+    np.random.seed(seed % (2**32))
+    buffer = RolloutBuffer(
+        num_agents=env._num_zones,
+        num_turns=total_turns,
+        obs_dim=_WORKER_CTX["observation_dim"],
+        action_dim=_WORKER_CTX["action_dim"],
+        state_dim=_WORKER_CTX["state_dim"],
+    )
+    env.reset(seed=seed)
+    kpis = collect_rollout(env, learner, buffer, total_turns, use_state=use_state)
+    arrays = {
+        "obs": buffer.obs,
+        "action_mask": buffer.action_mask,
+        "actions": buffer.actions,
+        "logprobs": buffer.logprobs,
+        "values": buffer.values,
+        "rewards": buffer.rewards,
+        "dones": buffer.dones,
+        "filled": buffer.filled,
+        "states": buffer.states,
+    }
+    return {"arrays": arrays, "kpis": kpis, "shard_turns": total_turns}
+
+
+def _split_episodes(n_episodes: int, n_workers: int) -> list[int]:
+    """Split episodes as evenly as possible (first workers get the remainder)."""
+    base, rem = divmod(n_episodes, n_workers)
+    return [base + (1 if w < rem else 0) for w in range(n_workers)]
+
+
+def _merge_kpis(shard_kpis: list[dict]) -> dict:
+    """Combine per-worker KPI dicts, weighting averages by episode count."""
+    episodes = sum(k["episodes"] for k in shard_kpis)
+    ep = max(episodes, 1)
+    served = sum(k["served_total"] for k in shard_kpis)
+    cancelled = sum(k["cancelled_total"] for k in shard_kpis)
+    empty = sum(k["empty_km_total"] for k in shard_kpis)
+    avg_wait = sum(k["avg_wait"] * k["episodes"] for k in shard_kpis) / ep
+    pct = lambda key: sum(k[key] * k["episodes"] for k in shard_kpis) / ep
+    return {
+        "episodes": episodes,
+        "served_total": served,
+        "cancelled_total": cancelled,
+        "empty_km_total": empty,
+        "avg_wait": avg_wait,
+        "pct_dispatch": pct("pct_dispatch"),
+        "pct_relocate": pct("pct_relocate"),
+        "pct_idle": pct("pct_idle"),
+    }
 
 
 def train(
@@ -238,9 +487,10 @@ def train(
     state_dim = (len(env.state()) + zone_loc_dim) if use_state else None
     if use_state:
         assert isinstance(train_cfg.algo_config, MAPPOConfig)
+        state_dim_: int = state_dim if state_dim is not None else 0
         learner: IPPO | MAPPO = MAPPO(
             observation_dim=observation_dim,
-            state_dim=state_dim,
+            state_dim=state_dim_,
             action_dim=action_dim,
             config=train_cfg.algo_config,
         )
@@ -252,7 +502,7 @@ def train(
             config=train_cfg.algo_config,
         )
 
-    # ---- run manifest: config + seed + scenario (AGENTS rules) -----------
+    # ---- run manifest: config + seed + scenario (AGENTS rules) ----------
     manifest = {
         **train_cfg.to_dict(),
         "algo": algo_name,
@@ -260,6 +510,7 @@ def train(
         "num_zones": env._num_zones,
         "num_drivers": env._num_drivers,
         "episode_turns": _episode_turns(env_cfg),
+        "num_workers": train_cfg.num_workers,
     }
     if resume_from is not None:
         ckpt_path = Path(resume_from)
@@ -289,55 +540,116 @@ def train(
 
     print(f"[train] run={run_id} device={learner.device} zones={env._num_zones} "
           f"obs={observation_dim} actions={action_dim} "
-          f"rollout_turns={total_turns}")
+          f"rollout_turns={total_turns} workers={train_cfg.num_workers}")
     print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('algo', 'scenario_id', 'seed')})}")
 
-    for it in range(1, train_cfg.iterations + 1):
-        kpis = collect_rollout(env, learner, buffer, total_turns, use_state=use_state)
-        losses = learner.update(buffer)
-        ep = max(kpis["episodes"], 1)
-        sr = kpis["served_total"] / max(kpis["served_total"] + kpis["cancelled_total"], 1)
-        reward_per_ep = float(buffer.rewards[buffer.filled].sum() / ep)
-        record = {
-            "iteration": it,
-            "episodes": kpis["episodes"],
-            "reward_per_ep": reward_per_ep,
-            "mean_reward_per_turn": float(buffer.rewards[buffer.filled].mean()),
-            "service_rate": sr,
-            "served_per_ep": kpis["served_total"] / ep,
-            "cancelled_per_ep": kpis["cancelled_total"] / ep,
-            "avg_wait_min": kpis["avg_wait"],
-            "empty_km_per_ep": kpis["empty_km_total"] / ep,
-            "pct_dispatch": kpis["pct_dispatch"],
-            "pct_relocate": kpis["pct_relocate"],
-            "pct_idle": kpis["pct_idle"],
-            **{f"loss_{k}": v for k, v in losses.items()},
-        }
-        with open(metrics_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+    pool = None
+    if train_cfg.num_workers > 1:
+        ctx = mp.get_context("spawn")
+        pool = ctx.Pool(
+            processes=train_cfg.num_workers,
+            initializer=_worker_init,
+            initargs=(
+                env_name, env_cfg, algo_name, train_cfg.algo_config,
+                observation_dim, action_dim, state_dim, use_state,
+            ),
+        )
 
-        if train_cfg.verbose:
+    try:
+        for it in range(1, train_cfg.iterations + 1):
+            t_roll0 = time.perf_counter()
+            if pool is None:
+                kpis = collect_rollout(env, learner, buffer, total_turns, use_state=use_state)
+                t_merge1 = t_roll1 = time.perf_counter()
+            else:
+                shards = _split_episodes(
+                    train_cfg.algo_config.rollout_episodes, train_cfg.num_workers,
+                )
+                state_dict = learner.state_dict()
+                jobs = [
+                    (state_dict, ep, train_cfg.seed + it * train_cfg.num_workers + w)
+                    for w, ep in enumerate(shards)
+                    if ep > 0
+                ]
+                results = pool.map(_worker_collect, jobs)
+                t_roll1 = time.perf_counter()
+                offset = 0
+                for res in results:
+                    t = res["shard_turns"]
+                    arr = res["arrays"]
+                    buffer.obs[:, offset:offset + t] = arr["obs"]
+                    buffer.action_mask[:, offset:offset + t] = arr["action_mask"]
+                    buffer.actions[:, offset:offset + t] = arr["actions"]
+                    buffer.logprobs[:, offset:offset + t] = arr["logprobs"]
+                    buffer.values[:, offset:offset + t] = arr["values"]
+                    buffer.rewards[:, offset:offset + t] = arr["rewards"]
+                    buffer.dones[:, offset:offset + t] = arr["dones"]
+                    buffer.filled[:, offset:offset + t] = arr["filled"]
+                    if buffer.states is not None and arr["states"] is not None:
+                        buffer.states[:, offset:offset + t] = arr["states"]
+                    offset += t
+                kpis = _merge_kpis([res["kpis"] for res in results])
+                t_merge1 = time.perf_counter()
+                # Drop the multi-GB worker payloads BEFORE the update: the
+                # merged buffer + update temporaries already fill RAM, and
+                # paging here inflated update 3x in benchmarks (sys 50s).
+                del results
+                del jobs
+            losses = learner.update(buffer)
+            t_upd1 = time.perf_counter()
+            ep = max(kpis["episodes"], 1)
+            sr = kpis["served_total"] / max(kpis["served_total"] + kpis["cancelled_total"], 1)
+            reward_per_ep = float(buffer.rewards[buffer.filled].sum() / ep)
+            record = {
+                "iteration": it,
+                "episodes": kpis["episodes"],
+                "reward_per_ep": reward_per_ep,
+                "mean_reward_per_turn": float(buffer.rewards[buffer.filled].mean()),
+                "service_rate": sr,
+                "served_per_ep": kpis["served_total"] / ep,
+                "cancelled_per_ep": kpis["cancelled_total"] / ep,
+                "avg_wait_min": kpis["avg_wait"],
+                "empty_km_per_ep": kpis["empty_km_total"] / ep,
+                "pct_dispatch": kpis["pct_dispatch"],
+                "pct_relocate": kpis["pct_relocate"],
+                "pct_idle": kpis["pct_idle"],
+                **{f"loss_{k}": v for k, v in losses.items()},
+            }
+            with open(metrics_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+
+            if train_cfg.verbose:
+                print(
+                    f"[iter {it:3d}/{train_cfg.iterations}] eps={ep} | "
+                    f"served={record['served_per_ep']:5.1f}/ep (sr={sr*100:4.1f}%) | "
+                    f"wait={kpis['avg_wait']:4.2f}m | "
+                    f"empty={record['empty_km_per_ep']:5.1f}km | "
+                    f"acts: disp={kpis['pct_dispatch']:4.1f}% reloc={kpis['pct_relocate']:4.1f}% idle={kpis['pct_idle']:4.1f}% | "
+                    f"reward={reward_per_ep:+6.1f}/ep "
+                    f"V-loss={losses['value_loss']:6.2f} "
+                    f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
+                )
+            else:
+                print(
+                    f"[iter {it:3d}/{train_cfg.iterations}] "
+                    f"served={record['served_per_ep']:4.0f}/ep (sr={sr*100:4.1f}%) | "
+                    f"wait={kpis['avg_wait']:4.2f}m | "
+                    f"empty={record['empty_km_per_ep']:5.1f}km | "
+                    f"reward={reward_per_ep:+6.1f}/ep"
+                )
             print(
-                f"[iter {it:3d}/{train_cfg.iterations}] eps={ep} | "
-                f"served={record['served_per_ep']:5.1f}/ep (sr={sr*100:4.1f}%) | "
-                f"wait={kpis['avg_wait']:4.2f}m | "
-                f"empty={record['empty_km_per_ep']:5.1f}km | "
-                f"acts: disp={kpis['pct_dispatch']:4.1f}% reloc={kpis['pct_relocate']:4.1f}% idle={kpis['pct_idle']:4.1f}% | "
-                f"reward={reward_per_ep:+6.1f}/ep "
-                f"V-loss={losses['value_loss']:6.2f} "
-                f"H={losses['entropy']:.3f} EV={losses['explained_var']:+.2f}"
-            )
-        else:
-            print(
-                f"[iter {it:3d}/{train_cfg.iterations}] "
-                f"served={record['served_per_ep']:4.0f}/ep (sr={sr*100:4.1f}%) | "
-                f"wait={kpis['avg_wait']:4.2f}m | "
-                f"empty={record['empty_km_per_ep']:5.1f}km | "
-                f"reward={reward_per_ep:+6.1f}/ep"
+                f"[timing] rollout={t_roll1 - t_roll0:5.1f}s | "
+                f"merge={t_merge1 - t_roll1:5.1f}s | "
+                f"update={t_upd1 - t_merge1:5.1f}s"
             )
 
-        if it % train_cfg.checkpoint_interval == 0 or it == train_cfg.iterations:
-            torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
+            if it % train_cfg.checkpoint_interval == 0 or it == train_cfg.iterations:
+                torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
+
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     print(f"[train] done -> {run_dir}")
     return run_dir
@@ -365,6 +677,8 @@ def main() -> None:
                         help="Weight for shared global reward vs local credit (default: 0.2)")
     parser.add_argument("--cancel-penalty", type=float, default=None,
                         help="Penalty per cancelled order in zone (default: 2.0)")
+    parser.add_argument("--entropy-coef", type=float, default=None,
+                        help="PPO entropy bonus coefficient (default: 0.01)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
@@ -381,6 +695,10 @@ def main() -> None:
     parser.add_argument("--max-dispatch-radius", type=float, default=None,
                         help="Maximum pickup distance in km from zone centroid (default: 1.2 km)")
     parser.add_argument("--out-root", type=str, default="runs")
+    parser.add_argument("--num-workers", type=int, default=1,
+                        help="Parallel rollout envs (default: 1 = serial). "
+                             "Parallelism is across episodes; zones within a "
+                             "turn stay sequential. Use ~n_cores-1.")
     args = parser.parse_args()
 
     algo_cfg: IPPOConfig | MAPPOConfig = (
@@ -388,6 +706,8 @@ def main() -> None:
     )
     if args.rollout_episodes is not None:
         algo_cfg.rollout_episodes = args.rollout_episodes
+    if args.entropy_coef is not None:
+        algo_cfg.entropy_coef = args.entropy_coef
 
     env_cfg = BandraConfig() if args.env == "bandra" else NYCConfig()
     if args.alpha is not None:
@@ -423,6 +743,7 @@ def main() -> None:
         run_name=args.name,
         checkpoint_interval=args.checkpoint_interval,
         verbose=args.verbose,
+        num_workers=args.num_workers,
     )
     train(train_cfg, args.env, args.nyc_window_limit, args.algo,
           resume_from=args.resume)

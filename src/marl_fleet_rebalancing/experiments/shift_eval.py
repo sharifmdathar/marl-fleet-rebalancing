@@ -127,31 +127,48 @@ def evaluate_policy(
         total_reward = 0.0
 
         while env.agents and not env._terminated:
-            agent = env.agent_selection
-            _obs, reward, term, trunc, _info = env.last()
-            total_reward += float(reward)
-
-            if term or trunc:
-                env.step(None)
+            # Selection-ordered turn walk (matches the AEC step semantics:
+            # step() records for the currently-selected agent). Terminated
+            # turns drain without acting; live turns batch all zones into a
+            # single deterministic act() — identical actions to per-zone
+            # calls (argmax over the same logits, no sampling). Rewards use
+            # observe=False (no redundant observation builds).
+            order = [int(z) for z in env._agent_order]
+            if env.terminations.get(env.agent_selection, False):
+                total_reward += float(sum(
+                    env.rewards.get(f"zone_{slot}", 0.0) for slot in order
+                ))
+                for _ in order:
+                    if not env.agents:
+                        break
+                    env.step(None)
                 continue
-
-            obs = env.observe(agent)
-            mask = env.action_mask(agent)
-
-            obs_vec = obs_to_vector(obs)
-            action, _logprob, _val = policy.act(
-                obs_vec[None, :], mask[None, :], deterministic=True,
+            obs_list = []
+            mask_list = []
+            for slot in order:
+                agent = f"zone_{slot}"
+                obs_list.append(obs_to_vector(env.observe(agent)))
+                mask_list.append(env.action_mask(agent))
+            # Turn reward = sum of every agent's post-flush credit, read once
+            # (matches the old per-selection cumulative reads: step() zeroes
+            # each agent's tables, so each credit is counted exactly once).
+            total_reward += float(sum(
+                env.rewards.get(f"zone_{slot}", 0.0) for slot in order
+            ))
+            actions, _, _ = policy.act(
+                np.stack(obs_list), np.stack(mask_list), deterministic=True,
             )
-            act_val = int(action[0])
+            for slot, act_v in zip(order, actions):
+                act_val = int(act_v)
 
-            if act_val == 0:
-                acts_idle += 1
-            elif 1 <= act_val <= env._max_pending:
-                acts_dispatch += 1
-            else:
-                acts_relocate += 1
+                if act_val == 0:
+                    acts_idle += 1
+                elif 1 <= act_val <= env._max_pending:
+                    acts_dispatch += 1
+                else:
+                    acts_relocate += 1
 
-            env.step(act_val)
+                env.step(act_val)
 
         kpi = env.kpi_summary()
         sr = float(kpi["served"]) / max(float(kpi["served"]) + float(kpi["cancelled"]), 1.0)

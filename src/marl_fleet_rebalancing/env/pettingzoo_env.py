@@ -339,92 +339,83 @@ class RideGymAEC(AECEnv):
         assert self._last_obs is not None
 
         # --- Pending orders: most urgent (longest waiting) first ------------
-        sorted_pending = sorted(
-            self._current_pending,
-            key=lambda o: o.get("waiting_time", 0.0),
-            reverse=True,
-        )
+        # Vectorized (D17): per-order normalized features are computed ONCE
+        # for all pending orders and reused for the global urgency view and
+        # every zone's candidate view. Previously each order was normalized
+        # 1 + num_zones times via per-order Python calls, and each zone ran
+        # a full Python-keyed sort. Ordering semantics are unchanged:
+        #   global: waiting_time desc (stable),
+        #   per-zone: distance asc, waiting_time desc (stable).
+        # np.argsort/lexsort with kind="stable" reproduce Python's stable
+        # sort order exactly (identical floats: same IEEE op order).
         capacity = max(cfg.driver_capacity, 1)
         timeout = max(cfg.order_timeout, 1e-9)
         self._pending_features[:] = 0.0
         self._pending_mask[:] = 0.0
         self._pending_per_zone[:] = 0.0
-        origins = np.asarray(
-            [o["origin"] for o in sorted_pending], dtype=float,
-        ).reshape(-1, 2)
-        for i, order in enumerate(sorted_pending[: self._max_pending]):
-            ox, oy = _normalize_xy(
-                order["origin"][0], order["origin"][1],
-                self._geo_min, self._geo_range,
-            )
-            dx, dy = _normalize_xy(
-                order["destination"][0], order["destination"][1],
-                self._geo_min, self._geo_range,
-            )
-            self._pending_features[i] = (
-                ox, oy, dx, dy,
-                float(order["num_passengers"]) / capacity,
-                min(float(order.get("waiting_time", 0.0)) / timeout, 1.0),
-            )
-            self._pending_mask[i] = 1.0
-        if len(origins) > 0:
-            cents = np.asarray(self.env.relocation_points, dtype=float)
-            nearest = np.argmin(
-                ((origins[:, None, :] - cents[None, :, :]) ** 2).sum(axis=2),
-                axis=1,
-            )
-            for zi in nearest:
-                self._pending_per_zone[zi] += 1.0
-        self._pending_per_zone /= max(self._max_pending, 1)
-
-        # --- Per-zone candidate orders (Point B: sorted closest-first per zone) ---
-        cents = np.asarray(self.env.relocation_points, dtype=float)
         self._zone_pending_features[:] = 0.0
         self._zone_pending_mask[:] = 0.0
         self._zone_candidate_orders = [[] for _ in range(self._num_zones)]
+        cents = np.asarray(self.env.relocation_points, dtype=float)
+        max_r_km = getattr(cfg, "max_dispatch_radius_km", None)
+        max_r_deg_sq = ((max_r_km / 111.0) ** 2) if (max_r_km is not None and max_r_km > 0) else None
 
         if self._current_pending:
-            pending_origins = np.asarray(
-                [o["origin"] for o in self._current_pending], dtype=float
+            pending = self._current_pending
+            num_p = len(pending)
+            origins = np.asarray(
+                [o["origin"] for o in pending], dtype=float,
             ).reshape(-1, 2)
-            max_r_km = getattr(cfg, "max_dispatch_radius_km", None)
-            max_r_deg_sq = ((max_r_km / 111.0) ** 2) if (max_r_km is not None and max_r_km > 0) else None
+            dests = np.asarray(
+                [o["destination"] for o in pending], dtype=float,
+            ).reshape(-1, 2)
+            waits = np.asarray(
+                [float(o.get("waiting_time", 0.0)) for o in pending],
+                dtype=float,
+            )
+            passengers = np.asarray(
+                [float(o["num_passengers"]) for o in pending], dtype=float,
+            )
+            gmin = np.asarray(self._geo_min, dtype=float)
+            grange = np.maximum(np.asarray(self._geo_range, dtype=float), 1e-9)
+            feat = np.empty((num_p, 6), dtype=np.float32)
+            feat[:, 0:2] = (origins - gmin) / grange
+            feat[:, 2:4] = (dests - gmin) / grange
+            feat[:, 4] = passengers / capacity
+            feat[:, 5] = np.minimum(waits / timeout, 1.0)
 
+            # Global view: most urgent first, capped to max_pending.
+            urg = np.argsort(-waits, kind="stable")
+            keep = min(num_p, self._max_pending)
+            self._pending_features[:keep] = feat[urg[:keep]]
+            self._pending_mask[:keep] = 1.0
+
+            # Per-order zone attribution (all pending, not capped).
+            dists = ((origins[:, None, :] - cents[None, :, :]) ** 2).sum(axis=2)
+            nearest = dists.argmin(axis=1)
+            self._pending_per_zone[:] = np.bincount(
+                nearest, minlength=self._num_zones,
+            )
+            self._pending_per_zone /= max(self._max_pending, 1)
+
+            # Per-zone candidate orders: radius filter, closest-first.
             for zi in range(self._num_zones):
-                zc = cents[zi]
-                # Euclidean distance squared from zone centroid zi to order origins
-                dists_sq = np.sum((pending_origins - zc) ** 2, axis=1)
-                # Sort orders: primary key distance ascending, secondary key wait time descending
-                order_indices = list(range(len(self._current_pending)))
+                d = dists[:, zi]
                 if max_r_deg_sq is not None:
-                    order_indices = [idx for idx in order_indices if dists_sq[idx] <= max_r_deg_sq]
-                order_indices.sort(
-                    key=lambda idx: (
-                        dists_sq[idx],
-                        -float(self._current_pending[idx].get("waiting_time", 0.0)),
-                    )
-                )
-                candidates = [
-                    self._current_pending[idx]
-                    for idx in order_indices[: self._max_pending]
-                ]
-                self._zone_candidate_orders[zi] = candidates
-
-                for slot, order in enumerate(candidates):
-                    ox, oy = _normalize_xy(
-                        order["origin"][0], order["origin"][1],
-                        self._geo_min, self._geo_range,
-                    )
-                    dx, dy = _normalize_xy(
-                        order["destination"][0], order["destination"][1],
-                        self._geo_min, self._geo_range,
-                    )
-                    self._zone_pending_features[zi, slot] = (
-                        ox, oy, dx, dy,
-                        float(order["num_passengers"]) / capacity,
-                        min(float(order.get("waiting_time", 0.0)) / timeout, 1.0),
-                    )
-                    self._zone_pending_mask[zi, slot] = 1.0
+                    idx = np.where(d <= max_r_deg_sq)[0]
+                else:
+                    idx = np.arange(num_p)
+                if idx.size:
+                    order = idx[np.lexsort((-waits[idx], d[idx]))][
+                        : self._max_pending
+                    ]
+                else:
+                    order = idx
+                n_cand = int(order.shape[0])
+                if n_cand:
+                    self._zone_candidate_orders[zi] = [pending[i] for i in order]
+                    self._zone_pending_features[zi, :n_cand] = feat[order]
+                    self._zone_pending_mask[zi, :n_cand] = 1.0
 
         # --- Per-zone fleet state -------------------------------------------
         zone_totals = np.zeros(self._num_zones, dtype=np.float32)

@@ -237,3 +237,94 @@ Format: date, status, decision, why, what would change our mind.
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>
 - Decision / Why / Revisit if:
+
+## D17 — Vectorized rollout hot loop (semantics-preserving)
+- Date: 2026-09-14, Status: accepted
+- Decision:
+  - Rewrote `_rebuild_caches` pending/candidate section (`env/pettingzoo_env.py`) with identical outputs, verified **bit-identical** vs old code on 12 NYC + 25 Bandra turns (all cache arrays + per-zone candidate order-id lists):
+    - Per-order normalized features computed ONCE into a `(P, 6)` table, reused for the global urgency view and every zone's candidate view (was: 1 + `num_zones` Python normalizations per order per flush).
+    - One `(P, Z)` distance matrix per flush replaces per-zone distance loops.
+    - Per-zone Python-keyed `list.sort(key=lambda…)` replaced by `np.lexsort` (stable → identical tie order, identical IEEE floats).
+    - Zone attribution loop replaced by `np.bincount`; `max_dispatch_radius` hoisting; duplicate `origins`/`relocation_points` array builds removed.
+  - `RolloutBuffer.flatten` zero-copy fast path (`agents/ippo.py`): fully-filled buffers return reshape views instead of boolean-mask copies (saves a ~3.3 GB copy at NYC scale). Masked path kept as fallback.
+  - No env dynamics, reward, observation, or action-space change. Config version NOT bumped (infra-only, outputs proven identical).
+- Why:
+  - NYC rollout was ~9.7 s/episode with per-zone lambda sorts (~220 M calls/episode) dominating the single-threaded rollout loop while GPU sat idle.
+  - Measured (NYC, 4 episodes, 1 iter, seed 1, serial): rollout 38.7 s → 31.5 s, update 9.6 s → 5.8 s (flatten), total 61.6 s → 41.7 s (**1.48x**).
+- Revisit if:
+  - `max_pending` or zone count changes materially (re-profile; matrix is `P × Z`).
+  - Moving to shared-memory worker results (see `docs/rollout-performance.md`).
+- Note (2026-09-14, resolved): batched `act()` + boundary-drain fix changed the RNG
+  stream and per-episode transitions vs pre-batching code, and the first
+  batched version additionally scrambled action attribution (fixed under
+  D18). Once attribution was fixed, same-seed levels reproduce:
+  `mappo-nyc-fixed-seed0` sr≈0.56→0.49 tracks `mappo-nyc-proper-seed0`
+  sr≈0.55→0.51 throughout, with EV now climbing (0.00→+0.26) where the
+  scrambled run sat at EV≈0. Do not mix pre/post-fix seeds in one reported
+  aggregate (trajectories still differ bit-wise from batching).
+
+## D18 — MAPPO centralized-critic rollout gap (fixed 2026-09-14)
+- Date: 2026-09-14, Status: accepted (researcher directive; advisor review still welcome)
+- Correction to the original entry: the gap was NOT pre-existing. The
+  pre-batching loop stepped `agent_selection` directly and already stored
+  `state=concat([env.state(), zone_location])` with `learner.value()` critic
+  estimates. The batched rewrite dropped both. This fix restores that design
+  in batched form — no new science, just the originally intended semantics.
+- Fix (`experiments/train.py::collect_rollout`):
+  - MAPPO: per-agent state (`env.state()` + own `zone_location`, matching
+    `train.py`'s `state_dim`) stored per transition; values from
+    `learner.value()` centralized critic; actor-head values discarded (as
+    `MAPPO.act`'s contract always specified).
+  - Rewards/done-flags read from per-agent tables (`env.rewards`,
+    `env.terminations`) instead of `env.last()`, which reports only the
+    selected agent. Proven exactly equivalent to ordered `last()` reads
+    (both equal the post-flush credit: step() zeroes both tables).
+  - Selection-ordered two-phase walk: phase 1 closes + observes (no steps),
+    single batched `act()`, phase 2 steps each agent exactly once in
+    `env._agent_order`. This preserves the pre-batching
+    attribute-every-action-to-the-selected-agent semantics — verified by
+    probe (24/24 actions land on the correct zones; the step() walk mirrors
+    `_advance_selection` exactly).
+- Audit fallout (same session): the batched rewrite had been stepping zones
+  in `zone_0..N` order while `step()` records for the selected agent —
+  every dispatch/relocate executed on the WRONG zone. This, plus the RNG
+  stream change, explains the `mappo-nyc-new-s0` (sr≈0.41) vs
+  `mappo-nyc-proper-seed0` (sr≈0.55) gap. Do not mix pre/post-fix seeds in
+  one aggregate (see D17 note).
+- Verification: Bandra MAPPO probe — states stored/non-zero/finite, values
+  differ from actor head, update runs; Bandra IPPO 1-iter smoke passes with
+  metrics written.
+- Sweep remainder (no action): `IPPO/MAPPO.update` standard PPO-clip (no
+  value-clip — legitimate variant); `compute_gae` boundary handling sound;
+  env flush/reward attribution coherent; `evaluate.py`/`shift_eval.py` have
+  no optimizer/backward/update/save calls (frozen protocol holds); masked
+  `-inf` logits produce finite entropy in all runs observed.
+
+## D19 — Entropy-coefficient probe (keep 0.01, no retraining)
+- Date: 2026-09-14, Status: accepted
+- Probe: `mappo-nyc-ent002-seed0` (entropy_coef 0.02) vs
+  `mappo-nyc-fixed-seed0` (0.01), otherwise identical (NYC, 70×3, winlim 500).
+- Result: entropy held 2.4x higher (H 0.022 vs 0.009 at it70) but actions
+  barely moved (idle 98.3% vs 99.0%, dispatch 1.0% vs 0.9%). End-point SR gap
+  (0.573 vs 0.490) on near-identical action mixes reads as window noise on
+  n=1, not a policy difference. EV slightly better (+0.33 vs +0.21).
+- Decision: keep entropy_coef 0.01 for all reported runs; no retraining.
+  The binding constraint is reward shaping (dispatch rarely pays), not
+  exploration — a higher entropy bonus burns compute without changing
+  behavior. Revisit only alongside a reward-shaping change, with both algos
+  retuned equally per the baseline-fairness rule.
+
+## D20 — Batched shift-eval loop (verified within 0.1% of published CSVs)
+- Date: 2026-09-14, Status: accepted
+- Change (`experiments/shift_eval.py::evaluate_policy` only; env, scenarios,
+  seeds, metrics untouched): per-turn selection-ordered walk with a single
+  deterministic `act()` over all zones instead of 62 batch-1 calls
+  (~90 s/episode → ~15 s/episode; the 10-checkpoint suite was otherwise
+  ~14 h). Terminated turns drain; rewards accumulated once per turn from
+  per-agent tables (proven equal to the old per-selection reads).
+- Verification: `mappo-proper-seed0` S0 reproduces
+  `results/shift_eval/mappo-proper-seed0_S0.csv` to served 234.2 vs 234.4,
+  SR 0.5109 vs 0.5114, reward 376 vs 374 — residual is a single argmax flip
+  from batched-GEMM rounding over 5 episodes, far below seed std (~0.03).
+  Old-loop rerun reproduces the CSV exactly, isolating the delta to batching.
+- Fixed-code evals go to `results/shift_eval_fixed/` (old results untouched).

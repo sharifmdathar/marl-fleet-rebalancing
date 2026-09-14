@@ -147,8 +147,23 @@ class RolloutBuffer:
         return advantages, returns
 
     def flatten(self) -> dict[str, np.ndarray]:
+        # Fast path: rollouts always end at episode boundaries, so the
+        # buffer is fully filled and reshapes are zero-copy views. The
+        # masked path below copies (3+ GB at NYC scale) and can push a
+        # memory-constrained box into swap during the PPO update.
+        # update() only reads these tensors, so views are safe.
+        if self.filled.all():
+            flat: dict[str, np.ndarray] = {
+                "obs": self.obs.reshape(self.capacity, -1),
+                "action_mask": self.action_mask.reshape(self.capacity, -1),
+                "actions": self.actions.ravel(),
+                "logprobs": self.logprobs.ravel(),
+            }
+            if self.states is not None:
+                flat["states"] = self.states.reshape(self.capacity, -1)
+            return flat
         mask = self.filled.ravel()
-        flat: dict[str, np.ndarray] = {
+        flat = {
             "obs": self.obs.reshape(self.capacity, -1)[mask],
             "action_mask": self.action_mask.reshape(self.capacity, -1)[mask],
             "actions": self.actions.ravel()[mask],

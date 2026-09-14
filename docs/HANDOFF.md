@@ -16,6 +16,24 @@ stress-test on shifted distributions and plot degradation curves.
 **Advisor:** Alaa Daoud (INSA Hauts-de-France, LAMIH CNRS)
 ---
 
+## 2026-09-14 session: rollout rewrite + fixed-code retraining (see D17–D20)
+
+- Rewrote `collect_rollout` (batched inference, parallel workers, timings).
+  The rewrite carried three bugs, all found by audit and fixed same day:
+  infinite hang at rollout end, dropped MAPPO states/critic values, and
+  action attribution scrambled across zones (step order vs selection order).
+- Fixed-code fleet (this code): `runs/ippo-nyc-fixed-seed0..4`,
+  `runs/mappo-nyc-fixed-seed0..4` (NYC, 70×3, winlim 500) + entropy probe
+  `mappo-nyc-ent002-seed0` (D19: keep 0.01, no retraining).
+- Demand-shift eval of the fixed fleet is running into
+  `results/shift_eval_fixed/` (old `results/shift_eval/` untouched — do NOT
+  mix pre/post-fix seeds in one aggregate).
+- Perf: NYC 70-iter training 8 h → ~25 min serial; eval loop batched
+  (~90 s/ep → ~15 s/ep, verified within 0.1% of published S0 CSV).
+- Open: MAPPO/idle-dominance is reward shaping, not exploration (D19);
+  advisor review of D18 fix welcome.
+---
+
 ## What exists right now (verified working)
 
 ### Simulation (RideGym)
