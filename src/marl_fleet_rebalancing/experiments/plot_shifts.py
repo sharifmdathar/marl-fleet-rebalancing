@@ -31,8 +31,10 @@ import matplotlib.pyplot as plt
 # Taxonomy order (S2c omitted: same-config duplicate of S0)
 SHIFT_ORDER = ["S0", "S1a_z0", "S1b_z30", "S2a", "S2b", "S2d", "S2e",
                "S3", "S4a_z60", "S5_z0", "S6"]
-SHIFT_TICKS = ["S0", "S1a", "S1b", "S2a", "S2b", "S2d", "S2e",
-               "S3", "S4a", "S5", "S6"]
+SHIFT_TICKS = ["S0\nbase (train)", "S1a\n70%→z0", "S1b\n70%→z30",
+               "S2a\n×0.5 orders", "S2b\n×0.75 orders", "S2d\n×1.5 orders",
+               "S2e\n×2.0 orders", "S3\nval split", "S4a\n60%→z60",
+               "S5\n20% burst z0", "S6\ntest split"]
 
 POLICIES = ["ippo-proper-seed0", "ippo-proper-seed1",
             "mappo-proper-seed0", "mappo-proper-seed1"]
@@ -79,7 +81,7 @@ def plot_kpi(summary: dict, kpi: str, ylabel: str, scale: float,
         ax.errorbar(x, y, yerr=err, fmt=style, capsize=3,
                     label=label, markersize=4)
     ax.set_xticks(xs)
-    ax.set_xticklabels(tick_labels)
+    ax.set_xticklabels(tick_labels, rotation=18, ha="right")
     ax.set_xlabel("Demand shift scenario")
     ax.set_ylabel(ylabel)
     ax.set_title(f"Frozen-policy degradation: {ylabel} vs shift severity")
