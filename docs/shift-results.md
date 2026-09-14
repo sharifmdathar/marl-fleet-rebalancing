@@ -122,3 +122,24 @@ in-distribution control (same config as training).
   under any tested type. With MAPPO-seed1 excluded as degenerate,
   the honest headline is H3 with a strong RQ1 ranking result:
   where >> how-much >> when.
+
+---
+
+# Fixed-code re-evaluation (2026-09-14, 5 seeds each — SUPERSEDES above for reporting)
+
+Retrained under the D18 fix (selection-ordered rollout, MAPPO states +
+critic values) and re-evaluated: 10 fixed checkpoints
+(`ippo/mappo-nyc-fixed-seed0..4`) + greedy + random, same 11 shifts,
+5 episodes each. Raw: `results/shift_eval_fixed/summary.json`;
+curves: `results/figures_fixed/`. Old `results/shift_eval/` left intact;
+do NOT mix pre/post-fix seeds in one aggregate (D17 note).
+
+- IPPO vs MAPPO still overlap on every shift within seed std
+  (e.g. S0: 52.9±1.4 vs 51.1±1.8) — H3 holds at n=5.
+- Neither RL method beats greedy meaningfully anywhere (±1–3pp).
+- **Random floor sits ABOVE all trained methods on most shifts**
+  (S0 54.1, S1a 27.3, S2a 76.5, S3 53.5, S6 53.9). Trained policies are
+  ~99% idle; doing nothing ≈ greedy, while random dispatch serves more
+  under winlim=500. Points at reward shaping (D19), not exploration.
+- Severity ranking unchanged: spatial (21–29%) >> 2x magnitude
+  (~32%) > event (~45%) ≈ temporal ≈ held-out (≈S0).
