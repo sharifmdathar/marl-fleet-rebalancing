@@ -143,3 +143,15 @@ do NOT mix pre/post-fix seeds in one aggregate (D17 note).
   under winlim=500. Points at reward shaping (D19), not exploration.
 - Severity ranking unchanged: spatial (21–29%) >> 2x magnitude
   (~32%) > event (~45%) ≈ temporal ≈ held-out (≈S0).
+
+## Mechanism-labeled results (2026-09-15 — supersedes the spatial/event reading above)
+
+The Phase-4 spatial/event results used the old static concentration
+implementations (S1a/S1b/S4a/S5a). With D21 live, the S1/S4/S5 entries
+now use distinct mechanisms (spatial permutation, cold-zone concentration,
+time-localized burst) and are written to `results/shift_eval_fixed/` under
+the new labels. Re-run `uv run python -m marl_fleet_rebalancing.experiments.shift_eval`
+with the new SHIFTS to populate them; until then the S1/S4/S5 columns in
+`results/shift_eval_fixed/summary.json` will be empty/NA and the old
+S1a/S1b/S4a/S5 results remain the only on-disk numbers for those shift
+families.

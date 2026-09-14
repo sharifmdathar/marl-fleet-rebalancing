@@ -18,9 +18,9 @@ from typing import Any
 @dataclass
 class EnvConfig:
     """Environment configuration shared across all experiments.
-    
-    Version: 1.2 (D15: proximity cutoff, collision masking, neighbor relocation,
-                  volume-aware rewards, cancellation penalty, parameterized zone demand)
+
+    Version: 1.3 (D21: demand-shift mechanisms — burst + permutation wrappers;
+                  S4 cold zones; parameterized zone demand unchanged)
     """
 
     # --- Fleet ---
@@ -42,6 +42,22 @@ class EnvConfig:
     target_zone: int | None = None
     # Percentage (0.0 to 100.0) of total episode demand originating in target_zone.
     target_zone_demand_pct: float | None = None
+
+    # --- Demand-shift mechanisms (D21; eval-side scenario knobs) ---
+    # Exactly one of "none" | "burst" | "permute" applies per scenario;
+    # "concentrate" is expressed with target_zone/target_zone_demand_pct
+    # above (S4 cold zones). All preserve order count and timestamps.
+    demand_shift_mode: str = "none"
+    # S5 event burst: share (0..100) of orders with request_time in
+    # [burst_start_min, burst_end_min) reassigned to burst_zone.
+    burst_zone: int | None = None
+    burst_start_min: float = 20.0
+    burst_end_min: float = 30.0
+    burst_share_pct: float | None = None
+    # S1 spatial permutation: per-order remap probability (0..1) through a
+    # fixed rotation of offset perm_offset zones (None = num_zones // 2).
+    perm_strength: float | None = None
+    perm_offset: int | None = None
 
     # --- Simulation ---
     dt: float = 0.1             # minutes per step

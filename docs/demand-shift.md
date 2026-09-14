@@ -65,12 +65,52 @@ unless noted, frozen policy, 5 episodes, `base_seed=1000`):
 - S6 (real held-out demand): `nyc_split="test"` — real FHVHV test-split
   windows never touched during training or tuning.
 
-## Results
+## Redefined spatial scenarios (2026-09-14 — SUPERSEDE S1a/S1b/S4a/S5 above for reporting)
+
+Audit finding: S1a/S1b/S4a/S5 were all implemented as the same static
+`(target_zone, pct)` injection, differing only in zone + percentage —
+the taxonomy's promised mechanisms (permutation, unseen-ness, burst
+timing) were not implemented (S5's `event` branch was literally `pass`).
+The old labels are deprecated but their CSVs stay on disk. New definitions:
+
+- S1 (spatial permutation, strength p ∈ {0.5, 1.0}): origin AND destination
+  zones remapped through a fixed rotation (offset = num_zones // 2,
+  documented seed) with probability p per order; otherwise unchanged.
+  Hotspots move instead of intensifying. Same order count, same timestamps.
+- S4 (unseen-hotspot emergence, k = 1): 60% of orders originate in the
+  coldest train-demand zone (measured below — genuinely near-zero training
+  demand, no retraining needed), full-episode duration. Same mechanism as
+  concentration, but the zone is verifiably unseen.
+- S5 (event burst): `burst_share` of the orders with request_time inside
+  [burst_start, burst_end] = [20, 30] min reassigned to `burst_zone 0`
+  (centroid nodes, timestamps preserved). Same total volume, time-localized.
+  Outside the window, demand is untouched base demand.
+
+- Deprecated labels kept for backward-compat with old CSVs (all were the same
+  static concentration-as-mechanism bug, now fixed):
+  - S1a/S1b: static 70% concentration to zone 0 / zone 30 (not permutation).
+  - S4a: static 60% concentration to zone 60 (not a held-out cold zone).
+  - S5a: static 20% concentration to zone 0 (not a time burst).
+  These stay on disk in `results/shift_eval/` as S1a/S1b/S4a/S5; the new
+  mechanism labels are S1/S4/S5 written to `results/shift_eval_fixed/`.
+- Measured cold zones (train split, winlim 500 sampling, 84 windows, 42000
+  sampled orders, seed=42): zone 1 (44 orders, 0.105%), zone 3 (57), zone 40 (63).
+  Hottest: zones 55/47/33 (~1563/1381/1287 each, ~3.7%/3.3%/3.1%). **S4 uses zone 1.**
+
+## Results (2026-09-15)
 
 Phase 4 evaluation (2026-09-13/14) for all 11 shifts is recorded in
 `docs/shift-results.md` (raw data: `results/shift_eval/summary.json`).
 S2c (magnitude ×1.0) was dropped 2026-09-14: byte-identical config to S0,
+
 verified reproducing S0 exactly — pure compute waste.
+
+The redefined S1/S4/S5 mechanisms (D21) produce results in
+`results/shift_eval_fixed/`; until that directory is populated the
+mechanism-labeled columns are empty and the old S1a/S1b/S4a/S5 results
+remain the only on-disk numbers for those shift families. Do not mix
+pre-fix (old label, old mechanism) and post-fix (new label, new mechanism)
+results in one figure — they are different scenario definitions.
 
 ## Fair-comparison checklist
 

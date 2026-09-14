@@ -233,6 +233,55 @@ Format: date, status, decision, why, what would change our mind.
 - Revisit if:
   - Assist split percentages (70/30) need tuning under different fleet-to-demand ratios.
 
+## D21 — Demand-shift mechanisms fix: S1/S4/S5 now match the taxonomy
+- Date: 2026-09-15, Status: accepted
+- Decision: close the implementation gap where S1, S4, and S5 were all
+  expressed as the same static `(target_zone, pct)` concentration, despite the
+  taxonomy promising three distinct mechanisms (spatial permutation, unseen-hotspot
+  emergence, time-localized event burst).
+- Why now: the degradation plots made S1/S4/S5 look like a single dose-response
+  curve over concentration percent — the honest reading is that the results never
+  tested what the taxonomy claimed.
+- What changed:
+  - `src/marl_fleet_rebalancing/demand/generators.py`:
+    `BurstOrderGenerator` (S5) and `PermutedZoneOrderGenerator` (S1) added;
+    both wrap the base generator, preserve order count and request timestamps,
+    and implement the RideGym (`generate`/``reseed`) interface.
+  - `src/marl_fleet_rebalancing/env/pettingzoo_env.py`:
+    `_make_order_generator` routes via `demand_shift_mode` (`"none"`,
+    `"burst"`, `"permute"`); `"concentrate"` stays target_zone-driven.
+  - `src/marl_fleet_rebalancing/config.py`: `EnvConfig` now carries
+    `demand_shift_mode`, `burst_zone`, `burst_start_min`, `burst_end_min`,
+    `burst_share_pct`, `perm_strength`, `perm_offset`; config version bumped
+    to 1.3.
+  - `src/marl_fleet_rebalancing/experiments/shift_eval.py`:
+    `SHIFTS` now has both mechanism-labeled entries (`S1`, `S4`, `S5`) and
+    deprecated backward-compat entries (`S1a`, `S1b`, `S4a`, `S5a`) that keep
+    the old CSV names on disk.
+  - `docs/demand-shift.md`: mechanism section rewritten; deprecated labels
+    documented with the mapping to old CSVs.
+- Verification (direct exec, NYC train split, winlim 500):
+  - `BurstOrderGenerator`: in-window zone-0 fraction 0.000 → 0.493 at
+    `burst_share=50`, outside-window fraction unchanged (0.0117 → 0.0117),
+    timestamps and total order count identical.
+  - `PermutedZoneOrderGenerator` at strength 1.0: rotated histogram matches the
+    source histogram rotated by offset exactly (0 max abs diff on 500 orders);
+    strength 0.0 is identity.
+- Cold-zone decision for S4: measured train-split demand by zone (winlim 500,
+  84 windows, 42000 sampled orders) → zone 1 = 35 orders (0.08%), zone 3 = 56,
+  zone 40 = 59; hottest zones ~1400 each (~3.3%). S4 uses zone 1.
+- Reporting: new mechanism-labeled results go to `results/shift_eval_fixed/`;
+  old `results/shift_eval/` CSVs (S1a/S1b/S4a/S5) are NOT overwritten and stay
+  interpretable as "static concentration" runs. Any figure/figure caption that
+  uses S1/S4/S5 must say which directory it draws from.
+- Revisit if:
+  - Advisor wants the temporal-vs-spatial contrast formally tested as distinct
+    from the concentration dose-response.
+  - We add more hypothetical unseen zones and want a zone-selection rule beyond
+    "coldest in train split".
+  - We want a magnitude axis for S5 (currently fixed at 20% share) or a
+    strength axis for S1 (currently fixed at 1.0 and 0.5).
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>

@@ -44,7 +44,9 @@ from ride_gym.osmnx_network import OSMnxNetwork
 
 from marl_fleet_rebalancing.config import EnvConfig
 from marl_fleet_rebalancing.demand.generators import (
+    BurstOrderGenerator,
     ParameterizedZoneOrderGenerator,
+    PermutedZoneOrderGenerator,
     UniformSampledNYCOrderGenerator,
 )
 
@@ -237,6 +239,39 @@ class RideGymAEC(AECEnv):
                 target_zone_pct=config.target_zone_demand_pct,
                 seed=self._seed,
             )
+
+        # Demand-shift mechanisms (D21; eval-side, one per scenario)
+        mode = getattr(config, "demand_shift_mode", "none") or "none"
+        if mode == "burst":
+            assert config.burst_zone is not None, "burst mode needs burst_zone"
+            assert config.burst_share_pct is not None, "burst mode needs burst_share_pct"
+            assert centroids is not None
+            gen = BurstOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                burst_zone=config.burst_zone,
+                burst_start=config.burst_start_min,
+                burst_end=config.burst_end_min,
+                burst_share=config.burst_share_pct,
+                seed=self._seed,
+            )
+        elif mode == "permute":
+            assert config.perm_strength is not None, "permute mode needs perm_strength"
+            assert centroids is not None
+            n_zones = len(centroids)
+            offset = config.perm_offset if config.perm_offset is not None else n_zones // 2
+            permutation = [(i + offset) % n_zones for i in range(n_zones)]
+            gen = PermutedZoneOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                permutation=permutation,
+                strength=config.perm_strength,
+                seed=self._seed,
+            )
+        elif mode != "none":
+            raise ValueError(f"Unknown demand_shift_mode: {mode!r}")
 
         return gen
 

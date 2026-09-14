@@ -29,30 +29,47 @@ from marl_fleet_rebalancing.networks.encoder import obs_to_vector
 
 RESULTS_DIR = Path("results/shift_eval")
 CHECKPOINTS = {
-    "ippo-proper-seed0": "runs/ippo-nyc-proper-seed0/checkpoint.pt",
-    "ippo-proper-seed1": "runs/ippo-nyc-proper-seed1/checkpoint.pt",
-    "mappo-proper-seed0": "runs/mappo-nyc-proper-seed0/checkpoint.pt",
-    "mappo-proper-seed1": "runs/mappo-nyc-proper-seed1/checkpoint.pt",
+    "ippo-fixed-seed0": "runs/ippo-nyc-fixed-seed0/checkpoint.pt",
+    "ippo-fixed-seed1": "runs/ippo-nyc-fixed-seed1/checkpoint.pt",
+    "ippo-fixed-seed2": "runs/ippo-nyc-fixed-seed2/checkpoint.pt",
+    "ippo-fixed-seed3": "runs/ippo-nyc-fixed-seed3/checkpoint.pt",
+    "ippo-fixed-seed4": "runs/ippo-nyc-fixed-seed4/checkpoint.pt",
+    "mappo-fixed-seed0": "runs/mappo-nyc-fixed-seed0/checkpoint.pt",
+    "mappo-fixed-seed1": "runs/mappo-nyc-fixed-seed1/checkpoint.pt",
+    "mappo-fixed-seed2": "runs/mappo-nyc-fixed-seed2/checkpoint.pt",
+    "mappo-fixed-seed3": "runs/mappo-nyc-fixed-seed3/checkpoint.pt",
+    "mappo-fixed-seed4": "runs/mappo-nyc-fixed-seed4/checkpoint.pt",
+    "mappo-ent002-seed0": "runs/mappo-nyc-ent002-seed0/checkpoint.pt",
+    "mappo-ent002-seed1": "runs/mappo-nyc-ent002-seed1/checkpoint.pt",
 }
 
 # Shift scenarios: (label, nyc_window_limit, target_zone, target_zone_pct, shift_param)
 # shift_param is shift-type-specific:
-#   S3: temporal phase shift — change nyc_split to simulate shifted peak window
-#   S5: event spike — target_zone + target_zone_pct concentrates demand in one zone
-#   S6: real held-out — nyc_split="test" uses real FHVHV test-split windows
-# None target_zone means uniform demand (no spatial shift)
+#   "temporal"  : S3 — temporal phase shift (shift peak window by split)
+#   "permute"   : S1 — spatial permutation (hotspots *move* by zone-offset rotation)
+#   "concentrate": S4 — cold zone emergence (concentration into verifiably-cold train zone)
+#   "burst"     : S5 — time-localized event burst (orders in [burst_start,burst_end) reassigned to burst_zone)
+#   "real"      : S6 — real held-out demand (test split)
+#   None        : no mechanism (magnitude scaling S2, in-distribution control S0,
+#                  deprecated Sn1/Sn4/Sn5 for backward-compat with old CSVs)
+# target_zone/target_zone_pct carry scenario-specific meaning per shift_param;
+# when shift_param is None, target_zone/target_zone_pct_param are used directly as
+# concentration params (old behavior, kept for the deprecated labels below).
 SHIFTS = [
-    ("S0",  500, None,  None, None),    # In-distribution control
-    ("S1a", 500, 0,    70, None),       # Spatial concentration (70% zone 0)
-    ("S1b", 500, 30,   70, None),       # Spatial concentration (70% zone 30)
-    ("S2a", 250, None,  None, None),    # Magnitude ×0.5
-    ("S2b", 375, None,  None, None),    # Magnitude ×0.75
-    ("S2d", 750, None,  None, None),    # Magnitude ×1.5
-    ("S2e", 1000, None, None, None),    # Magnitude ×2.0
-    ("S3",  500, None,  None, "temporal"),   # Temporal phase shift (val split)
-    ("S4a", 500, 60,   60, None),       # New hotspot (60% zone 60)
-    ("S5",  500, 0,    20, "event"),       # Event spike: 20% zone 0 burst
-    ("S6",  500, None,  None, "real"),      # Real held-out demand (test split)
+    ("S0",   500, None,  None,    None),         # In-distribution control
+    ("S1",   500, None,  1.0,     "permute"),    # Spatial permutation, full strength (rotation offset = nz//2)
+    ("S1a",  500, 0,    70,      None),           # DEPRECATED: static 70% conc z0 (was mislabeled S1a)
+    ("S1b",  500, 30,   70,      None),           # DEPRECATED: static 70% conc z30 (was mislabeled S1b)
+    ("S2a",  250, None,  None,    None),          # Magnitude ×0.5
+    ("S2b",  375, None,  None,    None),          # Magnitude ×0.75
+    ("S2d",  750, None,  None,    None),          # Magnitude ×1.5
+    ("S2e",  1000, None, None,    None),          # Magnitude ×2.0
+    ("S3",   500, None,  None,    "temporal"),    # Temporal phase shift (val split)
+    ("S4",   500, 1,    60,       "concentrate"),  # Cold-zone emergence: 60% orders in zone 1 (cold in train split)
+    ("S4a",  500, 60,    60,      None),           # DEPRECATED: static 60% conc z60 (was mislabeled S4a)
+    ("S5",   500, 0,     20,       "burst"),       # Event burst: 20% of orders in [20,30) min -> zone 0
+    ("S5a",  500, 0,     20,      None),           # DEPRECATED: static 20% conc z0 (was mislabeled S5)
+    ("S6",   500, None,  None,    "real"),         # Real held-out demand (test split)
 ]
 # Note: S2c (magnitude ×1.0) removed 2026-09-14 — byte-identical config to S0
 # (verified: S2c reproduced S0 exactly), pure compute waste. See docs/demand-shift.md.
@@ -69,39 +86,81 @@ def make_shifted_env(
     shift_param: str | None = None,
     seed: int = 0,
 ) -> RideGymAEC:
-    """Create an environment with shifted demand configuration."""
+    """Create an environment with shifted demand configuration.
+
+    mechanism — who moves, where, and when
+    ----------------------------------------
+    The three taxonomy scenarios (S1, S4, S5) are parameterized by mechanism,
+    not by a single concentration percentage:
+
+    S1   spatial permutation   hotspots *move* by a fixed zone-offset rotation;
+           with strength p the order's own OD is remapped through that rotation.
+           Same total volume, same timestamps, hotspots relocated not intensified.
+
+    S4   cold zone (concentrate): demand is concentrated into a zone that is
+           nearly absent in the training split. Configured via
+           target_zone + target_zone_pct. The zone was cold in training so the
+           policy has never been rewarded there.
+
+    S5   event burst: a share (burst_share_pct) of orders whose request_time
+           falls in [burst_start_min, burst_end_min) gets its origin reassigned
+           to burst_zone. Same total volume and timestamps; only the time window
+           spikes. Outside the window demand is untouched base demand.
+
+    Old implementations conflated mechanism with concentration percent:
+      - S1a/S1b  were 70% concentration to z0/z30 (NOT a moving hotspot)
+      - S4a      was 60% concentration to z60 (NOT a new/held-out hotspot)
+      - S5       was 20% concentration to z0  (NOT a time-localized burst)
+
+    Those are now renamed (Sn1/Sn4/Sn5) below so the old results stay
+    interpretable; the new entries have the mechanisms the taxonomy claims.
+    """
     cfg = NYCConfig(
         nyc_window_limit=nyc_window_limit,
         nyc_split="train",
         order_source="nyc",
     )
-    # Apply spatial shift via existing config parameters
-    if target_zone is not None and target_zone_pct is not None:
-        cfg.target_zone = target_zone
-        cfg.target_zone_demand_pct = target_zone_pct
-
-    # Apply shift-type-specific parameters
+    # Mechanism dispatch (independent of target_zone so S1 with
+    # target_zone=None still activates the permute branch).
     if shift_param is not None:
         if shift_param == "temporal":
             # S3: Temporal phase shift — shift peak window by changing split
-            # The nyc_window_limit controls per-window order cap;
-            # temporal shift changes which window (peak vs off-peak) is used.
-            # We shift the split cyclic index to simulate a shifted peak.
             if shift_label == "S3":
-                # S3 uses val split to simulate shifted peak window
                 cfg.nyc_split = "val"
             elif shift_label == "S3b":
                 cfg.nyc_split = "test"
-            # Note: S3 gets nyc_window_limit=500 same as baseline;
-            # the split change simulates a temporal shift of the demand peak.
-        elif shift_param == "event":
-            # S5: Event spike — 20% of orders concentrated in target_zone as a burst
-            # target_zone and target_zone_pct already set above
-            pass
+        elif shift_param == "burst":
+            cfg.demand_shift_mode = "burst"
+            cfg.burst_zone = target_zone if target_zone is not None else 0
+            cfg.burst_share_pct = (
+                target_zone_pct if target_zone_pct is not None else 20.0
+            )
+            cfg.target_zone = None
+            cfg.target_zone_demand_pct = None
+        elif shift_param == "permute":
+            cfg.demand_shift_mode = "permute"
+            cfg.perm_strength = (
+                target_zone_pct if target_zone_pct is not None else 1.0
+            )
+            cfg.perm_offset = target_zone if target_zone is not None else None  # env computes n_zones // 2 at runtime
+            cfg.target_zone = None
+            cfg.target_zone_demand_pct = None
+        elif shift_param == "concentrate":
+            cfg.demand_shift_mode = "none"
         elif shift_param == "real":
-            # S6: Real held-out demand — use the test split of real FHVHV data
             cfg.nyc_split = "test"
-            # nyc_window_limit=500 already set above; test split has its own windows
+        else:
+            raise ValueError(f"Unknown shift_param: {shift_param!r}")
+
+    # Target-zone concentration (S4 cold-zone + deprecated backward-compat)
+    if target_zone is not None and target_zone_pct is not None:
+        if shift_param is None:
+            # Deprecated backward-compat: static concentration
+            cfg.target_zone = target_zone
+            cfg.target_zone_demand_pct = target_zone_pct
+        elif shift_param in ("concentrate",):
+            cfg.target_zone = target_zone
+            cfg.target_zone_demand_pct = target_zone_pct
 
     env = RideGymAEC(config=cfg, seed=seed)
     env.reset(seed=seed)
@@ -274,15 +333,15 @@ def main() -> None:
 
     # Save per-shift CSVs
     for policy_name, policy_results in all_results.items():
-        for shift_label, shift_data in policy_results.items():
-            csv_path = RESULTS_DIR / f"{policy_name}_{shift_label}.csv"
-            with open(csv_path, "w") as f:
-                f.write("metric,mean,std,min,max\n")
+        csv_path = RESULTS_DIR / f"{policy_name}.csv"
+        with open(csv_path, "w") as f:
+            f.write("shift,metric,mean,std,min,max\n")
+            for shift_label, shift_data in policy_results.items():
                 for metric, values in shift_data.items():
                     if isinstance(values, dict) and "mean" in values:
                         f.write(
-                            f"{metric},{values['mean']},{values['std']},"
-                            f"{values['min']},{values['max']}\n"
+                            f"{shift_label},{metric},{values['mean']},"
+                            f"{values['std']},{values['min']},{values['max']}\n"
                         )
 
     # Print degradation summary table
