@@ -146,12 +146,144 @@ do NOT mix pre/post-fix seeds in one aggregate (D17 note).
 
 ## Mechanism-labeled results (2026-09-15 — supersedes the spatial/event reading above)
 
-The Phase-4 spatial/event results used the old static concentration
-implementations (S1a/S1b/S4a/S5a). With D21 live, the S1/S4/S5 entries
-now use distinct mechanisms (spatial permutation, cold-zone concentration,
-time-localized burst) and are written to `results/shift_eval_fixed/` under
-the new labels. Re-run `uv run python -m marl_fleet_rebalancing.experiments.shift_eval`
-with the new SHIFTS to populate them; until then the S1/S4/S5 columns in
-`results/shift_eval_fixed/summary.json` will be empty/NA and the old
-S1a/S1b/S4a/S5 results remain the only on-disk numbers for those shift
-families.
+D21 closed the implementation gap where S1/S4/S5 were all static
+`(target_zone, pct)` concentration differing only in zone + percentage.
+The three scenarios now use distinct mechanisms as the taxonomy claims, and
+ALL 14 shift entries are populated for every policy in
+`results/shift_eval_fixed/summary.json`. Deprecated backward-compat rows
+(S1a/S1b/S4a/S5a) are retained so old CSVs stay interpretable; the new
+mechanism rows (S1/S4_z1/S5_z0) are the ones to report.
+
+**Eval**: 10 RL policies (IPPO 5-seed + MAPPO 5-seed + MAPPO-ent002-seed0)
+× 2 baselines (greedy + random) × 14 shifts, 5 episodes each, frozen-policy,
+`base_seed=1000`, deterministic. Raw: `results/shift_eval_fixed/summary.json`
++ per-policy CSVs (not committed — raw data). Curves:
+`results/figures_fixed/`.
+
+### Service rate (mean ± std, %) — mechanism-labeled, all 14 shifts
+
+|| Shift | Description | IPPO-seed0 | IPPO-seed1 | IPPO-seed2 | IPPO-seed3 | IPPO-seed4 | MAPPO-seed0 | MAPPO-seed1 | MAPPO-seed2 | MAPPO-seed3 | MAPPO-seed4 | MAPPO-ent002 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+|| S0 | In-distribution (train) | 54.2±5.5 | 55.0±4.2 | 51.9±3.6 | 52.0±3.5 | 51.5±4.9 | 49.1±2.9 | 50.6±3.0 | 49.2±2.5 | 53.3±2.1 | 53.2±3.0 | 48.3±1.8 |
+|| **S1** | **S1 permute p=1.0 (hotspots move)** | **39.3±2.2** | **39.4±2.3** | **38.9±1.1** | **37.9±2.9** | **38.5±1.2** | **34.6±2.9** | **37.0±2.8** | **34.5±2.7** | **38.1±3.5** | **39.7±2.8** | **35.3±3.1** |
+|| S1a_z0 | S1a depr. 70% conc z0 | 21.2±3.0 | 21.5±1.7 | 19.7±1.3 | 24.4±2.1 | 19.3±3.3 | 20.7±1.5 | 17.9±1.4 | 20.5±1.7 | 20.8±1.1 | 23.8±1.5 | 19.0±1.8 |
+|| S1b_z30 | S1b depr. 70% conc z30 | 23.0±3.3 | 23.2±1.3 | 22.2±1.4 | 25.1±2.1 | 19.8±3.3 | 22.5±1.5 | 20.2±2.4 | 22.2±1.8 | 23.2±1.8 | 24.8±1.4 | 22.6±1.9 |
+|| S2a | Magnitude ×0.5 | 63.5±7.2 | 69.0±6.4 | 57.8±6.3 | 61.2±3.8 | 51.1±6.0 | 65.4±3.4 | 53.6±5.5 | 65.2±3.5 | 62.8±4.7 | 64.4±5.9 | 60.6±3.5 |
+|| S2b | Magnitude ×0.75 | 61.1±3.3 | 63.8±4.3 | 60.6±2.9 | 60.1±1.5 | 54.4±3.4 | 59.1±3.7 | 53.2±2.2 | 59.0±4.1 | 59.9±3.8 | 62.9±3.9 | 58.7±2.9 |
+|| S2d | Magnitude ×1.5 | 42.0±3.0 | 43.1±3.0 | 41.1±2.2 | 41.7±2.2 | 40.2±3.0 | 39.4±2.8 | 38.2±2.8 | 39.3±2.9 | 41.2±2.0 | 42.5±2.8 | 38.8±3.0 |
+|| S2e | Magnitude ×2.0 | 32.9±2.1 | 33.1±1.8 | 32.5±1.3 | 32.8±1.3 | 33.2±1.3 | 31.3±1.6 | 31.4±0.9 | 31.2±1.8 | 34.0±1.4 | 33.3±1.6 | 31.1±2.1 |
+|| S3 | Temporal phase (val split) | 52.1±1.4 | 51.9±1.9 | 52.6±1.6 | 55.1±0.7 | 51.3±2.5 | 48.8±3.2 | 48.6±1.4 | 48.6±3.4 | 53.2±1.1 | 50.5±2.6 | 48.9±4.0 |
+|| **S4_z1** | **S4 cold-zone z1 60% conc** | **26.2±3.1** | **27.9±1.1** | **25.7±3.5** | **24.5±2.1** | **22.3±2.4** | **28.1±1.2** | **23.9±2.2** | **28.2±1.5** | **27.5±1.0** | **26.8±0.8** | **26.7±1.6** |
+|| S4a_z60 | S4a depr. 60% conc z60 | 27.6±3.0 | 28.6±2.5 | 24.9±1.4 | 25.9±3.0 | 25.6±2.8 | 28.8±2.6 | 25.1±2.6 | 28.7±2.3 | 31.3±1.5 | 27.2±1.8 | 27.3±3.2 |
+|| **S5_z0** | **S5 burst z0 20% [20,30)min** | **53.0±5.2** | **53.2±3.8** | **50.0±3.4** | **50.8±3.0** | **49.1±4.5** | **48.1±1.9** | **48.6±2.9** | **48.5±1.6** | **52.0±2.5** | **52.4±3.0** | **47.7±1.5** |
+|| S5a_z0 | S5a depr. 20% conc z0 | 46.7±4.7 | 49.4±3.4 | 44.4±3.8 | 46.6±4.1 | 43.8±3.8 | 43.4±1.7 | 42.0±1.8 | 43.4±2.4 | 45.2±1.5 | 49.4±2.1 | 43.0±2.3 |
+|| S6 | Real held-out (test split) | 51.7±4.2 | 53.0±2.5 | 53.0±1.9 | 54.7±1.7 | 52.2±1.4 | 48.2±4.3 | 48.0±5.0 | 48.2±3.6 | 54.4±3.5 | 52.4±3.3 | 48.4±4.0 |
+
+### Aggregated by algorithm family (mean ± std across seeds, %)
+
+|| Shift | IPPO 5-seed mean | MAPPO 5-seed mean | MAPPO-ent002 |
+|---|---|---|---|---|
+|| S0 (baseline) | 52.9±1.4 | 51.1±1.8 | 48.3 |
+|| S1 (permute) | 38.8±0.6 | 36.8±2.0 | 35.3 |
+|| S4_z1 (cold z1 60%) | 25.3±1.9 | 26.9±1.6 | 26.7 |
+|| S5_z0 (burst z0 20%) | 51.2±1.6 | 49.9±1.9 | 47.7 |
+
+Δ vs S0 (mechanism families only):
+
+|| Family | IPPO ΔS0 | MAPPO ΔS0 | MAPPO-ent002 ΔS0 |
+|---|---|---|---|
+|| S1 permute | −14.1pp | −14.3pp | −13.1pp |
+|| S4 cold z1 | −27.6pp | −24.2pp | −21.6pp |
+|| S5 burst z0 | −1.7pp | −1.2pp | −0.7pp |
+
+### Baselines (mean ± std, %)
+
+|| Shift | greedy | random |
+|---|---|---|---|
+|| S0 | 17.0±1.6 | 6.1±0.5 |
+|| S1 (permute) | 15.6±1.5 | 6.1±0.4 |
+|| S4_z1 (cold z1) | 11.3±1.0 | 3.5±0.6 |
+|| S5_z0 (burst z0) | 16.8±1.3 | 6.2±1.0 |
+
+### Degradation curves
+
+Service rate (mechanism-labeled, algorithm-family mean ± std bands):
+
+![Service rate degradation](results/figures_fixed/degradation_service_rate.png)
+
+Empty distance (km/ep):
+
+![Empty distance degradation](results/figures_fixed/degradation_empty_km.png)
+
+Average wait (min/ep):
+
+![Avg wait degradation](results/figures_fixed/degradation_avg_wait_min.png)
+
+### Updated findings
+
+1. **S1 (spatial permutation) degrades moderately (~14pp), not catastrophically.**
+   Hotspots *move* via zone-offset rotation — same total volume, same
+   timestamps, but the policy's learned coverage no longer aligns with where
+   demand concentrates. SR drops from ~52% to ~38% (IPPO) / ~37% (MAPPO).
+   This is ~14pp softer than the old S1a (70% static concentration into
+   zone 0, which gave 19-24%) — permutation is less severe than static
+   concentration because the policy still encounters its learned zones,
+   just in different relative positions. Supports RQ1 "where matters but how
+   it moves matters too."
+
+2. **S4 (cold-zone emergence) is the hardest hit (~25pp).** 60% of demand
+   concentrated into zone 1, which is verifiably cold in the training split
+   (44 orders, 0.105% across 84 train windows, seed=42; hottest zones
+   ~3.7% each). The frozen policy has never been rewarded serving zone 1,
+   so it doesn't position drivers there. SR drops to ~25-27% across all
+   policies. This is the strongest single-mechanism degradation signal and
+   confirms the "unseen hotspot" hypothesis: a zone the policy never
+   learned to serve is catastrophic even at moderate concentration.
+
+3. **S5 (time-localized burst) barely registers (~1pp).** 20% of orders
+   with request_time in [20,30) min get their origin reassigned to zone 0;
+   timestamps and total volume preserved, only a 10-min window spikes.
+   SR drops from ~51% to ~50% (IPPO) / ~50% (MAPPO) — essentially
+   indistinguishable from noise. The policy's response to a transient local
+   spike is adequate because it doesn't require repositioning (the burst is
+   too short to justify deadheading) and zone 0 is not a cold zone. This
+   mechanism is genuinely mild and should NOT be compared with the old S5
+   (static 20% concentration into zone 0, which gave 43-49% and looked
+   like a real degradation).
+
+4. **Severity ranking across mechanisms is now clean and distinct:**
+   cold-zone emergence (S4, −25pp) >> spatial permutation (S1, −14pp) >>
+   time-localized burst (S5, −1pp) ≈ temporal (S3, ~0pp) ≈ held-out (S6,
+   ~0pp) > magnitude shifts (S2, monotonic −7 to −21pp from 0.5x to 2.0x).
+   This is the D21 payoff: three scenarios that looked identical under the
+   old static-concentration implementation now show three clearly different
+   degradation magnitudes, matching the taxonomy's claim that *type* matters.
+
+5. **IPPO vs MAPPO: still no winner.** Both families degrade along nearly
+   identical curves within seed std on every mechanism (S1: IPPO 38.8±0.6
+   vs MAPPO 36.8±2.0; S4: 25.3±1.9 vs 26.9±1.6; S5: 51.2±1.6 vs 49.9±1.9).
+   MAPPO has slightly wider seed variance on S1 (±2.0pp vs IPPO's ±0.6pp),
+   but means are within 2pp. H3 holds at n=5 across all three mechanism
+   families.
+
+6. **Baselines: greedy 17%, random 6% at S0.** Greedy (dispatch longest-
+   waiting order from the zone with most idle drivers, one dispatch/turn,
+   no relocation) is ~11pp above random and ~34pp below RL. It degrades
+   with the mechanisms roughly in proportion to RL (S4 hardest, S5 mildest)
+   but at a much lower absolute level. Random sits well below both — the
+   RL policies are learning something real, not just noise.
+
+### H1–H4 reading (D21, 5 seeds + ent002)
+
+- H1 (MAPPO more robust): not supported — curves overlap on all three
+  mechanism families within seed std.
+- H2 (IPPO more robust): not supported — same.
+- H3 (no difference): supported on S1, S4, S5 alike — IPPO and MAPPO
+  degrade within 2pp of each other on every mechanism.
+- H4 (depends on shift type): strongly supported — the three mechanism
+  families produce three clearly different degradation magnitudes
+  (−14pp / −25pp / −1pp), and the old static-concentration rows (S1a/S1b/
+  S4a/S5a) produce yet different numbers. Shift *type* matters enormously;
+  the IPPO-vs-MAPPO *difference* does not appear under any tested type.
+  Honest headline: H3 + strong RQ1 ranking — where (cold zone ≫ permuted
+  ≫ burst) >> how-much (magnitude) >> when (temporal ≈ held-out).

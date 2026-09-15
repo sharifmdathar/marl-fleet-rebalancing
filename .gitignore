@@ -51,6 +51,7 @@ dataset/
 *.mp3
 *.wav
 *.png
+!results/figures_fixed/*.png
 *.jpg
 *.jpeg
 *.gif
