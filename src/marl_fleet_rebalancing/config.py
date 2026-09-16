@@ -19,8 +19,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 1.3 (D21: demand-shift mechanisms — burst + permutation wrappers;
-                  S4 cold zones; parameterized zone demand unchanged)
+    Version: 1.8 (D26: localized neighbor relocation & scale-up — neighbor_relocation_only=True)
     """
 
     # --- Fleet ---
@@ -33,8 +32,9 @@ class EnvConfig:
     allow_relocating_dispatch: bool = True
     # Maximum distance (km) from zone centroid for an order to be considered a
     # candidate for dispatch. Prevents cross-city deadheading (D15). None disables.
-    max_dispatch_radius_km: float | None = 1.2
-    # When True, relocation actions are restricted to adjacent zone neighbours (D15).
+    max_dispatch_radius_km: float | None = 2.0
+    # When True, relocation actions are restricted to adjacent zone neighbours (D15, D26).
+    # Creates smooth local spatial diffusion without long-distance highway locks.
     neighbor_relocation_only: bool = True
 
     # --- Parameterized Zone Demand (D15) ---
@@ -60,7 +60,7 @@ class EnvConfig:
     perm_offset: int | None = None
 
     # --- Simulation ---
-    dt: float = 0.1             # minutes per step
+    dt: float = 0.5             # minutes per step (30 sim-seconds, D23)
     horizon: float = 60.0       # episode length in minutes
     order_timeout: float = 2.0  # minutes before unassigned order is cancelled
 
@@ -120,13 +120,13 @@ class EnvConfig:
     empty_distance_norm_km: float = 1.0
 
     # --- Reward weights ---
-    # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand
-    # Scaled so completing trips (+5.0) strongly outweighs empty distance (-0.1/km).
-    alpha: float = 1.0   # weight for passenger waiting time
-    beta: float = 0.1    # weight for empty repositioning distance (cost per empty km)
-    gamma: float = 5.0   # weight for served demand (payoff per completed order)
-    cancel_penalty: float = 2.0  # penalty per cancelled order in zone (D15)
-    team_share: float = 0.4  # 60% local credit assignment + 40% team cooperation (D16)
+    # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand - cancel_penalty
+    # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.15/km, D25).
+    alpha: float = 0.2   # weight for passenger waiting time (D25)
+    beta: float = 0.15   # weight for empty repositioning distance (cost per empty km, D25)
+    gamma: float = 1.0   # weight for served demand (payoff per completed order, D25)
+    cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
+    team_share: float = 0.2  # 80% local credit + 20% team
 
     # --- Seeding ---
     seed: int | None = None
@@ -144,23 +144,19 @@ class NYCConfig(EnvConfig):
     (-74.02, 40.70, -73.93, 40.80); loaded from zone_centroids.csv and passed
     to RideGym as relocation_centroids (region model = real taxi zones).
 
-    Fleet size: 50 drivers for a 60-minute episode. Scale as needed.
+    Fleet size: 100 drivers for a 60-minute episode.
 
-    max_pending: 650 — measured worst case of concurrent 2-min arrivals
-    (train/window_0071, Fri 19:00 peak).
+    max_pending: 80
 
     Demand: real FHVHV windows from data/nyc/splits via
-    MultiWindowNYCOrderGenerator (train: random window per episode;
-    val/test: deterministic cyclic traversal). nyc_window_limit is the
-    sample-rate lever — still an open experiment-design decision.
+    MultiWindowNYCOrderGenerator.
 
-    Network: manhattan.gpickle downloaded via
-    `python -m ride_gym.data_tools.nyc.build_nyc_network`
+    Network: manhattan.gpickle
     """
 
-    num_drivers: int = 50
+    num_drivers: int = 100
     driver_capacity: int = 4
-    dt: float = 0.1
+    dt: float = 0.5
     horizon: float = 60.0
     order_timeout: float = 2.0
     num_orders: int = 800  # unused in nyc mode; kept for the synthetic fallback
@@ -169,11 +165,13 @@ class NYCConfig(EnvConfig):
     nyc_split: str = "train"
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
-    max_pending: int = 650
-    alpha: float = 1.0
-    beta: float = 0.1
-    gamma: float = 5.0
-    team_share: float = 0.4
+    nyc_window_limit: int | None = 500
+    max_pending: int = 80
+    alpha: float = 0.2
+    beta: float = 0.15
+    gamma: float = 1.0
+    cancel_penalty: float = 1.0
+    team_share: float = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +190,7 @@ class BandraConfig(EnvConfig):
 
     num_drivers: int = 30
     driver_capacity: int = 4
-    dt: float = 0.1
+    dt: float = 0.5
     horizon: float = 30.0
     order_timeout: float = 2.0
     num_orders: int = 200
@@ -200,7 +198,8 @@ class BandraConfig(EnvConfig):
     network_path: str = "data/bandra_west.gpickle"
     speed_kmh: float = 30.0
     max_pending: int = 80
-    alpha: float = 1.0
+    alpha: float = 0.1
     beta: float = 0.1
     gamma: float = 5.0
-    team_share: float = 0.4
+    cancel_penalty: float = 0.5
+    team_share: float = 0.2

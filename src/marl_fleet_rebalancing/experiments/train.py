@@ -76,7 +76,12 @@ def _make_env(
         env_cfg = BandraConfig()
         scenario = "S0-base-bandra"
     elif name == "nyc":
-        env_cfg = NYCConfig(nyc_window_limit=nyc_window_limit)
+        # D22: only override the config default when the CLI flag is given;
+        # passing None unconditionally used to clobber NYCConfig's default.
+        if nyc_window_limit is not None:
+            env_cfg = NYCConfig(nyc_window_limit=nyc_window_limit)
+        else:
+            env_cfg = NYCConfig()
         scenario = "S0-base-nyc-train"
     else:
         raise ValueError(f"Unknown env: {name!r} (expected 'bandra' or 'nyc')")
@@ -693,7 +698,10 @@ def main() -> None:
     parser.add_argument("--num-drivers", type=int, default=None,
                         help="Number of active drivers in the fleet (default: 30 for Bandra)")
     parser.add_argument("--max-dispatch-radius", type=float, default=None,
-                        help="Maximum pickup distance in km from zone centroid (default: 1.2 km)")
+                        help="Maximum pickup distance in km from zone centroid (default: 2.0 km)")
+    parser.add_argument("--relocation-scope", choices=["anywhere", "neighbor"], default=None,
+                        help="Relocation range (default: anywhere; 'neighbor' "
+                             "restricts to adjacent zones)")
     parser.add_argument("--out-root", type=str, default="runs")
     parser.add_argument("--num-workers", type=int, default=1,
                         help="Parallel rollout envs (default: 1 = serial). "
@@ -724,6 +732,8 @@ def main() -> None:
         env_cfg.num_drivers = args.num_drivers
     if args.max_dispatch_radius is not None:
         env_cfg.max_dispatch_radius_km = args.max_dispatch_radius
+    if args.relocation_scope is not None:
+        env_cfg.neighbor_relocation_only = (args.relocation_scope == "neighbor")
     if args.nyc_window_limit is not None:
         env_cfg.nyc_window_limit = args.nyc_window_limit
     if args.target_zone is not None:

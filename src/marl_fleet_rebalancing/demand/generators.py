@@ -38,11 +38,9 @@ class UniformSampledNYCOrderGenerator(MultiWindowNYCOrderGenerator):
         df = df[df["request_time"] < self.horizon]
         df = df.sort_values("request_time").reset_index(drop=True)
 
-        # Sample BEFORE snapping — saves ~90% of the snap computation
+        # Subsample uniformly across the full time horizon BEFORE snapping
         if self.limit is not None and len(df) > self.limit:
-            chosen = np.sort(
-                self._rng.choice(len(df), size=self.limit, replace=False)
-            )
+            chosen = np.sort(self._rng.choice(len(df), size=self.limit, replace=False))
             df = df.iloc[chosen].reset_index(drop=True)
 
         suffix = ".parquet" if path.endswith(".parquet") else ".csv"

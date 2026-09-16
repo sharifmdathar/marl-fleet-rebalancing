@@ -87,14 +87,14 @@ def main() -> None:
         cfg = NYCConfig(nyc_window_limit=args.limit)
         env = RideGymAEC(config=cfg, seed=0)
         env.reset(seed=0)
-        # 60 min / 0.1 dt = 600 turns; one wrapper.step call per zone agent
-        run(env, max_iter=env._num_zones * 610, expected_turns=600)
+        expected_turns = int(round(cfg.horizon / cfg.dt))
+        run(env, max_iter=env._num_zones * (expected_turns + 10), expected_turns=expected_turns)
     else:
         cfg = BandraConfig()
         env = RideGymAEC(config=cfg, seed=0)
         env.reset(seed=0)
-        # 30 min / 0.1 dt = 300 turns; one wrapper.step call per zone agent
-        run(env, max_iter=env._num_zones * 310, expected_turns=300)
+        expected_turns = int(round(cfg.horizon / cfg.dt))
+        run(env, max_iter=env._num_zones * (expected_turns + 10), expected_turns=expected_turns)
 
 
 if __name__ == "__main__":

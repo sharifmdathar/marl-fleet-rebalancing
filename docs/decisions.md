@@ -282,6 +282,53 @@ Format: date, status, decision, why, what would change our mind.
   - We want a magnitude axis for S5 (currently fixed at 20% share) or a
     strength axis for S1 (currently fixed at 1.0 and 0.5).
 
+## D22 — Servable-S0 env defaults (code audit, no training logs)
+- Date: 2026-09-16, Status: accepted (researcher directive; advisor review welcome)
+- Decision: config v1.3 → v1.4. Six changes so IPPO/MAPPO can learn
+  dispatch+relocate on S0 before any shift comparison (RQ1 prerequisite):
+  1. `NYCConfig.nyc_window_limit` None → 500: full 5–8k/hr windows are
+     unservable by 50 drivers; most cancels were capacity-driven noise.
+     500/ep matches fixed-fleet training + D21 verification.
+  2. Per-zone dispatch candidates closest-first → most-urgent-first
+     (`lexsort((d, -waits))`): action k pointed at a different order each
+     turn as distances shifted; now matches the global pending view.
+  3. `pending_per_zone` divisor max_pending → num_drivers: /650 crushed the
+     demand signal to ~0.001/order; /50 reads ~0.02 with saturation at 1.0.
+  4. `max_dispatch_radius_km` 1.2 → 2.0; `neighbor_relocation_only`
+     True → False (+ `--relocation-scope anywhere|neighbor` CLI):
+     neighbour-only forced multi-hop repositioning while orders timed out
+     in 20 turns.
+  5. Reward legibility: hidden extra ×0.1 on the wait term removed and
+     folded into `alpha` 1.0 → 0.1 (magnitude-neutral); `cancel_penalty`
+     2.0 → 0.5 (capacity cancels aren't policy faults); `team_share`
+     0.4 → 0.2 (restores D8 local credit). Cancel/team values are judgment
+     calls — retune on train/val only.
+  6. `NYCConfig.max_pending` 650 → 80: winlim-500 no-op peaks at 28
+     concurrent, so 80 is headroom; obs 5516 → ~950, state 4737 → ~750,
+     action 713 → 143. `rollout_episodes` stays 6.
+  7. Bugfix: `_make_env` passed `nyc_window_limit=None` unconditionally,
+     clobbering the config default; now only overrides when the flag is set.
+- Why: audited from code + live probes only (no training logs per
+  researcher instruction); each item blocks learning independently.
+- Revisit if: S0 heuristic SR misses ~60-70% (resize winlim/fleet first);
+  urgent-first underperforms closest-first in an A/B; cancel/team need
+  retuning once agents learn something.
+- Do NOT mix pre/post-D22 seeds in one aggregate (env version change).
+
+## D23 — Purge all pre-D22 artifacts (2026-09-16)
+- Date: 2026-09-16, Status: accepted (researcher directive)
+- Decision: deleted all contents of `runs/` (checkpoints, metrics) and
+  `results/` (evals, shift CSVs, figures, videos). Storage statements in
+  D20/D21 ("goes to `results/shift_eval_fixed/`", "old CSVs stay on disk")
+  are superseded — those directories are empty.
+- `docs/shift-results.md` is a stub (protocol + checklist, no numbers);
+  `docs/demand-shift.md` keeps taxonomy/mechanisms/definitions only;
+  `docs/HANDOFF.md` Phase 4 reset to TODO pending v1.4 retraining.
+- Why: pre-D22 numbers came from the unservable-S0 loop and were
+  poisoning analysis context. Raw `data/` untouched.
+- Revisit if: never — purged artifacts are unrecoverable by design
+  (regenerate under v1.4 instead).
+
 ## Template for new entries
 ## D<n> — <title>
 - Date:   Status: proposed | accepted | superseded by D<m>
@@ -377,3 +424,92 @@ Format: date, status, decision, why, what would change our mind.
   from batched-GEMM rounding over 5 episodes, far below seed std (~0.03).
   Old-loop rerun reproduces the CSV exactly, isolating the delta to batching.
 - Fixed-code evals go to `results/shift_eval_fixed/` (old results untouched).
+
+## D23 — Structural MARL Env, Demand Generation, and Credit Overhaul
+- Date: 2026-09-16, Status: accepted
+- Decisions:
+  1. **Demand Generation:** In `UniformSampledNYCOrderGenerator`, preserve temporal clustering / burstiness via contiguous block/chunk sampling rather than uniform i.i.d. random subsampling that flattens natural arrival clumps.
+  2. **Turn Granularity & Skeleton:** Set `dt = 0.5` min (30 sim-seconds), reducing turns per 60-min episode from 600 to 120 (cutting 80%+ idle filler, matching 2-min timeout timescale).
+  3. **Strict Spatial Zone Ownership:** Restrict candidate dispatch orders in Zone $z$ strictly to orders originating in Zone $z$. This eliminates cross-agent race conditions, double-booking, and random-shuffle gradient noise.
+  4. **Immediate Dispatch Reward:** Credit $+ \gamma$ immediately when an order is matched/dispatched at turn flush, eliminating the 100+ step temporal credit assignment delay.
+  5. **Shared Neighbor Cancellation Penalty:** When an unassigned order times out in Zone $z$, share the penalty with adjacent neighboring zones that held idle vehicles.
+  6. **Observation Space Clean-up:** Remove static `relocation_points` (124 dead floats) and add explicit supply-demand surplus/deficit features ($(\text{pending} - \text{idle}) / N$).
+
+## D24 — Relocation Loop Suppression & Spatial Dispersion Tuning
+- Date: 2026-09-16, Status: accepted
+- Problem: Low empty-travel penalty ($\beta = 0.1$) compared to dispatch payoff ($\gamma = 5.0$) made cross-city relocation virtually cost-free ($-0.25$ penalty for 5 km). Multiple zone agents simultaneously herded idle vehicles into the same popular destination zones, creating cyclic ping-pong loops and leaving peripheral zones unserviced.
+- Decisions:
+  1. **Tuning $\beta$ Penalty:** Increase empty-distance penalty weight from $\beta = 0.1 \to 0.35$ in `NYCConfig`. Empty deadheading now incurs meaningful economic trade-off, strongly suppressing frivolous round-trip looping.
+  2. **Surplus-Target Relocation Masking:** In `action_mask()`, dynamically mask out relocation to target zones that already have an idle vehicle surplus ($\text{idle}_j > \text{pending}_j + 1$). Agents are forced to route surplus vehicles to zones with actual unmet demand or deficit.
+
+## D25 — Reward Magnitude Normalization & Cancellation Parity
+- Date: 2026-09-16, Status: accepted
+- Problem: Inflated reward magnitude ($\gamma = 5.0$, yields $+1500$ to $+1700$/ep) dwarfed penalties ($-0.5$ cancellation penalty, $-0.1$ waiting), leaving the agent indifferent to high cancellations or long empty travels as long as some rides were completed.
+- Decisions:
+  1. **Normalized Scale:** Set $\gamma = 1.0$ (served demand payoff).
+  2. **Cancellation Parity:** Set $\text{cancel\_penalty} = 1.0$ (matching the $+1.0$ payoff: serving is $+1.0$, dropping is $-1.0$).
+  3. **Empty Deadhead Cost:** Set $\beta = 0.15$ per empty km (so a $5\text{ km}$ empty relocation costs $-0.75$, requiring $75\%$ of a ride's payoff).
+  4. **Waiting Cost:** Set $\alpha = 0.2$ per normalized waiting timeout.
+  5. **Consequence:** Net episode reward centers around $[-200, +150]$, providing sharp gradient incentives against poor rebalancing.
+
+## D26 — Localized Neighbor Relocation & 200-Iteration Training Scale-Up
+- Date: 2026-09-16, Status: accepted
+- Problem: Global unconstrained relocations allowed agents to order 15-minute cross-Manhattan highway trips, accumulating high empty mileage and leaving vehicles in transit during sudden local demand spikes.
+- Decisions:
+  1. **Neighbor Relocation Only:** Enable `neighbor_relocation_only = True` in `NYCConfig`. Relocations are restricted to contiguous adjacent zone neighbors, creating smooth spatial diffusion and short 2–4 minute repositioning hops instead of 20-minute cross-city trips.
+  2. **Training Horizon Scale-Up:** Scale training to 200 iterations (1.2M transitions) to observe deep convergence properties and long-term rebalancing policy dynamics.
+
+## D27 — LP rebalancer objective repair (silent no-op → tuned baseline)
+- Date: 2026-09-16, Status: accepted
+- Problem: `ZoneLPRebalancer` was indistinguishable from `GreedyZoneDispatcher`
+  on all 10 shift scenarios (`pct_relocate = 0.0`, byte-identical KPIs). Root
+  cause is structural, not a tuning accident: the LP minimised travel cost
+  subject only to upper bounds (`outflow <= surplus`, `inflow <= deficit`,
+  `total <= n_idle`), so with all `c_ij >= 0` the all-zero plan was feasible
+  *and* optimal. The solver was correct; it was always right to move nothing.
+  No `speed_kmh`, `min_idle_to_rebalance` or `lookahead_minutes` value can fix
+  that (verified: even cost scale 0.01 returns zeros).
+- Decisions (`baselines/lp_baseline.py`, baseline-local; no env dynamics,
+  reward, or observation/action-space change):
+  1. **Shortfall term in the objective.** Minimise
+     `sum c_ij x_ij - lambda * sum_j inflow_j`, with
+     `lambda = deficit_penalty_scale * mean(off-diagonal c)`. The reduced cost
+     `c_ij - lambda` is the net value of a relocation, so a route is used only
+     when filling the destination's predicted shortfall beats its travel time.
+     `deficit_penalty_scale = 0` reproduces the old behaviour exactly.
+  2. **Self-transfer variables pinned to zero** (`bounds = (0, 0)`) instead of
+     relying on a zero diagonal cost.
+  3. **Demand-rate units fixed.** `env._pending_per_zone` is pending orders per
+     zone divided by fleet size (D22), but the estimator multiplied it by the
+     total pending count; now scaled by `num_drivers`.
+  4. **Deterministic rounding.** Fractional LP flows were rounded against the
+     global `np.random` stream; the policy now owns a generator seeded from
+     `reset(seed)`.
+  5. **`speed_kmh` left at the environment's true value (30 km/h).** The
+     previous reference note told readers to *lower* it, which is backwards
+     (cost is travel time) and would be fudged physics in the other direction.
+  6. **Defaults tuned on S0 (train) + S3 (val) only:** `lookahead_minutes 3 → 5`,
+     `deficit_penalty_scale 1.0 → 0.4`. S1/S4/S5/S6 stay held out (AGENTS.md
+     rule 3).
+- Result (5 seeds, base_seed 1000, greedy floor in brackets): S0 service rate
+  70.5% [52.9%], S3 70.6% [46.3%], `pct_relocate` 7.2% [0.0%]. Empty distance
+  rises 115 km → 812 km, i.e. the gain is bought with 5–7× the repositioning
+  distance; both KPIs must be reported together.
+- Notably the *shorter* horizon won: a horizon longer than the mean inter-zone
+  travel time (8.6 min) flags ~50 of 62 zones as short and destroys the spatial
+  selectivity of the plan, so 15–30 min scored worse than 5 min on both service
+  rate and empty km.
+- The extra distance is not wasted: the tuned LP also beats greedy on the
+  environment's own reward (S0 +17.9 vs -112.7), so the gain is not an artifact
+  of optimising a single KPI.
+- Held-out check (scored once, after defaults were frozen): LP >= greedy on
+  service rate in all of S1/S2a-e/S4/S5/S6, mean retention 90.5% vs 85.7%,
+  with the largest margin on S1 (79.4% vs 71.1%). Full KPIs in
+  `results/shift_eval_lp_fixed/`.
+- Consequence: LP is now a genuinely tuned baseline (D3) rather than a floor
+  clone. Pre-D27 LP rows in `results/shift_eval/` are invalid and must not be
+  cited; re-run baselines before any head-to-head.
+
+
+
+

@@ -62,43 +62,22 @@ class TestFixesAndDemand(unittest.TestCase):
         env._current_pending = env._extract_pending(env._last_obs)
         env._rebuild_caches()
 
-        # Find two zones that both have an idle driver and see order 999
+        # Strict zone ownership (D23): verify order 999 is claimed only by origin zone 0
         agents_with_order = []
         for agent in env.possible_agents:
             z_idx = env._zone_int_id(agent)
             cands = env._zone_candidate_orders[z_idx]
             cand_order_ids = [c["order_id"] for c in cands]
-            if new_id in cand_order_ids and env.action_mask(agent)[1 + cand_order_ids.index(new_id)]:
+            if new_id in cand_order_ids:
                 agents_with_order.append(agent)
 
-        self.assertGreaterEqual(len(agents_with_order), 2, "Expected at least 2 zones to see order 999 with 10km radius")
-
-        first_agent = agents_with_order[0]
-        second_agent = agents_with_order[1]
-
-        # Force execution order so first_agent acts before second_agent in current turn
-        first_idx = env._zone_int_id(first_agent)
-        second_idx = env._zone_int_id(second_agent)
-        other_indices = [i for i in range(env._num_zones) if i not in (first_idx, second_idx)]
-        env._agent_order = np.array([first_idx, second_idx] + other_indices)
-        env.agent_selection = first_agent
-        env._turn_agent_idx = 0
-
-        # Before first_agent steps, second_agent's mask has this order as True
-        z2_cands = env._zone_candidate_orders[second_idx]
-        z2_order_ids = [c["order_id"] for c in z2_cands]
-        z2_act = 1 + z2_order_ids.index(new_id)
-        self.assertTrue(env.action_mask(second_agent)[z2_act])
-
-        # First agent claims order 999
-        z1_cands = env._zone_candidate_orders[first_idx]
-        z1_order_ids = [c["order_id"] for c in z1_cands]
-        z1_act = 1 + z1_order_ids.index(new_id)
-        env.step(z1_act)
-
-        # Now second_agent must have this order masked out as False
-        self.assertEqual(env.agent_selection, second_agent)
-        self.assertFalse(env.action_mask(second_agent)[z2_act])
+        self.assertEqual(agents_with_order, ["zone_0"], "Expected only origin zone 0 to own order 999 under strict zone partitioning")
+        z0_cands = env._zone_candidate_orders[0]
+        z0_order_ids = [c["order_id"] for c in z0_cands]
+        z0_act = 1 + z0_order_ids.index(new_id)
+        env._zone_dispatchable_counts[0] = 1
+        env._zone_idle_counts[0] = 1
+        self.assertTrue(env.action_mask("zone_0")[z0_act])
 
     def test_local_dispatch_radius_cutoff(self):
         """Test that orders beyond max_dispatch_radius_km are not offered to far-away zones."""
@@ -180,7 +159,7 @@ class TestFixesAndDemand(unittest.TestCase):
         self.assertTrue(np.isfinite(val[0]))
 
     def test_macro_demand_observation_and_rebalance_credit(self):
-        """Test that all_zone_state has shape (num_zones, 3) exposing macro-demand and credit assignment handles assists."""
+        """Test that all_zone_state has shape (num_zones, 4) exposing macro-demand and deficit, and credit assignment handles assists."""
         cfg = BandraConfig()
         cfg.target_zone = 3
         cfg.target_zone_demand_pct = 0.80
@@ -190,16 +169,15 @@ class TestFixesAndDemand(unittest.TestCase):
         any_agent = env.possible_agents[0]
         obs = env.observe(any_agent)
 
-        # 1. Check all_zone_state shape is (Z, 3)
-        self.assertEqual(obs["all_zone_state"].shape, (env._num_zones, 3))
+        # 1. Check all_zone_state shape is (Z, 4)
+        self.assertEqual(obs["all_zone_state"].shape, (env._num_zones, 4))
         # 2. Check that target zone 3 has significant pending demand fraction in column 2
         demand_col = obs["all_zone_state"][:, 2]
         self.assertTrue(np.all(demand_col >= 0.0))
-        # 3. Simulate rebalancing assist attribution in reward computation
-        env._order_dispatcher[100] = 5
+        # 3. Simulate rebalancing assist attribution in reward computation (D23 immediate dispatch credit)
         env._driver_relocator[1] = 18  # Driver 1 was relocated by Zone 18
-        mock_events = {1: {"completed_orders": [100], "is_empty_move": False}}
-        rewards = env._compute_zone_rewards(mock_events)
+        dispatched_this_turn = [(100, 1, 5)]  # Zone 5 dispatched Driver 1
+        rewards = env._compute_zone_rewards({}, dispatched_this_turn)
         # Zone 5 is dispatcher, Zone 18 is relocator: both must receive non-zero positive reward
         self.assertGreater(rewards[5], 0.0)
         self.assertGreater(rewards[18], 0.0)
