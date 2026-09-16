@@ -31,13 +31,36 @@ class TestBaselines(unittest.TestCase):
             [5.0, 4.0, 0.0, 1.0],
             [6.0, 5.0, 1.0, 0.0],
         ])
-        transfers = solve_rebalance_lp(imbalances, costs, n_idle=5)
+        transfers = solve_rebalance_lp(
+            imbalances, costs, n_idle=5, deficit_penalty=10.0,
+            rng=np.random.default_rng(0),
+        )
         self.assertEqual(transfers.shape, (n_zones, n_zones))
         # Self transfers must be zero
         for i in range(n_zones):
             self.assertEqual(transfers[i, i], 0)
         # Total transfers should not exceed surplus
         self.assertLessEqual(np.sum(transfers), 5)
+        # Shortfalls must actually be filled when the penalty beats travel cost.
+        self.assertEqual(np.sum(transfers), 3)
+        self.assertEqual(np.sum(transfers.sum(axis=0)), 3)
+
+    def test_solve_rebalance_lp_zero_penalty_is_a_no_op(self):
+        """With no value on filling shortfalls, the LP must move nothing.
+
+        Every route cost is non-negative and every constraint is an upper bound,
+        so the all-zero plan is optimal — this is the failure mode that made the
+        baseline indistinguishable from greedy.
+        """
+        imbalances = np.array([-2.0, -1.0, 2.0, 1.0])
+        costs = np.array([
+            [0.0, 1.0, 5.0, 6.0],
+            [1.0, 0.0, 4.0, 5.0],
+            [5.0, 4.0, 0.0, 1.0],
+            [6.0, 5.0, 1.0, 0.0],
+        ])
+        transfers = solve_rebalance_lp(imbalances, costs, n_idle=5, deficit_penalty=0.0)
+        self.assertEqual(np.sum(transfers), 0)
 
     def test_greedy_dispatcher_action_constraints(self):
         """Greedy dispatcher must never select relocation actions and must respect action_mask."""

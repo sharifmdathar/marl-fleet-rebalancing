@@ -8,7 +8,23 @@ Algorithm:
 2. At rebalancing intervals (default 1 min), compute supply-demand imbalance:
      imbalance_z = predicted_demand_z - idle_vehicles_z
 3. Solve a transportation LP (scipy.optimize.linprog) to determine optimal
-   inter-zone vehicle transfers T[i, j].
+   inter-zone vehicle transfers T[i, j]. The objective trades travel cost
+   against *unmet predicted demand*:
+
+       minimise  sum_ij c_ij x_ij  -  lambda * sum_j (sum_i x_ij)
+       s.t.      sum_j x_ij <= surplus_i      (outflow capped by local excess)
+                 sum_i x_ij <= deficit_j      (inflow capped by local shortfall)
+                 sum_ij x_ij <= n_idle
+                 x_ii = 0
+
+   where ``lambda = deficit_penalty_scale * mean(off-diagonal c)``. The
+   second term is the only reason the LP ever moves a vehicle: with
+   ``lambda = 0`` every cost is non-negative and every constraint is an upper
+   bound, so the all-zero plan is trivially optimal and this baseline silently
+   no-ops (see references/lp-rebalancer-zero-transfers.md). Equivalently, the
+   reduced cost ``c_ij - lambda`` is the net value of the transfer, so a route
+   is used only when filling the destination's predicted shortfall is worth
+   more than the travel time it costs.
 4. At each zone agent's AEC turn:
    a. First priority: dispatch nearest pending candidate order within dispatch radius
       (lowest valid action index in [1, max_pending]).
@@ -36,15 +52,32 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LPBaselineConfig:
-    """Tunable hyperparameters for the LP rebalancer baseline."""
+    """Tunable hyperparameters for the LP rebalancer baseline.
+
+    ``speed_kmh`` must stay at the environment's true value: the cost matrix is
+    travel *time*, so assuming a faster fleet than the simulator actually runs
+    makes the LP under-price relocations and over-move vehicles onto plans that
+    arrive late.
+    """
 
     lookback_minutes: float = 5.0  # sliding window for rate estimation
-    lookahead_minutes: float = 3.0  # horizon for demand prediction
+    # Rolling-horizon length for demand prediction. Overshooting is *not* free:
+    # predicted demand grows linearly with the horizon while idle supply does
+    # not, so a long horizon marks nearly every zone as short and destroys the
+    # spatial selectivity that makes the plan useful. Swept on S0/S3; 5 min beat
+    # 3/8/12/15/30 on service rate at equal or lower empty km.
+    lookahead_minutes: float = 5.0
     rebalance_frequency_minutes: float = 1.0  # LP replanning interval
     smoothing_alpha: float = 0.3  # EMA smoothing factor for demand rates
     demand_init_rate: float = 30.0  # prior demand rate per zone (orders/hour)
     min_idle_to_rebalance: int = 2  # minimum fleet idle count to trigger LP
     speed_kmh: float = 30.0  # assumed average vehicle travel speed
+    # Value of filling one vehicle of predicted shortfall, as a multiple of the
+    # mean inter-zone travel time (dimensionless, so it ports across networks).
+    # 0.0 reproduces the historical no-op behaviour; higher values relocate more
+    # aggressively. Swept on S0/S3 (AGENTS.md rule 3 — never on held-out
+    # scenarios); 0.4 was the best min-over-shifts SR at comparable empty km.
+    deficit_penalty_scale: float = 0.4
 
 
 def solve_rebalance_lp(
@@ -52,6 +85,8 @@ def solve_rebalance_lp(
     costs: np.ndarray,
     n_idle: int,
     max_per_route: int | None = None,
+    deficit_penalty: float = 0.0,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Solve the transportation LP to balance idle vehicles across zones.
 
@@ -60,16 +95,29 @@ def solve_rebalance_lp(
         costs: shape (n_zones, n_zones), cost per vehicle moved i -> j.
         n_idle: total number of idle vehicles across the fleet.
         max_per_route: optional cap on transfers along a single route.
+        deficit_penalty: value of delivering one vehicle of predicted shortfall
+            (same units as ``costs``). 0.0 makes the all-zero plan optimal, so
+            the solver will never relocate; the caller must pass a positive
+            value for proactive rebalancing to happen at all.
+        rng: optional generator used to round fractional route flows. Pass a
+            seeded generator for reproducible plans.
 
     Returns:
         Integer transfer matrix of shape (n_zones, n_zones).
     """
     n_zones = len(imbalances)
+    if deficit_penalty <= 0.0:
+        # Nothing to gain from moving: all costs are non-negative and every
+        # constraint is an upper bound, so the zero plan is exactly optimal.
+        # Skip the solver entirely (it would return zeros anyway).
+        return np.zeros((n_zones, n_zones), dtype=int)
+
     surplus = np.maximum(-imbalances, 0.0)
     deficit = np.maximum(imbalances, 0.0)
 
     n_vars = n_zones * n_zones
-    c = costs.flatten()
+    # Net cost of a transfer = travel time - value of the shortfall it fills.
+    c = costs.flatten() - float(deficit_penalty)
 
     # Outflow from region i <= surplus[i]
     A_ub_out = np.zeros((n_zones, n_vars))
@@ -92,7 +140,13 @@ def solve_rebalance_lp(
     A_ub = np.vstack([A_ub_out, A_ub_in, A_ub_total])
     b_ub = np.concatenate([b_ub_out, b_ub_in, b_ub_total])
 
-    bounds = [(0, max_per_route or np.inf) for _ in range(n_vars)]
+    # Self-transfers are never legitimate: pin their variables to zero.
+    route_cap = max_per_route if max_per_route else np.inf
+    bounds = [
+        (0.0, 0.0) if i == j else (0.0, route_cap)
+        for i in range(n_zones)
+        for j in range(n_zones)
+    ]
 
     result = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
 
@@ -101,19 +155,26 @@ def solve_rebalance_lp(
         # Discretize: integer part + randomized rounding of fractional remainders
         floor_t = np.floor(raw_transfers).astype(int)
         frac_t = raw_transfers - floor_t
-        rnd = (np.random.random(raw_transfers.shape) < frac_t).astype(int)
+        generator = rng if rng is not None else np.random.default_rng()
+        rnd = (generator.random(raw_transfers.shape) < frac_t).astype(int)
         transfers = floor_t + rnd
         # Disallow self-transfers
         np.fill_diagonal(transfers, 0)
         return transfers
     else:
-        return _greedy_rebalance_fallback(imbalances, n_idle)
+        return _greedy_rebalance_fallback(imbalances, n_idle, deficit_penalty)
 
 
-def _greedy_rebalance_fallback(imbalances: np.ndarray, n_idle: int) -> np.ndarray:
+def _greedy_rebalance_fallback(
+    imbalances: np.ndarray, n_idle: int, deficit_penalty: float = 0.0
+) -> np.ndarray:
     """Greedy surplus-to-deficit pairing fallback when LP solver fails."""
     n_zones = len(imbalances)
     transfers = np.zeros((n_zones, n_zones), dtype=int)
+
+    if deficit_penalty <= 0.0:
+        # Same reasoning as the LP path: with nothing to gain, don't move.
+        return transfers
 
     surplus_zones = np.where(imbalances < 0)[0]
     deficit_zones = np.where(imbalances > 0)[0]
@@ -150,14 +211,18 @@ class ZoneLPRebalancer:
         self.config = config or LPBaselineConfig()
         self._n_zones: int | None = None
         self._costs: np.ndarray | None = None
+        self._mean_cost: float = 0.0
         self._demand_rates: np.ndarray | None = None
         self._last_rebalance_time: float = -1.0
         self._planned_transfers: np.ndarray | None = None
+        # Seeded in reset() so LP rounding is reproducible across runs.
+        self._rng: np.random.Generator = np.random.default_rng()
 
     def reset(self, seed: int | None = None) -> None:
         """Reset policy state at episode boundary."""
         self._last_rebalance_time = -1.0
         self._planned_transfers = None
+        self._rng = np.random.default_rng(seed)
         if self._n_zones is not None:
             self._demand_rates = np.ones(self._n_zones) * self.config.demand_init_rate
 
@@ -191,23 +256,42 @@ class ZoneLPRebalancer:
                     costs[i, j] = (dist_km / max(self.config.speed_kmh, 1.0)) * 60.0
 
         self._costs = costs
+        off_diagonal = costs[~np.eye(self._n_zones, dtype=bool)]
+        self._mean_cost = float(np.mean(off_diagonal)) if off_diagonal.size else 0.0
         self._planned_transfers = np.zeros((self._n_zones, self._n_zones), dtype=int)
 
+    def _deficit_penalty(self) -> float:
+        """Value of filling one vehicle of predicted shortfall, in travel minutes."""
+        return float(self.config.deficit_penalty_scale) * self._mean_cost
+
     def _update_demand_rates(self, env: "RideGymAEC") -> None:
-        """Update EMA of zone demand rates based on active pending orders."""
+        """Update EMA of zone demand rates based on active pending orders.
+
+        ``env._pending_per_zone`` is pending orders per zone *divided by the
+        fleet size* (D22 normalization), so recovering a count requires scaling
+        by ``num_drivers``. Scaling by the total pending count mixed units and
+        shrank every zone's estimate by ``total_pending / num_drivers``.
+        """
         if self._n_zones is None or self._demand_rates is None:
             return
 
-        # env._pending_per_zone reflects current pending order fraction
-        # Convert total current pending orders into an hourly rate proxy
-        total_pending = len(getattr(env, "_current_pending", []))
+        num_drivers = max(int(getattr(env, "_num_drivers", 1) or 1), 1)
+        pending_fraction = np.asarray(
+            getattr(env, "_pending_per_zone", np.zeros(self._n_zones)), dtype=float,
+        )[: self._n_zones]
+        if pending_fraction.size != self._n_zones:
+            return
+        zone_pending_counts = pending_fraction * num_drivers
+
+        # An order that times out after `order_timeout` minutes turns over about
+        # once per window, so `count` pending orders imply count / timeout orders
+        # per minute (i.e. count * 60 / timeout per hour).
+        timeout_min = float(
+            getattr(getattr(env, "_cfg", None), "order_timeout", 2.0) or 2.0
+        )
+        observed_rate = zone_pending_counts * (60.0 / max(timeout_min, 1e-6))
+
         alpha = self.config.smoothing_alpha
-
-        # Instantaneous pending count per zone
-        zone_pending_counts = getattr(env, "_pending_per_zone", np.zeros(self._n_zones)) * total_pending
-        # Proxy rate: pending orders turning over in 2-min window (30 windows/hr)
-        observed_rate = zone_pending_counts * 30.0
-
         self._demand_rates = alpha * observed_rate + (1.0 - alpha) * self._demand_rates
 
     def _replan_transfers(self, env: "RideGymAEC") -> None:
@@ -230,6 +314,8 @@ class ZoneLPRebalancer:
             imbalances=imbalances,
             costs=self._costs,
             n_idle=n_idle_total,
+            deficit_penalty=self._deficit_penalty(),
+            rng=self._rng,
         )
 
     def select_action(
