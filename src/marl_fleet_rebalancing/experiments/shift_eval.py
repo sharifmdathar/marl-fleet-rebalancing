@@ -4,15 +4,27 @@ Freezes trained policies and evaluates degradation across shift scenarios
 defined in docs/demand-shift.md.
 
 Usage:
-    uv run python -m marl_fleet_rebalancing.experiments.shift_eval
+    # Evaluate specific checkpoint:
+    uv run python -m marl_fleet_rebalancing.experiments.shift_eval \\
+        --checkpoint runs/mappo-nyc-0916-192802/checkpoint.pt \\
+        --include-baselines \\
+        --episodes 5
+
+    # Evaluate all available checkpoints in runs/ and baselines:
+    uv run python -m marl_fleet_rebalancing.experiments.shift_eval \\
+        --all-runs \\
+        --include-baselines
 
 Outputs:
-    results/shift_eval/summary.json   — aggregated results by policy × shift
-    results/shift_eval/{policy}_{shift}.csv — per-episode KPI traces
+    results/shift_eval/summary.json          — aggregated results by policy × shift
+    results/shift_eval/{policy}.csv          — per-episode KPI traces
+    results/shift_eval/degradation_table.md  — markdown summary table
 """
 
 from __future__ import annotations
 
+import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -22,57 +34,28 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from marl_fleet_rebalancing.baselines import GreedyZoneDispatcher, ZoneLPRebalancer
 from marl_fleet_rebalancing.config import NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.experiments.evaluate import load_trained_policy
 from marl_fleet_rebalancing.networks.encoder import obs_to_vector
 
 RESULTS_DIR = Path("results/shift_eval")
-CHECKPOINTS = {
-    "ippo-fixed-seed0": "runs/ippo-nyc-fixed-seed0/checkpoint.pt",
-    "ippo-fixed-seed1": "runs/ippo-nyc-fixed-seed1/checkpoint.pt",
-    "ippo-fixed-seed2": "runs/ippo-nyc-fixed-seed2/checkpoint.pt",
-    "ippo-fixed-seed3": "runs/ippo-nyc-fixed-seed3/checkpoint.pt",
-    "ippo-fixed-seed4": "runs/ippo-nyc-fixed-seed4/checkpoint.pt",
-    "mappo-fixed-seed0": "runs/mappo-nyc-fixed-seed0/checkpoint.pt",
-    "mappo-fixed-seed1": "runs/mappo-nyc-fixed-seed1/checkpoint.pt",
-    "mappo-fixed-seed2": "runs/mappo-nyc-fixed-seed2/checkpoint.pt",
-    "mappo-fixed-seed3": "runs/mappo-nyc-fixed-seed3/checkpoint.pt",
-    "mappo-fixed-seed4": "runs/mappo-nyc-fixed-seed4/checkpoint.pt",
-    "mappo-ent002-seed0": "runs/mappo-nyc-ent002-seed0/checkpoint.pt",
-    "mappo-ent002-seed1": "runs/mappo-nyc-ent002-seed1/checkpoint.pt",
-}
 
-# Shift scenarios: (label, nyc_window_limit, target_zone, target_zone_pct, shift_param)
-# shift_param is shift-type-specific:
-#   "temporal"  : S3 — temporal phase shift (shift peak window by split)
-#   "permute"   : S1 — spatial permutation (hotspots *move* by zone-offset rotation)
-#   "concentrate": S4 — cold zone emergence (concentration into verifiably-cold train zone)
-#   "burst"     : S5 — time-localized event burst (orders in [burst_start,burst_end) reassigned to burst_zone)
-#   "real"      : S6 — real held-out demand (test split)
-#   None        : no mechanism (magnitude scaling S2, in-distribution control S0,
-#                  deprecated Sn1/Sn4/Sn5 for backward-compat with old CSVs)
-# target_zone/target_zone_pct carry scenario-specific meaning per shift_param;
-# when shift_param is None, target_zone/target_zone_pct_param are used directly as
-# concentration params (old behavior, kept for the deprecated labels below).
+# Active standardized shift scenarios:
+# (label, nyc_window_limit, target_zone, target_zone_pct, shift_param, description)
 SHIFTS = [
-    ("S0",   500, None,  None,    None),         # In-distribution control
-    ("S1",   500, None,  1.0,     "permute"),    # Spatial permutation, full strength (rotation offset = nz//2)
-    ("S1a",  500, 0,    70,      None),           # DEPRECATED: static 70% conc z0 (was mislabeled S1a)
-    ("S1b",  500, 30,   70,      None),           # DEPRECATED: static 70% conc z30 (was mislabeled S1b)
-    ("S2a",  250, None,  None,    None),          # Magnitude ×0.5
-    ("S2b",  375, None,  None,    None),          # Magnitude ×0.75
-    ("S2d",  750, None,  None,    None),          # Magnitude ×1.5
-    ("S2e",  1000, None, None,    None),          # Magnitude ×2.0
-    ("S3",   500, None,  None,    "temporal"),    # Temporal phase shift (val split)
-    ("S4",   500, 1,    60,       "concentrate"),  # Cold-zone emergence: 60% orders in zone 1 (cold in train split)
-    ("S4a",  500, 60,    60,      None),           # DEPRECATED: static 60% conc z60 (was mislabeled S4a)
-    ("S5",   500, 0,     20,       "burst"),       # Event burst: 20% of orders in [20,30) min -> zone 0
-    ("S5a",  500, 0,     20,      None),           # DEPRECATED: static 20% conc z0 (was mislabeled S5)
-    ("S6",   500, None,  None,    "real"),         # Real held-out demand (test split)
+    ("S0", 500, None, None, None, "In-distribution base (train)"),
+    ("S1", 500, None, 1.0, "permute", "Spatial permutation (rot offset = nz//2)"),
+    ("S2a", 250, None, None, None, "Magnitude ×0.5 (surge/trough)"),
+    ("S2b", 375, None, None, None, "Magnitude ×0.75"),
+    ("S2d", 750, None, None, None, "Magnitude ×1.5"),
+    ("S2e", 1000, None, None, None, "Magnitude ×2.0"),
+    ("S3", 500, None, None, "temporal", "Temporal phase shift (val split)"),
+    ("S4", 500, 1, 60.0, "concentrate", "Cold-zone concentration (60% to z1)"),
+    ("S5", 500, 0, 20.0, "burst", "Event burst (20% in [20,30]m to z0)"),
+    ("S6", 500, None, None, "real", "Real held-out demand (test split)"),
 ]
-# Note: S2c (magnitude ×1.0) removed 2026-09-14 — byte-identical config to S0
-# (verified: S2c reproduced S0 exactly), pure compute waste. See docs/demand-shift.md.
 
 EVAL_EPISODES = 5
 BASE_SEED = 1000
@@ -85,46 +68,28 @@ def make_shifted_env(
     target_zone_pct: float | None,
     shift_param: str | None = None,
     seed: int = 0,
+    base_cfg: NYCConfig | None = None,
 ) -> RideGymAEC:
-    """Create an environment with shifted demand configuration.
+    """Create an environment with shifted demand configuration."""
+    if base_cfg is not None:
+        cfg = copy.deepcopy(base_cfg)
+    else:
+        cfg = NYCConfig()
 
-    mechanism — who moves, where, and when
-    ----------------------------------------
-    The three taxonomy scenarios (S1, S4, S5) are parameterized by mechanism,
-    not by a single concentration percentage:
+    cfg.nyc_window_limit = nyc_window_limit
+    cfg.nyc_split = "train"
+    cfg.order_source = "nyc"
+    cfg.demand_shift_mode = "none"
+    cfg.target_zone = None
+    cfg.target_zone_demand_pct = None
+    cfg.burst_zone = None
+    cfg.burst_share_pct = None
+    cfg.perm_strength = None
+    cfg.perm_offset = None
 
-    S1   spatial permutation   hotspots *move* by a fixed zone-offset rotation;
-           with strength p the order's own OD is remapped through that rotation.
-           Same total volume, same timestamps, hotspots relocated not intensified.
-
-    S4   cold zone (concentrate): demand is concentrated into a zone that is
-           nearly absent in the training split. Configured via
-           target_zone + target_zone_pct. The zone was cold in training so the
-           policy has never been rewarded there.
-
-    S5   event burst: a share (burst_share_pct) of orders whose request_time
-           falls in [burst_start_min, burst_end_min) gets its origin reassigned
-           to burst_zone. Same total volume and timestamps; only the time window
-           spikes. Outside the window demand is untouched base demand.
-
-    Old implementations conflated mechanism with concentration percent:
-      - S1a/S1b  were 70% concentration to z0/z30 (NOT a moving hotspot)
-      - S4a      was 60% concentration to z60 (NOT a new/held-out hotspot)
-      - S5       was 20% concentration to z0  (NOT a time-localized burst)
-
-    Those are now renamed (Sn1/Sn4/Sn5) below so the old results stay
-    interpretable; the new entries have the mechanisms the taxonomy claims.
-    """
-    cfg = NYCConfig(
-        nyc_window_limit=nyc_window_limit,
-        nyc_split="train",
-        order_source="nyc",
-    )
-    # Mechanism dispatch (independent of target_zone so S1 with
-    # target_zone=None still activates the permute branch).
+    # Mechanism dispatch
     if shift_param is not None:
         if shift_param == "temporal":
-            # S3: Temporal phase shift — shift peak window by changing split
             if shift_label == "S3":
                 cfg.nyc_split = "val"
             elif shift_label == "S3b":
@@ -132,46 +97,38 @@ def make_shifted_env(
         elif shift_param == "burst":
             cfg.demand_shift_mode = "burst"
             cfg.burst_zone = target_zone if target_zone is not None else 0
-            cfg.burst_share_pct = (
-                target_zone_pct if target_zone_pct is not None else 20.0
-            )
-            cfg.target_zone = None
-            cfg.target_zone_demand_pct = None
+            cfg.burst_share_pct = target_zone_pct if target_zone_pct is not None else 20.0
+            cfg.burst_start_min = 20.0
+            cfg.burst_end_min = 30.0
         elif shift_param == "permute":
             cfg.demand_shift_mode = "permute"
-            cfg.perm_strength = (
-                target_zone_pct if target_zone_pct is not None else 1.0
-            )
-            cfg.perm_offset = target_zone if target_zone is not None else None  # env computes n_zones // 2 at runtime
-            cfg.target_zone = None
-            cfg.target_zone_demand_pct = None
+            cfg.perm_strength = target_zone_pct if target_zone_pct is not None else 1.0
+            cfg.perm_offset = target_zone if target_zone is not None else None
         elif shift_param == "concentrate":
             cfg.demand_shift_mode = "none"
+            cfg.target_zone = target_zone
+            cfg.target_zone_demand_pct = target_zone_pct
         elif shift_param == "real":
             cfg.nyc_split = "test"
         else:
             raise ValueError(f"Unknown shift_param: {shift_param!r}")
 
-    # Target-zone concentration (S4 cold-zone + deprecated backward-compat)
-    if target_zone is not None and target_zone_pct is not None:
-        if shift_param is None:
-            # Deprecated backward-compat: static concentration
-            cfg.target_zone = target_zone
-            cfg.target_zone_demand_pct = target_zone_pct
-        elif shift_param in ("concentrate",):
-            cfg.target_zone = target_zone
-            cfg.target_zone_demand_pct = target_zone_pct
+    if shift_param is None and target_zone is not None and target_zone_pct is not None:
+        cfg.target_zone = target_zone
+        cfg.target_zone_demand_pct = target_zone_pct
 
     env = RideGymAEC(config=cfg, seed=seed)
     env.reset(seed=seed)
     return env
 
 
-def evaluate_policy(
+def evaluate_policy_on_env(
     policy: Any,
     env: RideGymAEC,
+    policy_type: str = "checkpoint",
     num_episodes: int = 1,
     base_seed: int = BASE_SEED,
+    deterministic: bool = True,
 ) -> list[dict[str, float]]:
     """Run evaluation episodes over fresh seeds. Returns list of KPI dicts."""
     episode_results: list[dict[str, float]] = []
@@ -186,12 +143,6 @@ def evaluate_policy(
         total_reward = 0.0
 
         while env.agents and not env._terminated:
-            # Selection-ordered turn walk (matches the AEC step semantics:
-            # step() records for the currently-selected agent). Terminated
-            # turns drain without acting; live turns batch all zones into a
-            # single deterministic act() — identical actions to per-zone
-            # calls (argmax over the same logits, no sampling). Rewards use
-            # observe=False (no redundant observation builds).
             order = [int(z) for z in env._agent_order]
             if env.terminations.get(env.agent_selection, False):
                 total_reward += float(sum(
@@ -202,91 +153,123 @@ def evaluate_policy(
                         break
                     env.step(None)
                 continue
-            obs_list = []
-            mask_list = []
-            for slot in order:
-                agent = f"zone_{slot}"
-                obs_list.append(obs_to_vector(env.observe(agent)))
-                mask_list.append(env.action_mask(agent))
-            # Turn reward = sum of every agent's post-flush credit, read once
-            # (matches the old per-selection cumulative reads: step() zeroes
-            # each agent's tables, so each credit is counted exactly once).
+
             total_reward += float(sum(
                 env.rewards.get(f"zone_{slot}", 0.0) for slot in order
             ))
-            actions, _, _ = policy.act(
-                np.stack(obs_list), np.stack(mask_list), deterministic=True,
-            )
-            for slot, act_v in zip(order, actions):
-                act_val = int(act_v)
 
-                if act_val == 0:
-                    acts_idle += 1
-                elif 1 <= act_val <= env._max_pending:
-                    acts_dispatch += 1
-                else:
-                    acts_relocate += 1
+            if policy_type == "checkpoint":
+                obs_list = []
+                mask_list = []
+                for slot in order:
+                    agent = f"zone_{slot}"
+                    obs = env.observe(agent)
+                    obs_list.append(obs_to_vector(obs))
+                    mask_list.append(env.action_mask(agent))
 
-                env.step(act_val)
+                actions, _, _ = policy.act(
+                    np.stack(obs_list), np.stack(mask_list), deterministic=deterministic,
+                )
+                for slot, act_v in zip(order, actions):
+                    act_val = int(act_v)
+                    if act_val == 0:
+                        acts_idle += 1
+                    elif 1 <= act_val <= env._max_pending:
+                        acts_dispatch += 1
+                    else:
+                        acts_relocate += 1
+                    env.step(act_val)
+
+            elif policy_type in ("greedy", "lp"):
+                for slot in order:
+                    agent = f"zone_{slot}"
+                    obs = env.observe(agent)
+                    act_val = policy.select_action(agent, env, obs)
+                    if act_val == 0:
+                        acts_idle += 1
+                    elif 1 <= act_val <= env._max_pending:
+                        acts_dispatch += 1
+                    else:
+                        acts_relocate += 1
+                    env.step(act_val)
+
+            elif policy_type == "random":
+                for slot in order:
+                    agent = f"zone_{slot}"
+                    mask = env.action_mask(agent)
+                    valid_acts = np.where(mask)[0]
+                    act_val = int(np.random.choice(valid_acts)) if len(valid_acts) > 0 else 0
+                    if act_val == 0:
+                        acts_idle += 1
+                    elif 1 <= act_val <= env._max_pending:
+                        acts_dispatch += 1
+                    else:
+                        acts_relocate += 1
+                    env.step(act_val)
+            else:
+                raise ValueError(f"Unknown policy_type: {policy_type}")
 
         kpi = env.kpi_summary()
         sr = float(kpi["served"]) / max(float(kpi["served"]) + float(kpi["cancelled"]), 1.0)
+        total_acts = max(acts_idle + acts_dispatch + acts_relocate, 1)
 
         episode_results.append({
-            "episode": ep + 1,
-            "seed": seed,
+            "episode": float(ep + 1),
+            "seed": float(seed),
             "served": float(kpi["served"]),
             "cancelled": float(kpi["cancelled"]),
             "service_rate": sr,
             "avg_wait_min": float(kpi["avg_wait"]),
             "empty_km": float(kpi["empty_km"]),
             "total_reward": total_reward,
-            "pct_dispatch": float(100.0 * acts_dispatch / max(acts_idle + acts_dispatch + acts_relocate, 1)),
-            "pct_relocate": float(100.0 * acts_relocate / max(acts_idle + acts_dispatch + acts_relocate, 1)),
-            "pct_idle": float(100.0 * acts_idle / max(acts_idle + acts_dispatch + acts_relocate, 1)),
+            "pct_dispatch": float(100.0 * acts_dispatch / total_acts),
+            "pct_relocate": float(100.0 * acts_relocate / total_acts),
+            "pct_idle": float(100.0 * acts_idle / total_acts),
         })
 
     return episode_results
 
 
-def evaluate_checkpoint(
+def evaluate_policy_across_shifts(
     policy_name: str,
-    checkpoint_path: str,
+    policy: Any,
+    policy_type: str,
+    base_cfg: NYCConfig | None,
     shifts: list[tuple],
     num_episodes: int = EVAL_EPISODES,
     base_seed: int = BASE_SEED,
+    deterministic: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate a single checkpoint across all shift scenarios."""
-    print(f"\n{'='*60}")
-    print(f"Evaluating: {policy_name}")
-    print(f"{'='*60}")
-
-    # Load policy using the existing loader (handles checkpoint + config)
-    learner, manifest, _ = load_trained_policy(Path(checkpoint_path))
-    algo = manifest.get("algo", "ippo")
-    print(f"  Loaded {algo} policy, scenario={manifest.get('scenario_id')}")
+    """Evaluate a single policy across all shift scenarios."""
+    print(f"\n{'='*70}")
+    print(f"Evaluating Policy: {policy_name} ({policy_type})")
+    print(f"{'='*70}")
 
     results: dict[str, Any] = {}
 
-    for shift_label, w_limit, t_zone, t_pct, shift_param in shifts:
+    for shift_label, w_limit, t_zone, t_pct, shift_param, desc in shifts:
         shift_key = shift_label
-        if t_zone is not None:
-            shift_key += f"_z{t_zone}"
-
-        shift_desc = f"limit={w_limit}"
-        if t_zone is not None:
-            shift_desc += f", zone={t_zone} pct={t_pct}%"
-        print(f"\n  Shift {shift_label} ({shift_desc})...")
+        print(f"  [{shift_label:<4}] {desc:<45} (limit={w_limit})...", end="", flush=True)
 
         all_episode_results: list[dict[str, float]] = []
 
         for seed_idx in range(num_episodes):
             env = make_shifted_env(
-                shift_label, w_limit, t_zone, t_pct, shift_param=shift_param, seed=seed_idx,
+                shift_label,
+                w_limit,
+                t_zone,
+                t_pct,
+                shift_param=shift_param,
+                seed=base_seed + seed_idx,
+                base_cfg=base_cfg,
             )
-            ep_results = evaluate_policy(
-                learner, env, num_episodes=1,
+            ep_results = evaluate_policy_on_env(
+                policy=policy,
+                env=env,
+                policy_type=policy_type,
+                num_episodes=1,
                 base_seed=base_seed + seed_idx,
+                deterministic=deterministic,
             )
             all_episode_results.extend(ep_results)
             del env
@@ -296,92 +279,268 @@ def evaluate_checkpoint(
             avg: dict[str, Any] = {}
             for k in all_episode_results[0].keys():
                 vals = [r[k] for r in all_episode_results]
-                if isinstance(vals[0], float):
-                    avg[k] = {
-                        "mean": round(float(np.mean(vals)), 6),
-                        "std": round(float(np.std(vals)), 6),
-                        "min": round(float(np.min(vals)), 6),
-                        "max": round(float(np.max(vals)), 6),
-                    }
-                else:
-                    avg[k] = vals[0]
+                avg[k] = {
+                    "mean": round(float(np.mean(vals)), 6),
+                    "std": round(float(np.std(vals)), 6),
+                    "min": round(float(np.min(vals)), 6),
+                    "max": round(float(np.max(vals)), 6),
+                }
+            avg["episodes"] = len(all_episode_results)
             results[shift_key] = avg
+
             sr = avg.get("service_rate", {}).get("mean", 0)
+            sr_std = avg.get("service_rate", {}).get("std", 0)
             empty = avg.get("empty_km", {}).get("mean", 0)
             wait = avg.get("avg_wait_min", {}).get("mean", 0)
-            reward = avg.get("total_reward", {}).get("mean", 0)
-            print(f"    SR={sr*100:.1f}% | wait={wait:.2f}m | empty={empty:.0f}km | reward={reward:.0f}")
+            print(f" -> SR={sr*100:5.1f}% ±{sr_std*100:4.1f}% | Wait={wait:4.2f}m | Empty={empty:5.0f}km")
 
     return results
 
 
+def format_markdown_table(all_results: dict[str, dict[str, Any]]) -> str:
+    """Generate a clean markdown summary table comparing policies across shifts."""
+    lines = []
+    lines.append("### Demand Shift Degradation Summary (Service Rate % ± Std)")
+    lines.append("")
+    header = "| Policy | " + " | ".join([s[0] for s in SHIFTS]) + " | Mean Retention |"
+    sep = "|:---| " + " | ".join([":---:" for _ in SHIFTS]) + " | :---: |"
+    lines.append(header)
+    lines.append(sep)
+
+    for policy_name, policy_res in all_results.items():
+        s0_sr = policy_res.get("S0", {}).get("service_rate", {}).get("mean", None)
+        retention_list = []
+        row_items = [f"**{policy_name}**"]
+
+        for s_label, _, _, _, _, _ in SHIFTS:
+            s_data = policy_res.get(s_label, {}).get("service_rate", {})
+            sr_mean = s_data.get("mean", None)
+            sr_std = s_data.get("std", 0.0)
+            if sr_mean is not None:
+                row_items.append(f"{sr_mean*100:.1f}% ± {sr_std*100:.1f}%")
+                if s0_sr and s0_sr > 0 and s_label != "S0":
+                    retention_list.append(sr_mean / s0_sr)
+            else:
+                row_items.append("N/A")
+
+        mean_ret = f"{np.mean(retention_list)*100:.1f}%" if retention_list else "N/A"
+        row_items.append(mean_ret)
+        lines.append("| " + " | ".join(row_items) + " |")
+
+    lines.append("")
+    lines.append("### Empty Repositioning Distance (km / episode)")
+    lines.append("")
+    header = "| Policy | " + " | ".join([s[0] for s in SHIFTS]) + " |"
+    sep = "|:---| " + " | ".join([":---:" for _ in SHIFTS]) + " |"
+    lines.append(header)
+    lines.append(sep)
+
+    for policy_name, policy_res in all_results.items():
+        row_items = [f"**{policy_name}**"]
+        for s_label, _, _, _, _, _ in SHIFTS:
+            e_mean = policy_res.get(s_label, {}).get("empty_km", {}).get("mean", None)
+            if e_mean is not None:
+                row_items.append(f"{e_mean:.0f} km")
+            else:
+                row_items.append("N/A")
+        lines.append("| " + " | ".join(row_items) + " |")
+
+    lines.append("")
+    lines.append("### Average Passenger Waiting Time (min)")
+    lines.append("")
+    header = "| Policy | " + " | ".join([s[0] for s in SHIFTS]) + " |"
+    sep = "|:---| " + " | ".join([":---:" for _ in SHIFTS]) + " |"
+    lines.append(header)
+    lines.append(sep)
+
+    for policy_name, policy_res in all_results.items():
+        row_items = [f"**{policy_name}**"]
+        for s_label, _, _, _, _, _ in SHIFTS:
+            w_mean = policy_res.get(s_label, {}).get("avg_wait_min", {}).get("mean", None)
+            if w_mean is not None:
+                row_items.append(f"{w_mean:.2f} min")
+            else:
+                row_items.append("N/A")
+        lines.append("| " + " | ".join(row_items) + " |")
+
+    return "\n".join(lines)
+
+
 def main() -> None:
-    """Run all evaluations and save results."""
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description="Evaluate policies across demand shift suite.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to specific model checkpoint (e.g. runs/mappo-nyc-.../checkpoint.pt)",
+    )
+    parser.add_argument(
+        "--all-runs",
+        action="store_true",
+        help="Discover and evaluate all checkpoints found in runs/",
+    )
+    parser.add_argument(
+        "--include-baselines",
+        action="store_true",
+        help="Also evaluate non-RL baselines (Greedy & LP)",
+    )
+    parser.add_argument(
+        "--baselines-only",
+        action="store_true",
+        help="Only evaluate non-RL baselines (Greedy & LP)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=EVAL_EPISODES,
+        help="Number of evaluation seeds per scenario (default: 5)",
+    )
+    parser.add_argument(
+        "--base-seed",
+        type=int,
+        default=BASE_SEED,
+        help="Base seed for evaluation (default: 1000)",
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Use stochastic sampling instead of deterministic argmax",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default=str(RESULTS_DIR),
+        help="Output directory for results",
+    )
+    args = parser.parse_args()
+
+    out_path = Path(args.out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    policies_to_evaluate = []
+
+    # 1. Checkpoint discovery
+    if args.checkpoint:
+        ckpt_p = Path(args.checkpoint)
+        if not ckpt_p.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_p}")
+        p_name = ckpt_p.parent.name
+        policies_to_evaluate.append((p_name, "checkpoint", ckpt_p))
+    elif args.all_runs:
+        runs_dir = Path("runs")
+        if runs_dir.exists():
+            for p in sorted(runs_dir.iterdir()):
+                ckpt = p / "checkpoint.pt"
+                if ckpt.exists():
+                    policies_to_evaluate.append((p.name, "checkpoint", ckpt))
+    elif not args.baselines_only:
+        # Default: pick latest run in runs/
+        runs_dir = Path("runs")
+        found = False
+        if runs_dir.exists():
+            runs = sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+            for r in runs:
+                ckpt = r / "checkpoint.pt"
+                if ckpt.exists():
+                    policies_to_evaluate.append((r.name, "checkpoint", ckpt))
+                    found = True
+                    break
+        if not found:
+            print("No checkpoints found. Falling back to baselines.")
+            args.include_baselines = True
+
+    # 2. Baselines
+    if args.include_baselines or args.baselines_only:
+        policies_to_evaluate.append(("Greedy-Baseline", "greedy", None))
+        policies_to_evaluate.append(("LP-Rebalancer", "lp", None))
 
     all_results: dict[str, dict[str, Any]] = {}
 
-    for policy_name, checkpoint in CHECKPOINTS.items():
-        results = evaluate_checkpoint(policy_name, checkpoint, SHIFTS)
-        all_results[policy_name] = results
+    for policy_name, p_type, ckpt_or_none in policies_to_evaluate:
+        if p_type == "checkpoint":
+            learner, manifest, eval_env = load_trained_policy(Path(ckpt_or_none))
+            base_cfg = eval_env._cfg
+            res = evaluate_policy_across_shifts(
+                policy_name=policy_name,
+                policy=learner,
+                policy_type="checkpoint",
+                base_cfg=base_cfg,
+                shifts=SHIFTS,
+                num_episodes=args.episodes,
+                base_seed=args.base_seed,
+                deterministic=not args.stochastic,
+            )
+        elif p_type == "greedy":
+            policy = GreedyZoneDispatcher()
+            base_cfg = NYCConfig()
+            res = evaluate_policy_across_shifts(
+                policy_name=policy_name,
+                policy=policy,
+                policy_type="greedy",
+                base_cfg=base_cfg,
+                shifts=SHIFTS,
+                num_episodes=args.episodes,
+                base_seed=args.base_seed,
+                deterministic=True,
+            )
+        elif p_type == "lp":
+            policy = ZoneLPRebalancer()
+            base_cfg = NYCConfig()
+            res = evaluate_policy_across_shifts(
+                policy_name=policy_name,
+                policy=policy,
+                policy_type="lp",
+                base_cfg=base_cfg,
+                shifts=SHIFTS,
+                num_episodes=args.episodes,
+                base_seed=args.base_seed,
+                deterministic=True,
+            )
+        elif p_type == "random":
+            policy = None
+            base_cfg = NYCConfig()
+            res = evaluate_policy_across_shifts(
+                policy_name=policy_name,
+                policy=policy,
+                policy_type="random",
+                base_cfg=base_cfg,
+                shifts=SHIFTS,
+                num_episodes=args.episodes,
+                base_seed=args.base_seed,
+                deterministic=True,
+            )
+        else:
+            continue
 
-    # Save summary JSON
-    summary_path = RESULTS_DIR / "summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(all_results, f, indent=2)
-    print(f"\n\nSaved summary to {summary_path}")
+        all_results[policy_name] = res
 
-    # Save per-shift CSVs
-    for policy_name, policy_results in all_results.items():
-        csv_path = RESULTS_DIR / f"{policy_name}.csv"
-        with open(csv_path, "w") as f:
+        # Write per-policy CSV
+        csv_file = out_path / f"{policy_name}.csv"
+        with open(csv_file, "w", encoding="utf-8") as f:
             f.write("shift,metric,mean,std,min,max\n")
-            for shift_label, shift_data in policy_results.items():
-                for metric, values in shift_data.items():
-                    if isinstance(values, dict) and "mean" in values:
+            for shift_k, s_data in res.items():
+                for m_k, m_vals in s_data.items():
+                    if isinstance(m_vals, dict) and "mean" in m_vals:
                         f.write(
-                            f"{shift_label},{metric},{values['mean']},"
-                            f"{values['std']},{values['min']},{values['max']}\n"
+                            f"{shift_k},{m_k},{m_vals['mean']},{m_vals['std']},"
+                            f"{m_vals['min']},{m_vals['max']}\n"
                         )
 
-    # Print degradation summary table
-    print("\n\n" + "="*100)
-    print("DEGRADATION SUMMARY (Service Rate % vs Shift)")
-    print("="*100)
-    header = f"{'Policy':<20}"
-    for shift_label, _, _, _, _ in SHIFTS:
-        header += f"{shift_label:<10}"
-    print(header)
-    print("-"*100)
-    for policy_name, policy_results in all_results.items():
-        row = f"{policy_name:<20}"
-        for shift_label, _, t_zone, _, _ in SHIFTS:
-            key = shift_label + (f"_z{t_zone}" if t_zone is not None else "")
-            sr = policy_results.get(key, {}).get("service_rate", {}).get("mean", None)
-            if sr is not None:
-                row += f"{sr*100:>7.1f}%   "
-            else:
-                row += f"{'N/A':>10}  "
-        print(row)
-    print("\n" + "="*100)
-    print("EMPTY DISTANCE (km) vs Shift")
-    print("="*100)
-    header = f"{'Policy':<20}"
-    for shift_label, _, _, _, _ in SHIFTS:
-        header += f"{shift_label:<10}"
-    print(header)
-    print("-"*100)
-    for policy_name, policy_results in all_results.items():
-        row = f"{policy_name:<20}"
-        for shift_label, _, t_zone, _, _ in SHIFTS:
-            key = shift_label + (f"_z{t_zone}" if t_zone is not None else "")
-            empty = policy_results.get(key, {}).get("empty_km", {}).get("mean", None)
-            if empty is not None:
-                row += f"{empty:>7.0f}km  "
-            else:
-                row += f"{'N/A':>10}  "
-        print(row)
-    print("\n" + "="*100)
+    # Save summary JSON
+    summary_path = out_path / "summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\n[Saved JSON summary to {summary_path}]")
+
+    # Generate Markdown table
+    md_content = format_markdown_table(all_results)
+    md_path = out_path / "degradation_table.md"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+    print(f"[Saved Markdown report to {md_path}]")
+
+    # Print summary table to stdout
+    print("\n" + md_content + "\n")
 
 
 if __name__ == "__main__":

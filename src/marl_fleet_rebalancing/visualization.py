@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
+from matplotlib.patches import Polygon as MplPolygon
 from matplotlib.widgets import Slider, Button
 
 from ride_gym.visualize import TrajectoryRecorder, STATUS_COLORS, STATUS_LABEL
@@ -171,6 +172,7 @@ _STATS_TEMPLATE = (
     "  [↑ / ↓]   Jump 10 frames\n"
     "  [r]       Reset to start\n"
     "  [z]       Toggle zones\n"
+    "  [m]       Toggle demand heatmap\n"
     "  [f]       Cycle speed\n"
     "  [Click]   Select driver\n"
     "  [Esc]     Deselect"
@@ -203,6 +205,98 @@ def _draw_stats(ax, frame: dict, horizon: float, selected: tuple | None = None) 
     )
 
 
+def _compute_zone_polygons(
+    reloc_pts: list[tuple[float, float]] | None,
+    bounds: tuple[float, float, float, float],
+) -> list:
+    """Compute Voronoi polygons bounded by the map bounds for each zone centroid."""
+    if not reloc_pts or len(reloc_pts) < 2:
+        return []
+    try:
+        import numpy as np
+        from shapely.geometry import MultiPoint, Point, box
+        from shapely.ops import voronoi_diagram
+
+        lon0, lat0, lon1, lat1 = bounds
+        bbox = box(lon0, lat0, lon1, lat1)
+        mp = MultiPoint(reloc_pts)
+        v_diagram = voronoi_diagram(mp, envelope=bbox)
+
+        zone_polys = [None] * len(reloc_pts)
+        cents = [Point(pt) for pt in reloc_pts]
+        for geom in v_diagram.geoms:
+            clipped = geom.intersection(bbox)
+            if clipped.is_empty:
+                continue
+            for i, cpt in enumerate(cents):
+                if clipped.contains(cpt) or clipped.distance(cpt) < 1e-5:
+                    zone_polys[i] = clipped
+                    break
+        return zone_polys
+    except Exception:
+        return []
+
+
+def _draw_zone_demand_heatmap(
+    ax,
+    frame: dict,
+    reloc_pts: list[tuple[float, float]] | None,
+    zone_polys: list,
+    show_heatmap: bool = True,
+) -> None:
+    """Draw a zone outline-based heatmap colored by pending demand intensity."""
+    if not show_heatmap or not reloc_pts or not zone_polys:
+        return
+
+    import numpy as np
+
+    n_zones = len(reloc_pts)
+    cents = np.asarray(reloc_pts, dtype=float)
+
+    if frame.get("pending"):
+        origins = np.asarray(frame["pending"], dtype=float)
+        dists = ((origins[:, None, :] - cents[None, :, :]) ** 2).sum(axis=2)
+        nearest = dists.argmin(axis=1)
+        counts = np.bincount(nearest, minlength=n_zones)
+    else:
+        counts = np.zeros(n_zones, dtype=int)
+
+    max_c = max(int(np.max(counts)), 1)
+    cmap = plt.cm.YlOrRd
+
+    for zi, poly in enumerate(zone_polys):
+        if poly is None or poly.is_empty:
+            continue
+        c = counts[zi]
+        geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
+        for g in geoms:
+            coords = np.asarray(g.exterior.coords)
+            if c > 0:
+                norm_val = min(1.0, 0.25 + 0.75 * (c / max(max_c, 3)))
+                face_color = cmap(norm_val)
+                patch = MplPolygon(
+                    coords,
+                    closed=True,
+                    facecolor=face_color,
+                    edgecolor="#e65100",
+                    linewidth=1.2,
+                    alpha=0.35,
+                    zorder=1,
+                )
+            else:
+                patch = MplPolygon(
+                    coords,
+                    closed=True,
+                    facecolor="none",
+                    edgecolor="#9c27b0",
+                    linewidth=0.5,
+                    linestyle=":",
+                    alpha=0.25,
+                    zorder=1,
+                )
+            ax.add_patch(patch)
+
+
 def _draw_frame(
     ax,
     stats_ax,
@@ -211,6 +305,8 @@ def _draw_frame(
     precomputed_segs: list,
     bounds: tuple,
     detailed: bool,
+    show_heatmap: bool = False,
+    zone_polys: list | None = None,
 ) -> None:
     """Draw one animation frame."""
     ax.clear()
@@ -227,6 +323,9 @@ def _draw_frame(
 
     # Zones overlay if available
     reloc_pts = getattr(recorder, "relocation_points", None)
+    if show_heatmap and reloc_pts and zone_polys:
+        _draw_zone_demand_heatmap(ax, frame, reloc_pts, zone_polys, show_heatmap=True)
+
     if reloc_pts:
         zx = [p[0] for p in reloc_pts]
         zy = [p[1] for p in reloc_pts]
@@ -331,12 +430,15 @@ def render_animation(
     figsize: Tuple[float, float] = (13.5, 8.5),
     dpi: int = 100,
     description: str = "",
+    show_heatmap: bool = False,
 ) -> str:
     """Render a recorded trajectory to an MP4 with a clean custom layout."""
     if not recorder.frames:
         raise ValueError("recorder has no frames; call snapshot() during the run.")
 
     precomputed_segs, bounds = _precompute_network_segments(recorder.network)
+    reloc_pts = getattr(recorder, "relocation_points", None)
+    zone_polys = _compute_zone_polygons(reloc_pts, bounds) if show_heatmap else None
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
     fig.subplots_adjust(top=0.90, bottom=0.06, left=0.04, right=0.98)
@@ -360,6 +462,8 @@ def render_animation(
             precomputed_segs,
             bounds,
             detailed,
+            show_heatmap=show_heatmap,
+            zone_polys=zone_polys,
         )
 
         # Persistent header strip: description text + legend, re-rendered every
@@ -443,6 +547,7 @@ def interactive_view(
     detailed: bool = True,
     figsize: Tuple[float, float] = (14, 8),
     dpi: int = 100,
+    initial_heatmap: bool = False,
 ) -> None:
     """Open an interactive matplotlib window to explore the episode.
 
@@ -456,6 +561,7 @@ def interactive_view(
       Up/Down           jump 10 frames forward/backward
       r                 reset to start (frame 0)
       z                 toggle zone overlay
+      m                 toggle zone demand heatmap
       f / s             cycle playback speed (1x, 2x, 4x, 0.5x)
       Click vehicle     select vehicle to inspect trajectory & tasks
       Escape            deselect current vehicle
@@ -469,6 +575,7 @@ def interactive_view(
     precomputed_segs, bounds = _precompute_network_segments(network)
     lon0, lat0, lon1, lat1 = bounds
     reloc_pts = getattr(recorder, "relocation_points", None)
+    zone_polys = _compute_zone_polygons(reloc_pts, bounds)
 
     state = {
         "idx": 0,
@@ -477,6 +584,8 @@ def interactive_view(
         "all_drivers": [],
         "scatter": None,
         "show_zones": bool(reloc_pts),
+        "show_heatmap": initial_heatmap,
+        "zone_polys": zone_polys,
         "speed_idx": 0,
         "speeds": [100, 50, 25, 200],
         "speed_labels": ["1x", "2x", "4x", "0.5x"],
@@ -503,13 +612,15 @@ def interactive_view(
     )
 
     # Control buttons
-    ax_btn_reset = fig.add_axes([0.06, 0.025, 0.065, 0.04])
-    ax_btn_prev = fig.add_axes([0.135, 0.025, 0.065, 0.04])
-    ax_btn_play = fig.add_axes([0.21, 0.025, 0.075, 0.04])
-    ax_btn_next = fig.add_axes([0.295, 0.025, 0.065, 0.04])
-    ax_btn_speed = fig.add_axes([0.37, 0.025, 0.075, 0.04])
-    ax_btn_zones = fig.add_axes([0.455, 0.025, 0.085, 0.04])
-    ax_btn_zoom = fig.add_axes([0.55, 0.025, 0.095, 0.04])
+    ax_btn_reset = fig.add_axes([0.05, 0.025, 0.06, 0.04])
+    ax_btn_prev = fig.add_axes([0.115, 0.025, 0.06, 0.04])
+    ax_btn_play = fig.add_axes([0.18, 0.025, 0.07, 0.04])
+    ax_btn_next = fig.add_axes([0.255, 0.06, 0.06, 0.04])
+    ax_btn_next.set_position([0.255, 0.025, 0.06, 0.04])
+    ax_btn_speed = fig.add_axes([0.32, 0.025, 0.07, 0.04])
+    ax_btn_zones = fig.add_axes([0.395, 0.025, 0.075, 0.04])
+    ax_btn_heatmap = fig.add_axes([0.475, 0.025, 0.085, 0.04])
+    ax_btn_zoom = fig.add_axes([0.565, 0.025, 0.085, 0.04])
 
     btn_reset = Button(ax_btn_reset, "Reset")
     btn_prev = Button(ax_btn_prev, "« -10s")
@@ -517,10 +628,11 @@ def interactive_view(
     btn_next = Button(ax_btn_next, "» +10s")
     btn_speed = Button(ax_btn_speed, "Speed: 1x")
     btn_zones = Button(ax_btn_zones, f"Zones: {'ON' if state['show_zones'] else 'OFF'}")
+    btn_heatmap = Button(ax_btn_heatmap, f"Heatmap: {'ON' if state['show_heatmap'] else 'OFF'}")
     btn_zoom = Button(ax_btn_zoom, "Reset Zoom")
 
     # Retain references on state so garbage collection never kills them
-    state["widgets"] = [slider, btn_reset, btn_prev, btn_play, btn_next, btn_speed, btn_zones, btn_zoom]
+    state["widgets"] = [slider, btn_reset, btn_prev, btn_play, btn_next, btn_speed, btn_zones, btn_heatmap, btn_zoom]
 
     def _draw(idx: int, update_slider: bool = True):
         """Redraw map, drivers, zones, and statistics."""
@@ -531,7 +643,7 @@ def interactive_view(
 
         ax_map.set_xlim(state["xlim"])
         ax_map.set_ylim(state["ylim"])
-        ax_map.set_aspect("equal", adjustable="datalim")
+        ax_map.set_aspect("equal", adjustable="box")
         ax_map.set_xticks([])
         ax_map.set_yticks([])
 
@@ -545,6 +657,10 @@ def interactive_view(
         # Road network
         lc = LineCollection(precomputed_segs, colors="#dddddd", linewidths=0.4, zorder=0)
         ax_map.add_collection(lc)
+
+        # Zone demand heatmap
+        if state["show_heatmap"] and reloc_pts and state["zone_polys"]:
+            _draw_zone_demand_heatmap(ax_map, frame, reloc_pts, state["zone_polys"], show_heatmap=True)
 
         # Zones overlay
         if state["show_zones"] and reloc_pts:
@@ -759,6 +875,11 @@ def interactive_view(
         btn_zones.label.set_text(f"Zones: {'ON' if state['show_zones'] else 'OFF'}")
         _draw(state["idx"], update_slider=False)
 
+    def _toggle_heatmap(event=None):
+        state["show_heatmap"] = not state["show_heatmap"]
+        btn_heatmap.label.set_text(f"Heatmap: {'ON' if state['show_heatmap'] else 'OFF'}")
+        _draw(state["idx"], update_slider=False)
+
     def _on_slider(val):
         if state["updating_slider"]:
             return
@@ -782,6 +903,8 @@ def interactive_view(
             _reset()
         elif event.key == "z":
             _toggle_zones()
+        elif event.key in ("m", "d"):
+            _toggle_heatmap()
         elif event.key in ("f", "s"):
             _toggle_speed()
         elif event.key in ("0", "h"):
@@ -881,6 +1004,7 @@ def interactive_view(
     btn_next.on_clicked(lambda e: _step_next(e, 10))
     btn_speed.on_clicked(_toggle_speed)
     btn_zones.on_clicked(_toggle_zones)
+    btn_heatmap.on_clicked(_toggle_heatmap)
     btn_zoom.on_clicked(_reset_zoom)
 
     fig.canvas.mpl_connect("close_event", _on_close)

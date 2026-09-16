@@ -225,6 +225,27 @@ def evaluate_policy(
             "pct_relocate": float(100.0 * acts_relocate / total_acts),
             "pct_idle": float(100.0 * acts_idle / total_acts),
         }
+
+        # Driver-level status percentages from recorded frames.
+        # Unlike the zone-agent action counts above, these count every
+        # (driver, frame) pair across the episode — measuring actual fleet
+        # time spent in each state, not zone-level "no driver in zone" idle.
+        if recorder is not None and recorder.frames:
+            _idles, _relocates = 0, 0
+            from ride_gym.enums import DriverStatus
+            for _frame in recorder.frames:
+                for _d in _frame["drivers"].values():
+                    if _d["status"] == DriverStatus.IDLE:
+                        _idles += 1
+                    elif _d["status"] == DriverStatus.RELOCATING:
+                        _relocates += 1
+            _n_driver_frames = len(recorder.frames) * len(recorder.frames[0]["drivers"])
+            res["pct_idle_drivers"] = (
+                100.0 * _idles / _n_driver_frames if _n_driver_frames else 0.0
+            )
+            res["pct_relocate_drivers"] = (
+                100.0 * _relocates / _n_driver_frames if _n_driver_frames else 0.0
+            )
         episode_results.append(res)
 
     return episode_results, recorder
@@ -251,6 +272,8 @@ def main() -> None:
                         help="Frames per second for rendered MP4 animation (default: 10)")
     parser.add_argument("-i", "--interactive", action="store_true", default=False,
                         help="Open interactive viewer for the evaluation episode")
+    parser.add_argument("--heatmap", action="store_true", default=False,
+                        help="Enable zone outline-based demand heatmap overlay")
     parser.add_argument("--target-zone", type=int, default=None,
                         help="Target zone ID for parameterized demand injection")
     parser.add_argument("--target-zone-demand-pct", type=float, default=None,
@@ -317,14 +340,21 @@ def main() -> None:
     print(f"Config loaded: Algo={algo} | Scenario={scenario} | Zones={env._num_zones} | Drivers={env._num_drivers}")
 
     record_animation = args.output is not None or args.interactive
+
+    # Interactive inspect mode: run a single episode — the viewer only shows
+    # the first one anyway, so running 5 wastes resources.
+    effective_episodes = 1 if args.interactive else args.episodes
+
     deterministic = not args.stochastic
 
-    print(f"\nRunning {args.episodes} evaluation episodes (deterministic={deterministic}, base_seed={args.base_seed})...")
+    print(f"\nRunning {effective_episodes} evaluation episode(s) "
+          f"(deterministic={deterministic}, base_seed={args.base_seed})..."
+          + (" (interactive inspect — single episode)" if args.interactive else ""))
     results, recorder = evaluate_policy(
         policy=policy,
         env=env,
         policy_type=policy_type,
-        num_episodes=args.episodes,
+        num_episodes=effective_episodes,
         base_seed=args.base_seed,
         deterministic=deterministic,
         record_first_episode=record_animation,
@@ -340,7 +370,15 @@ def main() -> None:
     disp_vals = [r["pct_dispatch"] for r in results]
     reloc_vals = [r["pct_relocate"] for r in results]
 
-    if args.episodes == 1:
+    # Driver-level status counts come from the TrajectoryRecorder, which only
+    # captures episode 0 (when record_first_episode=True). They are only
+    # available in single-episode/inspect mode — not meaningful as an
+    # aggregate across non-recorded episodes.
+    _all_have_drv = all("pct_idle_drivers" in r for r in results)
+    idle_drv_vals = [r.get("pct_idle_drivers", 0.0) for r in results] if _all_have_drv else []
+    reloc_drv_vals = [r.get("pct_relocate_drivers", 0.0) for r in results] if _all_have_drv else []
+
+    if effective_episodes == 1:
         r = results[0]
         print("\n" + "=" * 60)
         print(f"EVALUATION RESULT ({algo} on {scenario} | seed={int(r['seed'])})")
@@ -351,6 +389,10 @@ def main() -> None:
         print(f"  Avg Wait Time:      {r['avg_wait_min']:.2f} min")
         print(f"  Empty Distance:     {r['empty_km']:.1f} km")
         print(f"  Cumulative Reward:  {r['total_reward']:+.1f}")
+        if "pct_idle_drivers" in r:
+            print(f"  Idle Drivers:       {r['pct_idle_drivers']:.1f}%")
+            print(f"  Relocating Drivers: {r['pct_relocate_drivers']:.1f}%")
+            print(f"  Busy Drivers:       {100.0 - r['pct_idle_drivers'] - r['pct_relocate_drivers']:.1f}%")
         print("=" * 60)
     else:
         print("\n" + "=" * 78)
@@ -366,15 +408,18 @@ def main() -> None:
         print(f"{'Cumulative Reward':<25} | {np.mean(reward_vals):6.1f} ± {np.std(reward_vals):<10.1f} | [{min(reward_vals):.1f}, {max(reward_vals):.1f}]")
         print(f"{'Dispatch Actions (%)':<25} | {np.mean(disp_vals):6.1f}% ± {np.std(disp_vals):<9.1f}% | [{min(disp_vals):.1f}%, {max(disp_vals):.1f}%]")
         print(f"{'Relocate Actions (%)':<25} | {np.mean(reloc_vals):6.1f}% ± {np.std(reloc_vals):<9.1f}% | [{min(reloc_vals):.1f}%, {max(reloc_vals):.1f}%]")
+        if idle_drv_vals:
+            print(f"{'Idle Drivers (%)':<25} | {np.mean(idle_drv_vals):6.1f}% ± {np.std(idle_drv_vals):<9.1f}% | [{min(idle_drv_vals):.1f}%, {max(idle_drv_vals):.1f}%]")
+            print(f"{'Relocating Drivers (%)':<25} | {np.mean(reloc_drv_vals):6.1f}% ± {np.std(reloc_drv_vals):<9.1f}% | [{min(reloc_drv_vals):.1f}%, {max(reloc_drv_vals):.1f}%]")
         print("=" * 78)
 
     if recorder is not None:
         if args.interactive:
             print("\nOpening interactive viewer...")
-            interactive_view(recorder, detailed=True)
+            interactive_view(recorder, detailed=True, initial_heatmap=args.heatmap)
         elif args.output:
-            print(f"\nRendering {len(recorder.frames)} frames to {args.output} (fps={args.fps})...")
-            render_animation(recorder, out_path=args.output, fps=args.fps, detailed=True)
+            print(f"\nRendering {len(recorder.frames)} frames to {args.output} (fps={args.fps}, heatmap={args.heatmap})...")
+            render_animation(recorder, out_path=args.output, fps=args.fps, detailed=True, show_heatmap=args.heatmap)
             print(f"Saved {args.output}")
 
 
