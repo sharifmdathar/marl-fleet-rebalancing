@@ -209,15 +209,15 @@ mechanism rows (S1/S4_z1/S5_z0) are the ones to report.
 
 Service rate (mechanism-labeled, algorithm-family mean ± std bands):
 
-![Service rate degradation](results/figures_fixed/degradation_service_rate.png)
+![Service rate degradation](../results/figures_fixed/degradation_service_rate.png)
 
 Empty distance (km/ep):
 
-![Empty distance degradation](results/figures_fixed/degradation_empty_km.png)
+![Empty distance degradation](../results/figures_fixed/degradation_empty_km.png)
 
 Average wait (min/ep):
 
-![Avg wait degradation](results/figures_fixed/degradation_avg_wait_min.png)
+![Avg wait degradation](../results/figures_fixed/degradation_avg_wait_min.png)
 
 ### Updated findings
 
