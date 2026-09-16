@@ -297,13 +297,19 @@ def _draw_frame(
                 )
 
     has_target = bool(getattr(recorder, "target_zone", None) is not None)
+    legend_handles = _make_legend_handles(
+        show_zones=bool(reloc_pts),
+        show_od=detailed,
+        has_target_zone=has_target,
+    )
     ax.legend(
-        handles=_make_legend_handles(
-            show_zones=bool(reloc_pts),
-            show_od=detailed,
-            has_target_zone=has_target,
-        ),
-        loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=5, fontsize=6.8, framealpha=0.95,
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.12),
+        ncol=5,
+        fontsize=6.8,
+        framealpha=0.95,
+        bbox_transform=ax.transAxes,
     )
     target_zi = getattr(recorder, "target_zone", None)
     target_pct = getattr(recorder, "target_zone_pct", None)
@@ -312,10 +318,7 @@ def _draw_frame(
         pct_val = target_pct * 100 if (target_pct and target_pct <= 1.0) else (target_pct or 0.0)
         surge_info = f"  |  ★ Surge: Zone {target_zi} ({pct_val:.0f}% demand)"
 
-    ax.set_title(
-        f"t = {frame['time']:.1f} / {recorder.horizon:.0f} min{surge_info}",
-        fontsize=10, y=1.13,
-    )
+    ax.set_title("")
 
     _draw_stats(stats_ax, frame, recorder.horizon)
 
@@ -324,9 +327,10 @@ def render_animation(
     recorder: TrajectoryRecorder,
     out_path: str = "episode.mp4",
     fps: int = 10,
-    detailed: bool = False,
-    figsize: Tuple[float, float] = (13, 8),
+    detailed: bool = True,
+    figsize: Tuple[float, float] = (13.5, 8.5),
     dpi: int = 100,
+    description: str = "",
 ) -> str:
     """Render a recorded trajectory to an MP4 with a clean custom layout."""
     if not recorder.frames:
@@ -335,9 +339,18 @@ def render_animation(
     precomputed_segs, bounds = _precompute_network_segments(recorder.network)
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
-    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.08, top=0.87, bottom=0.05, left=0.04, right=0.98)
+    fig.subplots_adjust(top=0.90, bottom=0.06, left=0.04, right=0.98)
+
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.08,
+                          top=0.82, bottom=0.06, left=0.04, right=0.98)
     ax_map = fig.add_subplot(gs[0])
     ax_stats = fig.add_subplot(gs[1])
+
+    # Persistent header strip: description text on top line, legend below it.
+    # This stays inside the figure and is NOT cleared by _draw_frame (which only
+    # touches ax_map / ax_stats), so the MP4 shows it on every frame.
+    ax_legend = fig.add_axes([0.04, 0.805, 0.92, 0.10])
+    ax_legend.axis("off")
 
     def _draw(frame_idx: int):
         _draw_frame(
@@ -347,6 +360,38 @@ def render_animation(
             precomputed_segs,
             bounds,
             detailed,
+        )
+
+        # Persistent header strip: description text + legend, re-rendered every
+        # frame so the MP4 shows both on all 601 frames.  ax_legend is not
+        # touched by _draw_frame, so its artists survive across re-draws.
+        ax_legend.clear()
+        ax_legend.axis("off")
+
+        # Description text (top line of the strip)
+        if description:
+            ax_legend.text(
+                0.5, 0.88, description,
+                ha="center", va="top", fontsize=8.5,
+                fontfamily="monospace",
+                transform=ax_legend.transAxes,
+            )
+
+        # Legend (bottom line of the strip, centered)
+        has_target = bool(getattr(recorder, "target_zone", None) is not None)
+        handles = _make_legend_handles(
+            show_zones=bool(getattr(recorder, "relocation_points", None)),
+            show_od=detailed,
+            has_target_zone=has_target,
+        )
+        ax_legend.legend(
+            handles=handles,
+            loc="center",
+            ncol=5,
+            fontsize=7.5,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.35),
+            bbox_transform=ax_legend.transAxes,
         )
 
     anim = animation.FuncAnimation(

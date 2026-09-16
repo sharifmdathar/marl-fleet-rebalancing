@@ -231,14 +231,15 @@ Average wait (min/ep):
    just in different relative positions. Supports RQ1 "where matters but how
    it moves matters too."
 
-2. **S4 (cold-zone emergence) is the hardest hit (~25pp).** 60% of demand
-   concentrated into zone 1, which is verifiably cold in the training split
-   (44 orders, 0.105% across 84 train windows, seed=42; hottest zones
+2. **S4 (cold-zone concentration) is the hardest hit (~25pp).** 60% of demand
+   concentrated into zone 1 via the same static-concentration mechanism as
+   S1a/S4a/S5a, but targeting a zone that is verifiably cold in the training
+   split (44 orders, 0.105% across 84 train windows, seed=42; hottest zones
    ~3.7% each). The frozen policy has never been rewarded serving zone 1,
    so it doesn't position drivers there. SR drops to ~25-27% across all
    policies. This is the strongest single-mechanism degradation signal and
-   confirms the "unseen hotspot" hypothesis: a zone the policy never
-   learned to serve is catastrophic even at moderate concentration.
+   confirms the cold-target hypothesis: concentration into a zone the policy
+   never learned to serve is catastrophic even at moderate intensity.
 
 3. **S5 (time-localized burst) barely registers (~1pp).** 20% of orders
    with request_time in [20,30) min get their origin reassigned to zone 0;
@@ -252,7 +253,7 @@ Average wait (min/ep):
    like a real degradation).
 
 4. **Severity ranking across mechanisms is now clean and distinct:**
-   cold-zone emergence (S4, −25pp) >> spatial permutation (S1, −14pp) >>
+   cold-zone concentration (S4, −25pp) >> spatial permutation (S1, −14pp) >>
    time-localized burst (S5, −1pp) ≈ temporal (S3, ~0pp) ≈ held-out (S6,
    ~0pp) > magnitude shifts (S2, monotonic −7 to −21pp from 0.5x to 2.0x).
    This is the D21 payoff: three scenarios that looked identical under the

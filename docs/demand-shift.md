@@ -13,12 +13,12 @@ training demand (current: Poisson arrivals on Bandra West network, 400 orders /
 | S1 | Spatial permutation | Rotate/permute origin-destination intensities across zones, strength p ∈ [0,1] | Hotspots move (new mall, office district) |
 | S2 | Magnitude scaling | Global arrival rate × λ, λ ∈ {0.5, 0.75, 1.25, 1.5, 2.0} | Demand surge / off-season |
 | S3 | Temporal phase shift | Peak window shifted by Δt minutes | Schedule change, daylight saving, Ramadan |
-| S4 | New hotspot emergence | k new hotspot nodes with intensity h, unseen in training | Concert venue, new station opens |
+| S4 | Cold-zone concentration | target_zone + target_zone_pct, zone verifiably cold in train split | Policy never rewarded in target zone |
 | S5 | Event-like spike | Short high-intensity burst at random node/time | Match ending, sudden rain |
 | S6 | Real held-out demand | Different day/window of real trip data | The non-synthetic case |
 
 Mapping to the prof's four shift families (D12): higher demand → S2;
-spatial shift → S1 (plus S4 hotspot emergence); temporal shift → S3;
+spatial shift → S1 (plus S4 cold-zone concentration); temporal shift → S3;
 event-type shift → S5. S0 is the in-distribution control.
 
 ## Zone partition over the Bandra West graph
@@ -30,7 +30,7 @@ We divide the graph into **12 zones** using a **spatial grid partition**:
 - Each zone contains approximately equal numbers of graph nodes (≈122 nodes/zone)
 - Zone IDs are assigned based on the centroid latitude/longitude of each node
 - This partition is deterministic, reproducible, and serves as the abstraction
-  layer for S1 (spatial permutation) and S4 (new hotspot emergence)
+  layer for S1 (spatial permutation) and S4 (cold-zone concentration)
 - The zone mapping is persisted as `data/zone_partition.json` (node_id → zone_id)
 - Order generators reference zones rather than individual graph nodes for
   demand injection, ensuring shifts operate at the zone level
@@ -77,10 +77,10 @@ The old labels are deprecated but their CSVs stay on disk. New definitions:
   zones remapped through a fixed rotation (offset = num_zones // 2,
   documented seed) with probability p per order; otherwise unchanged.
   Hotspots move instead of intensifying. Same order count, same timestamps.
-- S4 (unseen-hotspot emergence, k = 1): 60% of orders originate in the
+- S4 (cold-zone concentration, k = 1): 60% of orders originate in the
   coldest train-demand zone (measured below — genuinely near-zero training
-  demand, no retraining needed), full-episode duration. Same mechanism as
-  concentration, but the zone is verifiably unseen.
+  demand). Same mechanism as static concentration (ParameterizedZoneOrderGenerator),
+  but the target zone is verifiably unseen in training.
 - S5 (event burst): `burst_share` of the orders with request_time inside
   [burst_start, burst_end] = [20, 30] min reassigned to `burst_zone 0`
   (centroid nodes, timestamps preserved). Same total volume, time-localized.
