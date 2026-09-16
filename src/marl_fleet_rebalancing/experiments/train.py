@@ -650,6 +650,15 @@ def train(
 
             if it % train_cfg.checkpoint_interval == 0 or it == train_cfg.iterations:
                 torch.save(learner.state_dict(), run_dir / "checkpoint.pt")
+                # Also keep a versioned copy: checkpoint.pt is overwritten on
+                # every interval, so a policy that collapses late in training
+                # (e.g. both PPO variants under D25's reward, see
+                # docs/shift-results.md) would otherwise leave nothing behind
+                # but its final, degraded weights.
+                torch.save(
+                    learner.state_dict(),
+                    run_dir / f"checkpoint_it{it:04d}.pt",
+                )
 
     finally:
         if pool is not None:
