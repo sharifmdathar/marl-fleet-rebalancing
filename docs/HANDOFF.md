@@ -16,6 +16,25 @@ stress-test on shifted distributions and plot degradation curves.
 **Advisor:** Alaa Daoud (INSA Hauts-de-France, LAMIH CNRS)
 ---
 
+## 2026-09-17: D28 paired retraining done — H1–H4 answered
+
+- Both PPO variants retrained under the **identical D28 protocol** (env v1.8,
+  two-stage entropy 0.05→0.01, neighbor relocation, validation-selected
+  checkpoints on the true held-out val split): `ippo-nyc-d28-stage2` and
+  `mappo-nyc-d28-stage2`. The relocation collapse is gone at the source
+  (`pct_relocate` stays ~14% / ~10% through training).
+- 5-seed frozen shift eval (S0–S6, seeds 1000–1004) complete for both +
+  baselines. Head-to-head: MAPPO 56.9% S0 / 87.6% retention vs IPPO 56.5% /
+  84.8% — **within noise; H3 is the answer, with a lean toward H4** (MAPPO's
+  edge concentrates on demand-level shifts S1/S3; both collapse below greedy
+  on S4). Tuned LP still leads every shift at half IPPO's empty km.
+- Full writeup with tables + caveats: `docs/shift-results.md` (head-to-head
+  rebuilt by `scripts/summarize_shift_eval.py`). Figures updated in
+  `results/figures/`.
+- **Remaining for submission:** repeat each D28 training with 2–3 training
+  seeds (deltas are currently single-training-seed); reconcile `INTENT.md`'s
+  relocate-only non-goals line with D9's joint action space.
+
 ## 2026-09-16: D22 env overhaul + purge of all pre-D22 artifacts
 
 - Code audit (no training logs) found six S0 blockers; fixed as config
@@ -266,10 +285,12 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 ### Phase 4: Demand shift experiments (pending v1.4 retrain)
 1. Shift injection (spatial, magnitude, burst, permute) — DONE
    (`experiments/shift_eval.py`; S0–S6 per `docs/demand-shift.md`).
-2. Freeze trained policies, evaluate on shifted scenarios — TODO after
-   S0 competence on v1.4 defaults.
-3. IPPO vs MAPPO head-to-head + H1–H4 writeup — TODO, recorded in
-   `docs/shift-results.md` (currently a stub).
+2. Freeze trained policies, evaluate on shifted scenarios — **DONE
+   2026-09-17** (5 seeds, S0–S6, both D28 policies + baselines;
+   `results/shift_eval/`).
+3. IPPO vs MAPPO head-to-head + H1–H4 writeup — **DONE 2026-09-17**:
+   `docs/shift-results.md` (answer: H3, with H4-type residue on S1/S3;
+   caveats: single training seed per algo).
 
 ---
 
