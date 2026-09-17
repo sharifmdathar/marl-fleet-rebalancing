@@ -19,7 +19,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 1.8 (D26: localized neighbor relocation & scale-up — neighbor_relocation_only=True)
+    Version: 1.9 (D28: relocation arrival bonus & NYC action-space compression)
     """
 
     # --- Fleet ---
@@ -76,9 +76,8 @@ class EnvConfig:
     # Maximum pending orders included in observation.
     # If actual pending > max_pending, we keep the most urgent orders
     # (closest to timeout) and mask the rest.
-    # NYC Bandra West measured max ~70; set 80 as safe headroom.
-    # For NYC, this should be measured from the actual order data
-    # after running the data pipeline. Update once data is available.
+    # Bandra West measured max ~70; NYC measured peak ~28 concurrent (D28).
+    # NYCConfig overrides to 30; BandraConfig keeps 80.
     max_pending: int = 80
 
     # --- Region model (zone-controller agents, D10) ---
@@ -128,6 +127,13 @@ class EnvConfig:
     cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
     team_share: float = 0.2  # 80% local credit + 20% team
 
+    # --- Relocation arrival bonus (D28) ---
+    # When a relocated driver arrives at its destination zone, the relocator zone
+    # receives an immediate bonus: prospective_bonus_scale * pending_demand_at_dest / num_drivers.
+    # Eliminates the 8-18 turn credit delay that made relocation perpetually unprofitable.
+    # 0.0 disables (legacy behavior). Typical: 1.0-3.0.
+    prospective_bonus_scale: float = 0.0
+
     # --- Seeding ---
     seed: int | None = None
 
@@ -146,7 +152,7 @@ class NYCConfig(EnvConfig):
 
     Fleet size: 100 drivers for a 60-minute episode.
 
-    max_pending: 80
+    max_pending: 30 (D28: measured peak ~28 concurrent; 80 wasted 50+ masked slots)
 
     Demand: real FHVHV windows from data/nyc/splits via
     MultiWindowNYCOrderGenerator.
@@ -166,12 +172,13 @@ class NYCConfig(EnvConfig):
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
     nyc_window_limit: int | None = 500
-    max_pending: int = 80
+    max_pending: int = 30     # D28: was 80; actual peak ~28 concurrent
     alpha: float = 0.2
     beta: float = 0.15
     gamma: float = 1.0
     cancel_penalty: float = 1.0
     team_share: float = 0.2
+    prospective_bonus_scale: float = 2.0  # D28: immediate relocation arrival credit
 
 
 # ---------------------------------------------------------------------------

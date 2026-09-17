@@ -671,6 +671,23 @@ class RideGymAEC(AECEnv):
                         local_rewards[dispatcher] += cfg.gamma
                 self._driver_relocator.pop(did, None)
 
+        # 1b. Relocation arrival bonus (D28: immediate credit when relocated driver arrives)
+        # Eliminates the 8-18 turn delay where the relocator zone had to wait
+        # for the driver to be dispatched by the destination zone.
+        # Bonus = prospective_bonus_scale * pending_demand_at_destination / num_drivers
+        prospective_bonus = float(getattr(cfg, "prospective_bonus_scale", 0.0))
+        if prospective_bonus > 0.0:
+            for did in getattr(self, "_relocator_arrivals", []):
+                relocator = self._driver_relocator.get(did)
+                if relocator is not None and 0 <= relocator < self._num_zones:
+                    # Driver is now at destination; current_region is the target zone
+                    d = self._last_obs[did]["self"]
+                    dest_zone = int(d.get("current_region", 0))
+                    dest_zone = max(0, min(dest_zone, self._num_zones - 1))
+                    pending_at_dest = float(self._pending_per_zone[dest_zone])
+                    bonus = prospective_bonus * pending_at_dest
+                    local_rewards[relocator] += bonus
+
         # 2. Empty deadhead distance penalty (-beta) with shared relocation cost
         for did, event in events.items():
             if event.get("is_empty_move", False):
@@ -828,6 +845,19 @@ class RideGymAEC(AECEnv):
                 ridegym_actions[driver_id] = decoded
 
         obs, _rewards, dones, info = self.env.step(ridegym_actions)
+
+        # Detect relocation arrivals BEFORE updating _last_obs (D28):
+        # Drivers that were "relocating" in the old obs but are no longer
+        # "relocating" in the new obs just completed their relocation hop.
+        self._relocator_arrivals = []
+        prospective_bonus = float(getattr(self._cfg, "prospective_bonus_scale", 0.0))
+        if prospective_bonus > 0.0:
+            for did in range(self._num_drivers):
+                old_status = self._last_obs[did]["self"]["status"]
+                new_status = obs[did]["self"]["status"]
+                if old_status == "relocating" and new_status != "relocating":
+                    self._relocator_arrivals.append(did)
+
         self._last_obs = obs
         self._current_pending = self._extract_pending(obs)
         self._rebuild_caches()

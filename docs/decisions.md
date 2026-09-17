@@ -510,6 +510,48 @@ Format: date, status, decision, why, what would change our mind.
   clone. Pre-D27 LP rows in `results/shift_eval/` are invalid and must not be
   cited; re-run baselines before any head-to-head.
 
+## D28 — Relocation arrival bonus & NYC action-space compression
+- Date: 2026-09-17, Status: accepted
+- Problem: Agents never learn relocation because the credit arrives too late
+  (8-18 turns after the command) and is too small relative to the immediate
+  empty-km cost. With gamma=0.99, the discounted value of +0.3 assist credit
+  perceived 12 turns early is ~0.266, while the immediate cost of a 2 km
+  relocation is -0.30 — net negative. Additionally, max_pending=80 wastes
+  50+ dispatch slots that are always masked, diluting relocation actions in
+  the policy output (62 out of 143 vs 62 out of 93).
+- Decisions:
+  1. **Relocation arrival bonus** (`prospective_bonus_scale`): When a relocated
+     driver arrives at its destination zone (status transitions from
+     "relocating" to non-"relocating"), the relocator zone receives an
+     immediate bonus: `prospective_bonus_scale * pending_demand_at_dest / num_drivers`.
+     This eliminates the temporal credit delay — the relocator is rewarded at
+     arrival, not at eventual dispatch. Default 0.0 (disabled); NYCConfig set
+     to 2.0.
+  2. **NYC max_pending 80 → 30**: Measured peak concurrent pending is ~28.
+     Reduces action space from 143 to 93, observation from ~746 to ~506
+     features, and makes relocation actions proportionally more likely to be
+     sampled (62/93 vs 62/143).
+  3. **Config version bump**: 1.8 → 1.9.
+- Implementation:
+  - `pettingzoo_env.py`: Detect arrivals in `_flush_turn()` by comparing
+    old/new driver statuses before/after `env.step()`. Store in
+    `_relocator_arrivals`. Apply bonus in `_compute_zone_rewards()` section 1b.
+  - `config.py`: Added `prospective_bonus_scale: float = 0.0` to `EnvConfig`;
+    NYCConfig sets it to 2.0.
+- Revisit if:
+  - Agents over-relocate (high empty km, low service rate) → reduce
+    prospective_bonus_scale to 1.0.
+  - Agents still don't relocate → increase to 3.0-5.0 or add a direct
+    relocation success bonus when the relocated driver serves an order.
+  - The entropy_coef change (D19 recommends 0.01 alongside reward shaping
+    changes) needs retuning — use 0.05 for initial exploration, anneal to
+    0.01 after 50 iterations.
+- Note: D19 concluded "the binding constraint is reward shaping, not
+  exploration." That holds for the old broken reward. With the arrival bonus
+  fixed, exploration of relocation actions becomes the next bottleneck.
+  Recommend `--entropy-coef 0.05` for the first 50 iterations, then anneal
+  to 0.01. This is a judgment call to be validated on train/val only.
+
 
 
 
