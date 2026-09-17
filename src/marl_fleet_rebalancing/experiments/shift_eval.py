@@ -24,7 +24,6 @@ Outputs:
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import sys
 from pathlib import Path
@@ -39,87 +38,11 @@ from marl_fleet_rebalancing.config import NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.experiments.evaluate import load_trained_policy
 from marl_fleet_rebalancing.networks.encoder import obs_to_vector
+from marl_fleet_rebalancing.shifts import SHIFTS, make_shifted_env
 
 RESULTS_DIR = Path("results/shift_eval")
-
-# Active standardized shift scenarios:
-# (label, nyc_window_limit, target_zone, target_zone_pct, shift_param, description)
-SHIFTS = [
-    ("S0", 500, None, None, None, "In-distribution base (train)"),
-    ("S1", 500, None, 1.0, "permute", "Spatial permutation (rot offset = nz//2)"),
-    ("S2a", 250, None, None, None, "Magnitude ×0.5 (surge/trough)"),
-    ("S2b", 375, None, None, None, "Magnitude ×0.75"),
-    ("S2d", 750, None, None, None, "Magnitude ×1.5"),
-    ("S2e", 1000, None, None, None, "Magnitude ×2.0"),
-    ("S3", 500, None, None, "temporal", "Temporal phase shift (val split)"),
-    ("S4", 500, 1, 60.0, "concentrate", "Cold-zone concentration (60% to z1)"),
-    ("S5", 500, 0, 20.0, "burst", "Event burst (20% in [20,30]m to z0)"),
-    ("S6", 500, None, None, "real", "Real held-out demand (test split)"),
-]
-
 EVAL_EPISODES = 5
 BASE_SEED = 1000
-
-
-def make_shifted_env(
-    shift_label: str,
-    nyc_window_limit: int,
-    target_zone: int | None,
-    target_zone_pct: float | None,
-    shift_param: str | None = None,
-    seed: int = 0,
-    base_cfg: NYCConfig | None = None,
-) -> RideGymAEC:
-    """Create an environment with shifted demand configuration."""
-    if base_cfg is not None:
-        cfg = copy.deepcopy(base_cfg)
-    else:
-        cfg = NYCConfig()
-
-    cfg.nyc_window_limit = nyc_window_limit
-    cfg.nyc_split = "train"
-    cfg.order_source = "nyc"
-    cfg.demand_shift_mode = "none"
-    cfg.target_zone = None
-    cfg.target_zone_demand_pct = None
-    cfg.burst_zone = None
-    cfg.burst_share_pct = None
-    cfg.perm_strength = None
-    cfg.perm_offset = None
-
-    # Mechanism dispatch
-    if shift_param is not None:
-        if shift_param == "temporal":
-            if shift_label == "S3":
-                cfg.nyc_split = "val"
-            elif shift_label == "S3b":
-                cfg.nyc_split = "test"
-        elif shift_param == "burst":
-            cfg.demand_shift_mode = "burst"
-            cfg.burst_zone = target_zone if target_zone is not None else 0
-            cfg.burst_share_pct = target_zone_pct if target_zone_pct is not None else 20.0
-            cfg.burst_start_min = 20.0
-            cfg.burst_end_min = 30.0
-        elif shift_param == "permute":
-            cfg.demand_shift_mode = "permute"
-            cfg.perm_strength = target_zone_pct if target_zone_pct is not None else 1.0
-            cfg.perm_offset = target_zone if target_zone is not None else None
-        elif shift_param == "concentrate":
-            cfg.demand_shift_mode = "none"
-            cfg.target_zone = target_zone
-            cfg.target_zone_demand_pct = target_zone_pct
-        elif shift_param == "real":
-            cfg.nyc_split = "test"
-        else:
-            raise ValueError(f"Unknown shift_param: {shift_param!r}")
-
-    if shift_param is None and target_zone is not None and target_zone_pct is not None:
-        cfg.target_zone = target_zone
-        cfg.target_zone_demand_pct = target_zone_pct
-
-    env = RideGymAEC(config=cfg, seed=seed)
-    env.reset(seed=seed)
-    return env
 
 
 def evaluate_policy_on_env(
@@ -277,7 +200,7 @@ def evaluate_policy_across_shifts(
         # Aggregate episode results
         if all_episode_results:
             avg: dict[str, Any] = {}
-            for k in all_episode_results[0].keys():
+            for k in all_episode_results[0]:
                 vals = [r[k] for r in all_episode_results]
                 avg[k] = {
                     "mean": round(float(np.mean(vals)), 6),
@@ -458,7 +381,7 @@ def main() -> None:
 
     for policy_name, p_type, ckpt_or_none in policies_to_evaluate:
         if p_type == "checkpoint":
-            learner, manifest, eval_env = load_trained_policy(Path(ckpt_or_none))
+            learner, _manifest, eval_env = load_trained_policy(Path(ckpt_or_none))
             base_cfg = eval_env._cfg
             res = evaluate_policy_across_shifts(
                 policy_name=policy_name,

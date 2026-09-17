@@ -25,15 +25,16 @@ from typing import Any
 
 import numpy as np
 import torch
+from ride_gym.visualize import TrajectoryRecorder
 
 from marl_fleet_rebalancing.agents.ippo import IPPO, IPPOConfig
 from marl_fleet_rebalancing.agents.mappo import MAPPO, MAPPOConfig
 from marl_fleet_rebalancing.baselines import GreedyZoneDispatcher, ZoneLPRebalancer
-from marl_fleet_rebalancing.config import BandraConfig, EnvConfig, NYCConfig
+from marl_fleet_rebalancing.config import BandraConfig, NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.networks.encoder import obs_dim, obs_to_vector
+from marl_fleet_rebalancing.shifts import get_shift_spec, make_shifted_env
 from marl_fleet_rebalancing.visualization import interactive_view, render_animation
-from ride_gym.visualize import TrajectoryRecorder
 
 
 def load_trained_policy(
@@ -42,6 +43,7 @@ def load_trained_policy(
     target_zone_demand_pct: float | None = None,
     num_drivers: int | None = None,
     max_dispatch_radius_km: float | None = None,
+    shift: str | None = None,
 ) -> tuple[IPPO | MAPPO, dict, RideGymAEC]:
     """Load policy weights, run manifest, and an aligned evaluation env."""
     checkpoint_path = Path(checkpoint_path)
@@ -78,9 +80,21 @@ def load_trained_policy(
     if max_dispatch_radius_km is not None:
         env_cfg.max_dispatch_radius_km = max_dispatch_radius_km
 
-    # Build environment
-    eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
-    eval_env.reset(seed=run_manifest.get("seed", 42))
+    # Build environment (standard or shifted)
+    if shift is not None and is_nyc:
+        label, win_lim, tgt_z, tgt_pct, shift_param, _desc = get_shift_spec(shift)
+        eval_env = make_shifted_env(
+            shift_label=label,
+            nyc_window_limit=win_lim,
+            target_zone=tgt_z if target_zone is None else target_zone,
+            target_zone_pct=tgt_pct if target_zone_demand_pct is None else target_zone_demand_pct,
+            shift_param=shift_param,
+            seed=run_manifest.get("seed", 42),
+            base_cfg=env_cfg,
+        )
+    else:
+        eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
+        eval_env.reset(seed=run_manifest.get("seed", 42))
 
     any_agent = eval_env.possible_agents[0]
     observation_dim = obs_dim(eval_env.observation_space(any_agent))
@@ -274,6 +288,8 @@ def main() -> None:
                         help="Open interactive viewer for the evaluation episode")
     parser.add_argument("--heatmap", action="store_true", default=False,
                         help="Enable zone outline-based demand heatmap overlay")
+    parser.add_argument("--shift", type=str, default=None,
+                        help="Standardized demand-shift scenario ID (e.g. S0, S1, S2a, S2b, S2d, S2e, S3, S4, S5, S6)")
     parser.add_argument("--target-zone", type=int, default=None,
                         help="Target zone ID for parameterized demand injection")
     parser.add_argument("--target-zone-demand-pct", type=float, default=None,
@@ -302,9 +318,11 @@ def main() -> None:
             target_zone_demand_pct=args.target_zone_demand_pct,
             num_drivers=args.num_drivers,
             max_dispatch_radius_km=args.max_dispatch_radius,
+            shift=args.shift,
         )
         algo = manifest.get("algo", "unknown").upper()
-        scenario = manifest.get("scenario_id", "unknown")
+        base_scenario = manifest.get("scenario_id", "unknown")
+        scenario = f"{args.shift.upper()}-{base_scenario}" if args.shift else base_scenario
     else:
         # Build baseline policy and environment
         if args.env == "nyc":
@@ -324,9 +342,23 @@ def main() -> None:
         if args.max_dispatch_radius is not None:
             env_cfg.max_dispatch_radius_km = args.max_dispatch_radius
 
-        env = RideGymAEC(config=env_cfg, seed=args.base_seed)
+        if args.shift is not None:
+            label, win_lim, tgt_z, tgt_pct, shift_param, _desc = get_shift_spec(args.shift)
+            env = make_shifted_env(
+                shift_label=label,
+                nyc_window_limit=win_lim,
+                target_zone=tgt_z if args.target_zone is None else args.target_zone,
+                target_zone_pct=tgt_pct if args.target_zone_demand_pct is None else args.target_zone_demand_pct,
+                shift_param=shift_param,
+                seed=args.base_seed,
+                base_cfg=env_cfg if isinstance(env_cfg, NYCConfig) else NYCConfig(),
+            )
+            scenario = f"{args.shift.upper()}-{args.env}"
+        else:
+            env = RideGymAEC(config=env_cfg, seed=args.base_seed)
+            scenario = f"base-{args.env}"
+
         algo = policy_type.upper()
-        scenario = f"base-{args.env}"
 
         if policy_type == "greedy":
             policy = GreedyZoneDispatcher()

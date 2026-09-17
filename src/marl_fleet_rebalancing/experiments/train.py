@@ -876,19 +876,21 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", default=False,
                         help="Print internal RL statistics (entropy, value loss, EV)")
     parser.add_argument("--alpha", type=float, default=None,
-                        help="Weight for waiting time penalty (default: 1.0)")
+                        help="Weight for waiting time penalty (default: 0.2 for NYC, 0.1 for Bandra)")
     parser.add_argument("--beta", type=float, default=None,
-                        help="Weight for empty distance penalty (default: 0.1)")
+                        help="Weight for empty distance penalty (default: 0.15 for NYC, 0.1 for Bandra)")
     parser.add_argument("--gamma", type=float, default=None,
-                        help="Weight for served orders reward (default: 5.0)")
+                        help="Weight for served orders reward (default: 1.0 for NYC, 5.0 for Bandra)")
     parser.add_argument("--team-share", type=float, default=None,
                         help="Weight for shared global reward vs local credit (default: 0.2)")
     parser.add_argument("--cancel-penalty", type=float, default=None,
-                        help="Penalty per cancelled order in zone (default: 2.0)")
+                        help="Penalty per cancelled order in zone (default: 1.0 for NYC, 0.5 for Bandra)")
+    parser.add_argument("--prospective-bonus", type=float, default=None,
+                        help="Relocation arrival bonus scale (D28; default: 2.0 for NYC, 0.0 for Bandra)")
     parser.add_argument("--entropy-coef", type=float, default=None,
                         help="PPO entropy bonus coefficient (default: 0.01)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
-                        help="Per-window order cap for NYC (sample-rate lever)")
+                        help="Per-window order cap for NYC (default: 500 for NYC)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
                         help="Episodes per PPO update (default: algo config)")
     parser.add_argument("--resume", type=str, default=None,
@@ -899,7 +901,7 @@ def main() -> None:
     parser.add_argument("--target-zone-demand-pct", type=float, default=None,
                         help="Fraction or percentage of total orders originating from target zone (e.g. 0.08 or 8 for 8%%)")
     parser.add_argument("--num-drivers", type=int, default=None,
-                        help="Number of active drivers in the fleet (default: 30 for Bandra)")
+                        help="Number of active drivers in the fleet (default: 100 for NYC, 30 for Bandra)")
     parser.add_argument("--max-dispatch-radius", type=float, default=None,
                         help="Maximum pickup distance in km from zone centroid (default: 2.0 km)")
     parser.add_argument("--relocation-scope", choices=["anywhere", "neighbor"], default=None,
@@ -931,6 +933,8 @@ def main() -> None:
         env_cfg.cancel_penalty = args.cancel_penalty
     if args.team_share is not None:
         env_cfg.team_share = args.team_share
+    if args.prospective_bonus is not None:
+        env_cfg.prospective_bonus_scale = args.prospective_bonus
     if args.num_drivers is not None:
         env_cfg.num_drivers = args.num_drivers
     if args.max_dispatch_radius is not None:
