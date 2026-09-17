@@ -422,6 +422,76 @@ def _draw_frame(
     _draw_stats(stats_ax, frame, recorder.horizon)
 
 
+def interpolate_recorder(
+    recorder: TrajectoryRecorder,
+    total_frames: int,
+) -> TrajectoryRecorder:
+    """Interpolate a TrajectoryRecorder to total_frames for silky-smooth high-FPS animation."""
+    if len(recorder.frames) < 2 or total_frames <= len(recorder.frames):
+        return recorder
+
+    import copy
+    import numpy as np
+
+    new_rec = copy.copy(recorder)
+    raw_frames = recorder.frames
+    times = [f["time"] for f in raw_frames]
+    t_min = times[0]
+    t_max = times[-1]
+
+    interp_frames = []
+    target_times = np.linspace(t_min, t_max, total_frames)
+
+    raw_idx = 0
+    for t in target_times:
+        while raw_idx < len(raw_frames) - 2 and times[raw_idx + 1] <= t:
+            raw_idx += 1
+
+        f0 = raw_frames[raw_idx]
+        f1 = raw_frames[raw_idx + 1]
+        t0 = f0["time"]
+        t1 = f1["time"]
+
+        dt = t1 - t0
+        alpha = float((t - t0) / dt) if dt > 1e-6 else 0.0
+        alpha = max(0.0, min(1.0, alpha))
+
+        base_f = f0 if alpha < 0.5 else f1
+        sub_drivers = {}
+        for did, d0 in f0["drivers"].items():
+            if did in f1["drivers"]:
+                d1 = f1["drivers"][did]
+                loc0 = d0["location"]
+                loc1 = d1["location"]
+                loc = (
+                    float(loc0[0] + alpha * (loc1[0] - loc0[0])),
+                    float(loc0[1] + alpha * (loc1[1] - loc0[1])),
+                )
+                target_d = d0 if alpha < 0.5 else d1
+                sub_drivers[did] = {
+                    "location": loc,
+                    "status": target_d["status"],
+                    "onboard_passengers": target_d["onboard_passengers"],
+                    "assigned_orders": target_d["assigned_orders"],
+                    "task_points": target_d["task_points"],
+                }
+            else:
+                sub_drivers[did] = d0
+
+        interp_frame = {
+            "time": float(t),
+            "drivers": sub_drivers,
+            "pending": base_f["pending"],
+            "order_od": base_f["order_od"],
+            "served": int(round((1.0 - alpha) * f0["served"] + alpha * f1["served"])),
+            "cancelled": int(round((1.0 - alpha) * f0["cancelled"] + alpha * f1["cancelled"])),
+        }
+        interp_frames.append(interp_frame)
+
+    new_rec.frames = interp_frames
+    return new_rec
+
+
 def render_animation(
     recorder: TrajectoryRecorder,
     out_path: str = "episode.mp4",
@@ -431,10 +501,18 @@ def render_animation(
     dpi: int = 100,
     description: str = "",
     show_heatmap: bool = False,
+    duration_sec: float | None = None,
 ) -> str:
     """Render a recorded trajectory to an MP4 with a clean custom layout."""
     if not recorder.frames:
         raise ValueError("recorder has no frames; call snapshot() during the run.")
+
+    if duration_sec is None:
+        duration_sec = getattr(recorder, "horizon", 60.0)
+
+    target_total_frames = int(round(duration_sec * fps))
+    if target_total_frames > len(recorder.frames):
+        recorder = interpolate_recorder(recorder, target_total_frames)
 
     precomputed_segs, bounds = _precompute_network_segments(recorder.network)
     reloc_pts = getattr(recorder, "relocation_points", None)
