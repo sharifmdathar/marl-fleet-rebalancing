@@ -50,6 +50,29 @@ stress-test on shifted distributions and plot degradation curves.
   best MAPPO 57.2%), and MAPPO at 400 iterations has *stopped relocating*
   entirely (`pct_relocate` 0.01%, service rate down to greedy's). No IPPO
   checkpoints exist, so H1–H4 remain unanswerable.
+
+## 2026-09-17: validation-selection protocol bug found and fixed
+
+- The first validation-selected pair (`ippo-v18-val` it12, `mappo-v18-val`
+  it8 → `results/shift_eval_v18best/`) is NOT a clean comparison. Two bugs:
+  (1) selection ran on the TRAINING split (same windows the policy learns
+  on); (2) selection ran in the training env itself, so its seeded resets
+  (9000–9002) rewrote the training RNG stream — enabling validation changed
+  subsequent training episodes. A separate probe also confirmed the
+  three-episode val reset replays only the first val window (cursor reset).
+- Fixed in `train.py`: selection now runs `evaluate_deterministic` in a
+  DEDICATED env deep-copied from the training config with `nyc_split="val"`
+  (`_make_validation_env`); the training env is never touched by selection
+  (toggle-verified: 2-iter training trajectories byte-identical with and
+  without `--eval-interval`). Provenance: `TrainConfig` logs
+  `eval_split/eval_seed/eval_episodes/eval_window_limit`; `best_checkpoint.json`
+  records `val_split`, `eval_seed`, `eval_episodes` (auditable selection).
+  Regression-locked in `tests/test_training_validation.py`.
+- Consequence: **`results/shift_eval_v18best/` and the v18best rows must not
+  be merged into the headline artifacts or cited as validation-selected.**
+  Treat as exploratory only. Next: retrain IPPO + MAPPO on S0 with
+  `--eval-interval` (now on the true val split), then rerun the 5-seed
+  shift eval for the fair H1–H4 comparison.
 ---
 
 ## What exists right now (verified working)

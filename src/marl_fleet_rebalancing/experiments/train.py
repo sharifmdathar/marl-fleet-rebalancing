@@ -12,6 +12,7 @@ to the run dir but never committed (git-ignored).
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import datetime as _dt
 import json
@@ -19,6 +20,7 @@ import multiprocessing as mp
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -28,6 +30,8 @@ from marl_fleet_rebalancing.agents.mappo import MAPPO, MAPPOConfig
 from marl_fleet_rebalancing.config import BandraConfig, EnvConfig, NYCConfig
 from marl_fleet_rebalancing.env import RideGymAEC
 from marl_fleet_rebalancing.networks.encoder import obs_dim, obs_to_vector
+
+EvalLearner = Any  # IPPO | MAPPO | scripted act()-compatible stand-in (tests)
 
 
 @dataclass
@@ -42,6 +46,18 @@ class TrainConfig:
     out_root: Path = Path("runs")
     run_name: str | None = None
     checkpoint_interval: int = 10
+    # Evaluate deterministically every N iterations and save checkpoint_best.pt
+    # when validation service rate improves (0 = disabled). Selection must run
+    # on the frozen, deterministic protocol — training SR is stochastic and
+    # rewarded a collapsed policy 23 points above its frozen value.
+    # Selection runs in a DEDICATED env on the held-out NYC val split (never
+    # the training env: seeded val resets used to rewrite the training RNG
+    # stream, see tests/test_training_validation.py).
+    eval_interval: int = 0
+    eval_episodes: int = 3
+    eval_seed: int = 9000  # disjoint from the training seed stream
+    eval_split: str = "val"  # held-out split used for selection (never "train")
+    eval_window_limit: int | None = 500  # matches the training window budget
     verbose: bool = False
     num_workers: int = 1  # parallel rollout envs (1 = serial, current behavior)
 
@@ -53,12 +69,116 @@ class TrainConfig:
             "iterations": self.iterations,
             "scenario_id": self.scenario_id,
             "checkpoint_interval": self.checkpoint_interval,
+            "eval_interval": self.eval_interval,
+            "eval_episodes": self.eval_episodes,
+            "eval_seed": self.eval_seed,
+            "eval_split": self.eval_split,
+            "eval_window_limit": self.eval_window_limit,
             "num_workers": self.num_workers,
         }
 
 
 def _episode_turns(cfg: EnvConfig) -> int:
     return int(round(cfg.horizon / cfg.dt))
+
+
+def evaluate_deterministic(
+    env: RideGymAEC,
+    learner: EvalLearner,
+    episodes: int,
+    base_seed: int,
+) -> dict:
+    """Frozen-policy deterministic evaluation on fresh seeds (no learning).
+
+    Used for best-checkpoint selection: training KPIs come from stochastic
+    rollouts on the training stream, which made a mid-training policy look 23
+    points better frozen than training (see docs/shift-results.md, IPPO
+    collapse). Selection must use the same protocol as the final evaluation:
+    deterministic argmax actions on unseen seeds.
+
+    Runs on a DEDICATED validation env (see ``_make_validation_env``), never
+    on the training env — resetting the training env with the val seeds
+    rewrote its RNG stream and silently changed subsequent training episodes.
+    The caller owns both envs; this function never resets anything after the
+    val episodes.
+    """
+    served = cancelled = 0
+    empty_km = 0.0
+    wait_sum = 0.0
+    for i in range(episodes):
+        env.reset(seed=base_seed + i)
+        while env.agents and not env._terminated:
+            order = [int(z) for z in env._agent_order]
+            if env.terminations.get(env.agent_selection, False):
+                for _ in order:
+                    if not env.agents:
+                        break
+                    env.step(None)
+                continue
+            obs_list, mask_list = [], []
+            for slot in order:
+                agent = f"zone_{slot}"
+                obs_list.append(obs_to_vector(env.observe(agent)))
+                mask_list.append(env.action_mask(agent))
+            actions, _, _ = learner.act(
+                np.stack(obs_list), np.stack(mask_list), deterministic=True,
+            )
+            for slot, act_v in zip(order, actions):
+                env.step(int(act_v))
+        kpi = env.kpi_summary()
+        served += int(kpi["served"])
+        cancelled += int(kpi["cancelled"])
+        empty_km += float(kpi["empty_km"])
+        wait_sum += float(kpi["avg_wait"])
+    n = max(episodes, 1)
+    return {
+        "episodes": episodes,
+        "service_rate": served / max(served + cancelled, 1),
+        "served_per_ep": served / n,
+        "empty_km_per_ep": empty_km / n,
+        "avg_wait_min": wait_sum / n,
+    }
+
+
+def _make_validation_env(
+    train_cfg: TrainConfig,
+    seed: int,
+) -> RideGymAEC:
+    """Build the dedicated selection env: same sim, held-out demand split.
+
+    Deep-copies the training env config and overrides ONLY the demand split
+    (and window limit if set), so selection sees the held-out ``val`` windows
+    under an identical fleet/network/reward. A fresh env instance also means
+    selection can never perturb the training env's RNG stream or window
+    cursor (regression-tested: tests/test_training_validation.py).
+    """
+    val_cfg = copy.deepcopy(train_cfg.env_config)
+    val_cfg.nyc_split = train_cfg.eval_split
+    if (
+        train_cfg.eval_window_limit is not None
+        and hasattr(val_cfg, "nyc_window_limit")
+    ):
+        val_cfg.nyc_window_limit = train_cfg.eval_window_limit
+    return RideGymAEC(config=val_cfg, seed=seed)
+
+
+def selection_record(
+    iteration: int,
+    val_service_rate: float,
+    eval_cfg: dict,
+) -> dict:
+    """Provenance block for a selected checkpoint: iteration + how it was picked.
+
+    Written to ``best_checkpoint.json`` so every best checkpoint is auditable
+    (which split, which seeds, how many episodes) without reading code.
+    """
+    return {
+        "iteration": iteration,
+        "val_service_rate": val_service_rate,
+        "val_split": eval_cfg["val_split"],
+        "eval_seed": eval_cfg["eval_seed"],
+        "eval_episodes": eval_cfg["eval_episodes"],
+    }
 
 
 def _make_env(
@@ -549,6 +669,13 @@ def train(
     print(f"[train] manifest: {json.dumps({k: manifest[k] for k in ('algo', 'scenario_id', 'seed')})}")
 
     pool = None
+    best_val_sr = -1.0
+    best_val_it = -1
+    val_env = (
+        _make_validation_env(train_cfg, seed=train_cfg.eval_seed)
+        if train_cfg.eval_interval > 0
+        else None
+    )
     if train_cfg.num_workers > 1:
         ctx = mp.get_context("spawn")
         pool = ctx.Pool(
@@ -660,11 +787,65 @@ def train(
                     run_dir / f"checkpoint_it{it:04d}.pt",
                 )
 
+            # ---- validation-based best-checkpoint tracking ---------------
+            if train_cfg.eval_interval > 0 and (
+                it % train_cfg.eval_interval == 0 or it == train_cfg.iterations
+            ):
+                val = evaluate_deterministic(
+                    val_env,
+                    learner,
+                    episodes=train_cfg.eval_episodes,
+                    base_seed=train_cfg.eval_seed,
+                )
+                val_sr = val["service_rate"]
+                record["val_service_rate"] = val_sr
+                record["val_episodes"] = val["episodes"]
+                # Rewrite the just-appended metrics line with the val fields
+                # included, so metrics.jsonl stays one JSON object per line.
+                metrics_lines = metrics_path.read_text().splitlines()
+                metrics_lines[-1] = json.dumps(record)
+                metrics_path.write_text("\n".join(metrics_lines) + "\n")
+
+                if val_sr > best_val_sr:
+                    best_val_sr = val_sr
+                    best_val_it = it
+                    torch.save(learner.state_dict(), run_dir / "checkpoint_best.pt")
+                    with open(run_dir / "best_checkpoint.json", "w") as f:
+                        json.dump(
+                            selection_record(
+                                iteration=it,
+                                val_service_rate=val_sr,
+                                eval_cfg={
+                                    "val_split": train_cfg.eval_split,
+                                    "eval_seed": train_cfg.eval_seed,
+                                    "eval_episodes": train_cfg.eval_episodes,
+                                },
+                            ),
+                            f, indent=2,
+                        )
+                    marker = " (new best)"
+                else:
+                    marker = ""
+                print(
+                    f"[val it {it:3d}] SR={val_sr*100:4.1f}% | "
+                    f"empty={val['empty_km_per_ep']:5.1f}km | "
+                    f"wait={val['avg_wait_min']:4.2f}m"
+                    f" | best={best_val_sr*100:4.1f}% @ it{best_val_it}{marker}"
+                )
+
     finally:
         if pool is not None:
             pool.close()
             pool.join()
 
+    if val_env is not None:
+        val_env.close()
+
+    if train_cfg.eval_interval > 0 and best_val_it > 0:
+        print(
+            f"[train] best validation SR {best_val_sr*100:.1f}% at iteration "
+            f"{best_val_it} -> {run_dir / 'checkpoint_best.pt'}"
+        )
     print(f"[train] done -> {run_dir}")
     return run_dir
 
@@ -679,6 +860,19 @@ def main() -> None:
                         help="Custom run directory name (default: {algo}-{env}-{timestamp})")
     parser.add_argument("--checkpoint-interval", type=int, default=10,
                         help="Save checkpoint every N iterations (default: 10)")
+    parser.add_argument("--eval-interval", type=int, default=0,
+                        help="Deterministic validation eval + best-checkpoint "
+                             "tracking every N iterations (0 = disabled)")
+    parser.add_argument("--eval-episodes", type=int, default=3,
+                        help="Validation episodes per eval point (default: 3)")
+    parser.add_argument("--eval-split", type=str, default="val",
+                        choices=["val", "test"],
+                        help="Held-out split used for checkpoint selection "
+                             "(default: val). Never 'train' — selecting on the "
+                             "training split is not validation.")
+    parser.add_argument("--eval-seed", type=int, default=9000,
+                        help="Base seed for validation episodes (default: 9000, "
+                             "disjoint from the training seed stream)")
     parser.add_argument("--verbose", action="store_true", default=False,
                         help="Print internal RL statistics (entropy, value loss, EV)")
     parser.add_argument("--alpha", type=float, default=None,
@@ -761,6 +955,12 @@ def main() -> None:
         out_root=Path(args.out_root),
         run_name=args.name,
         checkpoint_interval=args.checkpoint_interval,
+        eval_interval=args.eval_interval,
+        eval_episodes=args.eval_episodes,
+        eval_split=args.eval_split,
+        eval_seed=args.eval_seed,
+        eval_window_limit=env_cfg.nyc_window_limit
+        if hasattr(env_cfg, "nyc_window_limit") else None,
         verbose=args.verbose,
         num_workers=args.num_workers,
     )
