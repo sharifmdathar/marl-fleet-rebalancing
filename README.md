@@ -96,8 +96,8 @@ rules: `AGENTS.md`.
 - Env v1.9 (D22–D28): zone ownership, neighbor relocation, reward rescale
   (D25), relocation arrival bonus (D28), winlim 500. Config is the contract
   — no magic numbers.
-- Baselines tuned (D27): the LP rebalancer leads every shift on throughput
-  and efficiency; RL policies are not competitive with it.
+- Baselines tuned (D27): the LP rebalancer leads every shift on service rate but trades substantially higher empty distance for that gain; report both KPIs.
+  RL policies are not competitive with this tuned throughput baseline.
 - Late-training relocation collapse diagnosed (pay-now/pay-later reward
   asymmetry) and mitigated via the D28 arrival bonus + validation selection
   on the held-out split — fixed 2026-09-17 and regression-locked in
