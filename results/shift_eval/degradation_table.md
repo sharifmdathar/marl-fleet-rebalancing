@@ -9,6 +9,8 @@
 | **Greedy-Baseline** | 52.9% ± 4.2% | 37.6% ± 4.6% | 59.2% ± 2.8% | 54.1% ± 1.6% | 46.1% ± 2.6% | 41.7% ± 2.8% | 46.3% ± 1.4% | 24.1% ± 1.7% | 51.4% ± 3.6% | 47.2% ± 3.1% | 85.7% |
 | **LP-Rebalancer** | 70.5% ± 1.8% | 56.0% ± 1.8% | 82.5% ± 4.4% | 77.1% ± 1.7% | 63.9% ± 2.9% | 53.6% ± 1.7% | 70.6% ± 1.8% | 32.0% ± 1.5% | 69.1% ± 2.0% | 69.3% ± 3.4% | 90.5% |
 | **ippo-nyc-s0-95it-ck5 (it75, pre-collapse)** | 51.5% ± 3.9% | 33.4% ± 2.1% | 56.5% ± 2.4% | 53.2% ± 3.2% | 47.4% ± 2.7% | 44.6% ± 3.1% | 45.4% ± 1.8% | 21.4% ± 1.3% | 50.2% ± 3.2% | 46.9% ± 2.7% | 86.2% |
+| **ippo-nyc-d28-stage2** | 56.5% ± 2.5% | 38.9% ± 2.4% | 51.5% ± 2.7% | 56.0% ± 3.0% | 52.5% ± 1.6% | 46.9% ± 2.0% | 53.6% ± 1.2% | 21.1% ± 0.4% | 53.3% ± 2.4% | 57.3% ± 1.9% | 84.8% |
+| **mappo-nyc-d28-stage2** | 56.9% ± 1.9% | 41.4% ± 2.6% | 59.5% ± 2.2% | 55.9% ± 2.7% | 52.8% ± 1.5% | 48.6% ± 1.0% | 57.3% ± 2.4% | 23.5% ± 1.4% | 54.6% ± 2.0% | 55.0% ± 4.3% | 87.6% |
 
 ### Empty Repositioning Distance (km / episode)
 
@@ -21,6 +23,8 @@
 | **Greedy-Baseline** | 119 km | 210 km | 80 km | 101 km | 145 km | 165 km | 111 km | 64 km | 118 km | 110 km |
 | **LP-Rebalancer** | 815 km | 847 km | 514 km | 729 km | 771 km | 691 km | 810 km | 488 km | 811 km | 790 km |
 | **ippo-nyc-s0-95it-ck5 (it75, pre-collapse)** | 563 km | 574 km | 570 km | 617 km | 543 km | 563 km | 546 km | 564 km | 575 km | 577 km |
+| **ippo-nyc-d28-stage2** | 1781 km | 1712 km | 2084 km | 1939 km | 1508 km | 1315 km | 1784 km | 2173 km | 1811 km | 1789 km |
+| **mappo-nyc-d28-stage2** | 1324 km | 1197 km | 1347 km | 1362 km | 1231 km | 1080 km | 1384 km | 930 km | 1352 km | 1392 km |
 
 ### Average Passenger Waiting Time (min)
 
@@ -33,3 +37,5 @@
 | **Greedy-Baseline** | 0.77 min | 1.82 min | 0.87 min | 0.83 min | 0.77 min | 0.77 min | 0.83 min | 0.85 min | 0.79 min | 0.78 min |
 | **LP-Rebalancer** | 1.05 min | 1.97 min | 0.90 min | 1.00 min | 1.03 min | 0.97 min | 1.02 min | 0.98 min | 1.05 min | 1.02 min |
 | **ippo-nyc-s0-95it-ck5 (it75, pre-collapse)** | 0.86 min | 1.91 min | 0.93 min | 0.90 min | 0.91 min | 0.92 min | 0.93 min | 0.96 min | 0.86 min | 0.88 min |
+| **ippo-nyc-d28-stage2** | 1.18 min | 2.14 min | 1.09 min | 1.12 min | 1.23 min | 1.24 min | 1.15 min | 1.11 min | 1.15 min | 1.13 min |
+| **mappo-nyc-d28-stage2** | 1.10 min | 1.97 min | 1.10 min | 1.12 min | 1.17 min | 1.15 min | 1.12 min | 1.03 min | 1.13 min | 1.13 min |

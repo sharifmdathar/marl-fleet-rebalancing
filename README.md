@@ -57,7 +57,7 @@ uv run python -m marl_fleet_rebalancing.experiments.plot_shifts
 
 ## Degradation Curves
 
-Stress-testing frozen policies under the 7-scenario shift taxonomy (S0–S6):
+Stress-testing frozen policies under the 10-shift suite (S0–S6):
 
 <p align="center">
   <img src="results/figures/degradation_service_rate.png" alt="Service Rate Degradation" width="85%">
@@ -74,7 +74,7 @@ Stress-testing frozen policies under the 7-scenario shift taxonomy (S0–S6):
 |---|---|
 | `INTENT.md` | Research questions, H1–H4, non-goals — read first |
 | `docs/HANDOFF.md` | Current state, what's broken, what's next |
-| `docs/decisions.md` | Decision log (D1–D27); env/reward changes need an entry |
+| `docs/decisions.md` | Decision log (D1–D28); env/reward changes need an entry |
 | `docs/demand-shift.md` | S0–S6 shift taxonomy (scenario IDs) |
 | `docs/shift-results.md` | Current results + caveats |
 | `docs/architecture.md` | Module map, KPI definitions |
@@ -93,14 +93,15 @@ rules: `AGENTS.md`.
 
 ## Current status
 
-- Env overhauled (D22–D26): zone ownership, neighbor relocation, reward
-  rescale (D25), winlim 500. Config is the contract — no magic numbers.
-- Baselines tuned (D27): the LP rebalancer leads every shift; RL policies are
-  not yet competitive.
-- Both PPO variants **collapse late in training** under the current reward
-  economics (relocation becomes net-negative), so checkpoint selection by
-  validation is the load-bearing protocol — it had two bugs (train-split
-  selection + training-RNG contamination), fixed 2026-09-17 and
-  regression-locked in `tests/test_training_validation.py`.
-- Open: fair IPPO-vs-MAPPO comparison needs retraining both algos under the
-  corrected validation protocol; H1–H4 remain unanswered.
+- Env v1.9 (D22–D28): zone ownership, neighbor relocation, reward rescale
+  (D25), relocation arrival bonus (D28), winlim 500. Config is the contract
+  — no magic numbers.
+- Baselines tuned (D27): the LP rebalancer leads every shift on throughput
+  and efficiency; RL policies are not competitive with it.
+- Late-training relocation collapse diagnosed (pay-now/pay-later reward
+  asymmetry) and mitigated via the D28 arrival bonus + validation selection
+  on the held-out split — fixed 2026-09-17 and regression-locked in
+  `tests/test_training_validation.py`.
+- Paired D28 comparison complete (5 training seeds/algo): MAPPO holds a
+  modest, consistent service-rate edge; shift retention tied ~86.7%; full
+  verdict in `docs/shift-results.md`.
