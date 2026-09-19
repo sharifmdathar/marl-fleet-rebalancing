@@ -16,6 +16,24 @@ stress-test on shifted distributions and plot degradation curves.
 **Advisor:** Alaa Daoud (INSA Hauts-de-France, LAMIH CNRS)
 ---
 
+## 2026-09-19: 5-seed D28 replication done — H1–H4 verdict revised
+
+- Seeds 1–4 trained per `scripts/run_d28_seed_replicas.sh` (identical two-stage
+  protocol, val-selected checkpoints) and frozen-evaluated into
+  `results/shift_eval_seeds/` (8 replica CSVs + rebuilt summary).
+- Cross-seed aggregation (`scripts/aggregate_seed_replicas.py`, 5 training
+  seeds/algo, paired per seed): MAPPO leads IPPO on all 10 shifts on average
+  (+0.0 to +3.6), sweeping 5/5 seeds on S0, S2a, S2d, S4, S5. Mean retention
+  tied: 86.6% vs 86.8%.
+- Revised verdict in `docs/shift-results.md` (with paper-takeaway box): H1
+  supported on absolute service rate, H3 describes retention, H4 residue on
+  S2a/S3; LP headline unchanged.
+- Record `results/shift_eval/summary.json` repaired (was overwritten to a
+  single policy by sequential `shift_eval` runs — now 9 policies, additive
+  merge only) and figures replotted from the full record.
+- **Remaining for submission:** reconcile `INTENT.md`'s relocate-only
+  non-goals line with D9's joint action space.
+
 ## 2026-09-17: D28 paired retraining done — H1–H4 answered
 
 - Both PPO variants retrained under the **identical D28 protocol** (env v1.8,
@@ -288,9 +306,10 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 2. Freeze trained policies, evaluate on shifted scenarios — **DONE
    2026-09-17** (5 seeds, S0–S6, both D28 policies + baselines;
    `results/shift_eval/`).
-3. IPPO vs MAPPO head-to-head + H1–H4 writeup — **DONE 2026-09-17**:
-   `docs/shift-results.md` (answer: H3, with H4-type residue on S1/S3;
-   caveats: single training seed per algo).
+3. IPPO vs MAPPO head-to-head + H1–H4 writeup — **DONE 2026-09-17, revised
+   2026-09-19**: `docs/shift-results.md` (5 training seeds/algo, paired
+   deltas; answer: H1 on absolute SR, H3 on retention, H4 residue on
+   S2a/S3; LP headline).
 
 ---
 
