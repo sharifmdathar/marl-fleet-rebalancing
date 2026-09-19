@@ -164,13 +164,16 @@ stress-test on shifted distributions and plot degradation curves.
   `manhattan.gpickle` (4868 nodes / 10478 edges),
   `splits/` 84 train / 12 val / 12 test + `manifest.json`.
 - Raw downloads in `dataset/` (git-ignored): taxi-zone shapefile + FHVHV April 2026.
-- `max_pending` in NYCConfig is 650 (measured worst case: 604 concurrent
-  2-min arrivals in `train/window_0071`; see `config.py`).
-- Open scale question: peak windows carry ~15k trips/hr vs a 50-driver fleet —
-  full-rate episodes are unservable; needs a sample-rate/fleet/episode-scope
-  decision before training (advisor call). The wrapper exposes the lever as
-  `NYCConfig.nyc_window_limit` (per-window order cap); even a 2k-order window
-  floods a 50-driver fleet (1.97k/2k cancelled at the random-policy floor).
+- `max_pending` in NYCConfig is 650 originally (measured worst case: 604
+  concurrent 2-min arrivals in `train/window_0071`); **stale** — current
+  code has `max_pending=30` (D28: measured peak ~28 concurrent once
+  `nyc_window_limit=500` capped the per-episode order rate; see `config.py`).
+- Scale question RESOLVED by D22 (2026-09-16): `NYCConfig.nyc_window_limit`
+  defaults to 500 (down from full ~15k/hr rate, which was unservable by the
+  fleet and produced capacity-driven cancels, not policy failures). Current
+  `NYCConfig.num_drivers=100` (see the driver-count note under D22 in
+  `docs/decisions.md`). Training and the full 5-seed shift eval have since
+  run to completion under this setting (see the 2026-09-17/19 entries above).
 
 ### Agents / training code
 - `src/marl_fleet_rebalancing/agents/ippo.py` — IPPO DONE 2026-09-09
@@ -356,8 +359,11 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 
 ## Still open
 
-- **Sample-rate/fleet sizing**: full-NYC peaks (~15k/hr vs 50 drivers) are
-  unservable at full rate. Must settle before training (spaces freeze).
+- ~~**Sample-rate/fleet sizing**: full-NYC peaks (~15k/hr vs 50 drivers) are
+  unservable at full rate.~~ — RESOLVED by D22 (`nyc_window_limit=500`
+  default); current fleet is 100 drivers (`NYCConfig.num_drivers`, undocumented
+  change flagged under D22 in `docs/decisions.md`). Training has run to
+  completion under this setting (see D28 5-seed replication, 2026-09-19).
 - ~~**Baseline understanding**: LP + greedy plan stands~~ — closed by D27: the
   LP was no-op'ing on a missing objective term, now repaired and tuned. Open
   follow-up: why it still relocates at ~7% of actions once 45 of 62 zones read

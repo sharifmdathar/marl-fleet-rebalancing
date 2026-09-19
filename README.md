@@ -33,7 +33,7 @@ uv sync                                  # install deps (incl. dev: pytest, ruff
 uv run python main.py                    # random-policy rollout on Bandra, MP4 viewer
 uv run python main.py -o episode.mp4     # save MP4 instead of interactive view
 
-uv run pytest                            # 16 tests, ~6 s
+uv run pytest                            # full test suite (test count last verified 2026-09-11; grown since — rerun to confirm)
 ```
 
 Note: `main.py` is a visualization smoke test on the Bandra toy env only —

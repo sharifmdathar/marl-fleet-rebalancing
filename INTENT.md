@@ -36,8 +36,10 @@ baseline exists for credibility, not as a research direction.
 
 - No new algorithm. No "RobustMAPPO-X." This is a measurement study.
 - No headline claims from in-distribution performance.
-- No learning the dispatch policy — dispatch is a fixed rule; agents learn
-  only `relocate` (pending decision D5 in `docs/decisions.md`).
+- No new coordination mechanism beyond the wrapper's shuffled first-come bid
+  resolution — agents learn joint dispatch+relocate (D9 supersedes D5's
+  relocate-only split; see `docs/decisions.md`), but no bespoke auction/
+  negotiation protocol on top of that.
 - No sim-to-real or deployment claims. One city, simulated demand.
 - No beating an untuned baseline. Baseline tuning is part of the work.
 

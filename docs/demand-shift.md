@@ -3,7 +3,8 @@
 Answers: "what exactly do we mean by demand distribution shift?" Each scenario
 has an ID used in configs, logs, and figures. Base distribution B = the
 training demand: NYC FHVHV train-split windows, `nyc_window_limit=500`
-(D22 default), 50 drivers, 60-min episodes.
+(D22 default), 100 drivers (`NYCConfig.num_drivers`, current code — see
+note in D22 in `docs/decisions.md`), 60-min episodes.
 
 ## Shift taxonomy
 
@@ -43,8 +44,11 @@ quick local testing.
 
 ## Implemented parameterizations (Phase 4, 2026-09-14)
 
-Concrete settings used in `experiments/shift_eval.py` (`nyc_window_limit=500`
-unless noted, frozen policy, 5 episodes, `base_seed=1000`):
+Concrete settings used in `src/marl_fleet_rebalancing/shifts/__init__.py`
+(`SHIFTS` table + `make_shifted_env`; moved out of `experiments/shift_eval.py`
+since this section was written — see `docs/architecture.md`).
+`nyc_window_limit=500` unless noted, frozen policy, 5 episodes,
+`base_seed=1000`:
 
 - S3 (temporal phase shift): `nyc_split="val"` — evaluation windows drawn
   from the validation split (different hours than the train split), simulating
@@ -89,9 +93,11 @@ The old labels are deprecated but their CSVs stay on disk. New definitions:
 
 ## Results
 
-PURGED 2026-09-16 (D22): all pre-D22 eval data deleted. S2c (magnitude
-×1.0) stays dropped — byte-identical config to S0, pure compute waste.
-Repopulate per `docs/shift-results.md` after v1.4 retraining.
+Populated: see `docs/shift-results.md` for the current run of record
+(D28 protocol, `results/shift_eval/`, 5 seeds) and the 5-training-seed
+cross-seed table. Pre-D22 eval data was purged 2026-09-16 and is gone;
+S2c (magnitude ×1.0) stays dropped — byte-identical config to S0, pure
+compute waste.
 
 ## Fair-comparison checklist
 

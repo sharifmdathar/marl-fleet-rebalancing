@@ -38,6 +38,10 @@ marl_fleet_rebalancing/
   networks/
     encoder.py                       # obs flattening + ZoneActorCritic MLP
                                      # + CentralizedCritic (MAPPO value head)
+  shifts/
+    __init__.py                      # SHIFTS table + make_shifted_env (moved
+                                     # out of experiments/shift_eval.py; see
+                                     # docs/demand-shift.md)
   visualization.py                   # custom MP4 renderer + interactive viewer
 references/                          # diagnosis notes (e.g. lp-rebalancer-zero-transfers.md)
 data/
@@ -48,12 +52,10 @@ data/
                                      # (4868 nodes), splits/ 84 train / 12 val / 12 test
 ```
 
-Still empty (only `__init__.py`):
-- `shifts/` — planned for demand shift generators
-
-Populated since: `agents/` (ippo.py, mappo.py), `networks/` (encoder.py),
-`experiments/` (train.py, evaluate.py, shift_eval.py, plot_shifts.py,
-tune_lp_baseline.py), `baselines/` (greedy, lp).
+Populated since this doc's last full pass: `agents/` (ippo.py, mappo.py),
+`networks/` (encoder.py), `experiments/` (train.py, evaluate.py,
+shift_eval.py, plot_shifts.py, tune_lp_baseline.py), `baselines/` (greedy,
+lp), `shifts/` (SHIFTS table + `make_shifted_env`, no longer empty).
 
 ### RideGym interface contract (do not break)
 
@@ -82,8 +84,7 @@ tune_lp_baseline.py), `baselines/` (greedy, lp).
 - `metrics.py` — KPIs currently come from `env.kpi_summary()` and the eval
   loops in `experiments/`, not from a shared metrics module.
 - `demand/scenarios.py` — shift mechanisms live in `config.py` (`demand_shift_mode`
-  and friends) and the `SHIFTS` table in `experiments/shift_eval.py`.
-- `shifts/` — still empty (`__init__.py` only); shift injection is config-driven.
+  and friends) and the `SHIFTS` table in `shifts/__init__.py`.
 - `experiments/configs/` — no per-run config files; runs record their own
   manifest under `runs/<name>/manifest.json`.
 

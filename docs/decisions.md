@@ -314,6 +314,17 @@ Format: date, status, decision, why, what would change our mind.
   urgent-first underperforms closest-first in an A/B; cancel/team need
   retuning once agents learn something.
 - Do NOT mix pre/post-D22 seeds in one aggregate (env version change).
+- **Doc-audit note (2026-09-19, undocumented change found in code):**
+  `NYCConfig.num_drivers` is 100 in the current codebase, not the 50 this
+  entry's item 1 and point 6 assume ("unservable by 50 drivers"). Git
+  history traces the 50→100 edit to the same commit that landed D22-D26
+  (`184ec74`), but no D22-D26 entry mentions it and the commit message
+  doesn't either — no logged rationale exists. Flagging per AGENTS.md's
+  rule that env-dynamics changes need a decision entry; this one is
+  missing. All fleet-size text elsewhere in this doc and in
+  `docs/HANDOFF.md`/`docs/demand-shift.md` has been corrected to say 100
+  to match current code, but the *why* behind the change is unrecorded —
+  confirm with whoever made it before citing a rationale.
 
 ## D23 — Purge all pre-D22 artifacts (2026-09-16)
 - Date: 2026-09-16, Status: accepted (researcher directive)
