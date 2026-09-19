@@ -38,7 +38,7 @@ for SEED in "${SEEDS[@]}"; do
       --eval-episodes 3 \
       --nyc-window-limit 500 \
       --name "${ALGO}-nyc-d28-s${SEED}-stage1" \
-      --num-workers 4
+      --num-workers "${NUM_WORKERS:-1}"
 
     echo "========================================================================"
     echo " SEED ${SEED} / ${ALGO^^}: Stage 2 (150 iters @ entropy 0.01)"
