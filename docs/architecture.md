@@ -13,10 +13,15 @@ marl_fleet_rebalancing/
     mappo.py                         # MAPPO learner: shared actor + centralized
                                      # critic over global state (D4)
   baselines/
-    heuristic_baseline.py            # LP rolling-horizon rebalancer (D3, raw RideGym interface)
+    greedy_baseline.py               # greedy nearest-idle dispatch floor, zero relocation
+    lp_baseline.py                   # rolling-horizon LP rebalancer on the wrapper env
+                                     # (D3; repaired + tuned in D27)
+    heuristic_baseline.py            # earlier LP rebalancer on the raw RideGym dict
+                                     # interface; superseded by lp_baseline.py
   config.py                          # EnvConfig / NYCConfig / BandraConfig (D7)
   demand/
     zones.py                         # ZonePartition + get_default()
+    generators.py                    # synthetic / NYC-window / dataframe order sources
   env/
     pettingzoo_env.py                # RideGymAEC wrapper: zone-controller agents
                                      # (D10/D13), joint dispatch+relocate (D9),
@@ -26,10 +31,15 @@ marl_fleet_rebalancing/
     train.py                         # IPPO/MAPPO training entry (--algo);
                                      # logs config/seed/git/scenario/KPIs
                                      # to runs/ (git-ignored)
+    evaluate.py                      # frozen policy multi-seed eval & MP4/interactive viewer
+    shift_eval.py                    # frozen-policy eval across S0-S6 -> results/shift_eval/
+    plot_shifts.py                   # degradation curves from summary.json -> results/figures/
+    tune_lp_baseline.py              # LP baseline hyperparameter sweep (train/val shifts only)
   networks/
     encoder.py                       # obs flattening + ZoneActorCritic MLP
                                      # + CentralizedCritic (MAPPO value head)
   visualization.py                   # custom MP4 renderer + interactive viewer
+references/                          # diagnosis notes (e.g. lp-rebalancer-zero-transfers.md)
 data/
   bandra_west.gpickle                # OSMnx road network (git-ignored)
   zone_partition.json                # 12-zone 3x4 mapping, verified 1464/1464 nodes
@@ -41,8 +51,9 @@ data/
 Still empty (only `__init__.py`):
 - `shifts/` — planned for demand shift generators
 
-No longer empty: `agents/` (ippo.py, mappo.py), `networks/` (encoder.py),
-`experiments/` (train.py) — populated 2026-09-09.
+Populated since: `agents/` (ippo.py, mappo.py), `networks/` (encoder.py),
+`experiments/` (train.py, evaluate.py, shift_eval.py, plot_shifts.py,
+tune_lp_baseline.py), `baselines/` (greedy, lp).
 
 ### RideGym interface contract (do not break)
 
@@ -66,28 +77,15 @@ No longer empty: `agents/` (ippo.py, mappo.py), `networks/` (encoder.py),
   real coordinate space: NYC taxi-zone centroids, or a `relocation_grid` over
   the network bounds for synthetic maps (D13).
 
-### Planned (target layout — create as needed, update this file when you do)
+### Not yet built
 
-This is the target layout per `AGENTS.md`. Most directories exist on disk
-but are empty (only `__init__.py`). Create the listed files to populate:
-
-```
-marl_fleet_rebalancing/
-  agents/
-    random_policy.py                 # already on disk
-    heuristic_baseline.py            # rolling-horizon imbalance/LP rebalancer
-    ippo.py                          # independent PPO
-    mappo.py                         # PPO + centralized critic
-  demand/
-    scenarios.py                     # shift generators, IDs from demand-shift.md
-    zone_partition.json              # node_id -> zone_id mapping (12 zones)
-  experiments/
-    train.py                         # train on base scenario, freeze
-    evaluate.py                      # frozen-policy stress test -> degradation curves
-    configs/                         # one config per run family
-  metrics.py                         # served %, cancelled %, avg wait, empty VMT,
-                                     # rebalancing trips, reward
-```
+- `metrics.py` — KPIs currently come from `env.kpi_summary()` and the eval
+  loops in `experiments/`, not from a shared metrics module.
+- `demand/scenarios.py` — shift mechanisms live in `config.py` (`demand_shift_mode`
+  and friends) and the `SHIFTS` table in `experiments/shift_eval.py`.
+- `shifts/` — still empty (`__init__.py` only); shift injection is config-driven.
+- `experiments/configs/` — no per-run config files; runs record their own
+  manifest under `runs/<name>/manifest.json`.
 
 ### Zone partition (for demand shift evaluation)
 

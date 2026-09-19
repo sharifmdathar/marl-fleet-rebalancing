@@ -17,14 +17,50 @@ from typing import Any
 
 @dataclass
 class EnvConfig:
-    """Environment configuration shared across all experiments."""
+    """Environment configuration shared across all experiments.
+
+    Version: 1.9 (D28: relocation arrival bonus & NYC action-space compression)
+    """
 
     # --- Fleet ---
     num_drivers: int = 50
     driver_capacity: int = 4
 
+    # --- Dispatch & Relocation policies (D14, D15) ---
+    # When True, zone agents can opportunistically dispatch orders to empty
+    # drivers in status RELOCATING in addition to IDLE drivers.
+    allow_relocating_dispatch: bool = True
+    # Maximum distance (km) from zone centroid for an order to be considered a
+    # candidate for dispatch. Prevents cross-city deadheading (D15). None disables.
+    max_dispatch_radius_km: float | None = 2.0
+    # When True, relocation actions are restricted to adjacent zone neighbours (D15, D26).
+    # Creates smooth local spatial diffusion without long-distance highway locks.
+    neighbor_relocation_only: bool = True
+
+    # --- Parameterized Zone Demand (D15) ---
+    # Specific zone ID (0 .. num_zones - 1) to receive a dedicated share of demand.
+    target_zone: int | None = None
+    # Percentage (0.0 to 100.0) of total episode demand originating in target_zone.
+    target_zone_demand_pct: float | None = None
+
+    # --- Demand-shift mechanisms (D21; eval-side scenario knobs) ---
+    # Exactly one of "none" | "burst" | "permute" applies per scenario;
+    # "concentrate" is expressed with target_zone/target_zone_demand_pct
+    # above (S4 cold zones). All preserve order count and timestamps.
+    demand_shift_mode: str = "none"
+    # S5 event burst: share (0..100) of orders with request_time in
+    # [burst_start_min, burst_end_min) reassigned to burst_zone.
+    burst_zone: int | None = None
+    burst_start_min: float = 20.0
+    burst_end_min: float = 30.0
+    burst_share_pct: float | None = None
+    # S1 spatial permutation: per-order remap probability (0..1) through a
+    # fixed rotation of offset perm_offset zones (None = num_zones // 2).
+    perm_strength: float | None = None
+    perm_offset: int | None = None
+
     # --- Simulation ---
-    dt: float = 0.1             # minutes per step
+    dt: float = 0.5             # minutes per step (30 sim-seconds, D23)
     horizon: float = 60.0       # episode length in minutes
     order_timeout: float = 2.0  # minutes before unassigned order is cancelled
 
@@ -40,9 +76,8 @@ class EnvConfig:
     # Maximum pending orders included in observation.
     # If actual pending > max_pending, we keep the most urgent orders
     # (closest to timeout) and mask the rest.
-    # NYC Bandra West measured max ~70; set 80 as safe headroom.
-    # For NYC, this should be measured from the actual order data
-    # after running the data pipeline. Update once data is available.
+    # Bandra West measured max ~70; NYC measured peak ~28 concurrent (D28).
+    # NYCConfig overrides to 30; BandraConfig keeps 80.
     max_pending: int = 80
 
     # --- Region model (zone-controller agents, D10) ---
@@ -84,11 +119,20 @@ class EnvConfig:
     empty_distance_norm_km: float = 1.0
 
     # --- Reward weights ---
-    # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand
-    # Tuning these is part of the experiment; start with equal weights.
-    alpha: float = 1.0   # weight for passenger waiting time
-    beta: float = 1.0    # weight for empty repositioning distance
-    gamma: float = 1.0   # weight for served demand
+    # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand - cancel_penalty
+    # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.15/km, D25).
+    alpha: float = 0.2   # weight for passenger waiting time (D25)
+    beta: float = 0.15   # weight for empty repositioning distance (cost per empty km, D25)
+    gamma: float = 1.0   # weight for served demand (payoff per completed order, D25)
+    cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
+    team_share: float = 0.2  # 80% local credit + 20% team
+
+    # --- Relocation arrival bonus (D28) ---
+    # When a relocated driver arrives at its destination zone, the relocator zone
+    # receives an immediate bonus: prospective_bonus_scale * pending_demand_at_dest / num_drivers.
+    # Eliminates the 8-18 turn credit delay that made relocation perpetually unprofitable.
+    # 0.0 disables (legacy behavior). Typical: 1.0-3.0.
+    prospective_bonus_scale: float = 0.0
 
     # --- Seeding ---
     seed: int | None = None
@@ -106,23 +150,19 @@ class NYCConfig(EnvConfig):
     (-74.02, 40.70, -73.93, 40.80); loaded from zone_centroids.csv and passed
     to RideGym as relocation_centroids (region model = real taxi zones).
 
-    Fleet size: 50 drivers for a 60-minute episode. Scale as needed.
+    Fleet size: 100 drivers for a 60-minute episode.
 
-    max_pending: 650 — measured worst case of concurrent 2-min arrivals
-    (train/window_0071, Fri 19:00 peak).
+    max_pending: 30 (D28: measured peak ~28 concurrent; 80 wasted 50+ masked slots)
 
     Demand: real FHVHV windows from data/nyc/splits via
-    MultiWindowNYCOrderGenerator (train: random window per episode;
-    val/test: deterministic cyclic traversal). nyc_window_limit is the
-    sample-rate lever — still an open experiment-design decision.
+    MultiWindowNYCOrderGenerator.
 
-    Network: manhattan.gpickle downloaded via
-    `python -m ride_gym.data_tools.nyc.build_nyc_network`
+    Network: manhattan.gpickle
     """
 
-    num_drivers: int = 50
+    num_drivers: int = 100
     driver_capacity: int = 4
-    dt: float = 0.1
+    dt: float = 0.5
     horizon: float = 60.0
     order_timeout: float = 2.0
     num_orders: int = 800  # unused in nyc mode; kept for the synthetic fallback
@@ -131,16 +171,14 @@ class NYCConfig(EnvConfig):
     nyc_split: str = "train"
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
-    # Measured 2026-09-07 from data/nyc/splits (108 windows): worst case is
-    # 604 orders arriving within one 2-min order_timeout span
-    # (train/window_0071, Fri 19:00 peak). 650 = measured max + headroom.
-    # NOTE: peak windows carry ~15k trips/hr against a 50-driver fleet —
-    # full-rate episodes are unservable; expect sample-rate downsampling
-    # (or a larger fleet) as an experiment-design decision before training.
-    max_pending: int = 650
-    alpha: float = 1.0
-    beta: float = 1.0
+    nyc_window_limit: int | None = 500
+    max_pending: int = 30     # D28: was 80; actual peak ~28 concurrent
+    alpha: float = 0.2
+    beta: float = 0.15
     gamma: float = 1.0
+    cancel_penalty: float = 1.0
+    team_share: float = 0.2
+    prospective_bonus_scale: float = 2.0  # D28: immediate relocation arrival credit
 
 
 # ---------------------------------------------------------------------------
@@ -153,19 +191,22 @@ class BandraConfig(EnvConfig):
 
     Zone count: 25 relocation zones from RideGym defaults.
     Fleet size: 30 drivers, 30-minute episode.
+    num_orders: 200 (achievable demand profile for a 30-vehicle fleet).
     max_pending: 80 (measured max ~70 in Bandra West testing).
     """
 
     num_drivers: int = 30
     driver_capacity: int = 4
-    dt: float = 0.1
+    dt: float = 0.5
     horizon: float = 30.0
     order_timeout: float = 2.0
-    num_orders: int = 400
+    num_orders: int = 200
     max_party_size: int = 3
     network_path: str = "data/bandra_west.gpickle"
     speed_kmh: float = 30.0
     max_pending: int = 80
-    alpha: float = 1.0
-    beta: float = 1.0
-    gamma: float = 1.0
+    alpha: float = 0.1
+    beta: float = 0.1
+    gamma: float = 5.0
+    cancel_penalty: float = 0.5
+    team_share: float = 0.2

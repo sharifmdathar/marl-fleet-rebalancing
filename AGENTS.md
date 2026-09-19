@@ -31,7 +31,7 @@ never import from `main.py`; `main.py` is a smoke test only.
 - Python ≥ 3.9, type hints on all public functions (match existing style).
 - All experiment parameters live in a config object/dataclass — never as
   magic numbers inside training loops. `main.py`'s constants are the template.
-- Every training/eval run must log: config, seed(s), git commit hash, demand
+- Every training/eval run must log: config, seed(s), demand
   scenario ID, and output KPIs.
 
 ## Experiment rules (non-negotiable)

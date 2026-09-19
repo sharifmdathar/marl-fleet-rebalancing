@@ -51,9 +51,11 @@ dataset/
 *.mp3
 *.wav
 *.png
+!results/figures/*.png
 *.jpg
 *.jpeg
 *.gif
 # Training outputs (AGENTS.md: never commit checkpoints)
 runs/
 *.pt
+*log.txt

@@ -16,6 +16,102 @@ stress-test on shifted distributions and plot degradation curves.
 **Advisor:** Alaa Daoud (INSA Hauts-de-France, LAMIH CNRS)
 ---
 
+## 2026-09-19: 5-seed D28 replication done — H1–H4 verdict revised
+
+- Seeds 1–4 trained per `scripts/run_d28_seed_replicas.sh` (identical two-stage
+  protocol, val-selected checkpoints) and frozen-evaluated into
+  `results/shift_eval_seeds/` (8 replica CSVs + rebuilt summary).
+- Cross-seed aggregation (`scripts/aggregate_seed_replicas.py`, 5 training
+  seeds/algo, paired per seed): MAPPO leads IPPO on all 10 shifts on average
+  (+0.0 to +3.6), sweeping 5/5 seeds on S0, S2a, S2d, S4, S5. Mean retention
+  tied: 86.6% vs 86.8%.
+- Revised verdict in `docs/shift-results.md` (with paper-takeaway box): H1
+  supported on absolute service rate, H3 describes retention, H4 residue on
+  S2a/S3; LP headline unchanged.
+- Record `results/shift_eval/summary.json` repaired (was overwritten to a
+  single policy by sequential `shift_eval` runs — now 9 policies, additive
+  merge only) and figures replotted from the full record.
+- **Remaining for submission:** reconcile `INTENT.md`'s relocate-only
+  non-goals line with D9's joint action space.
+
+## 2026-09-17: D28 paired retraining done — H1–H4 answered
+
+- Both PPO variants retrained under the **identical D28 protocol** (env v1.8,
+  two-stage entropy 0.05→0.01, neighbor relocation, validation-selected
+  checkpoints on the true held-out val split): `ippo-nyc-d28-stage2` and
+  `mappo-nyc-d28-stage2`. The relocation collapse is gone at the source
+  (`pct_relocate` stays ~14% / ~10% through training).
+- 5-seed frozen shift eval (S0–S6, seeds 1000–1004) complete for both +
+  baselines. Head-to-head: MAPPO 56.9% S0 / 87.6% retention vs IPPO 56.5% /
+  84.8% — **within noise; H3 is the answer, with a lean toward H4** (MAPPO's
+  edge concentrates on demand-level shifts S1/S3; both collapse below greedy
+  on S4). Tuned LP still leads every shift at half IPPO's empty km.
+- Full writeup with tables + caveats: `docs/shift-results.md` (head-to-head
+  rebuilt by `scripts/summarize_shift_eval.py`). Figures updated in
+  `results/figures/`.
+- **Remaining for submission:** repeat each D28 training with 2–3 training
+  seeds (deltas are currently single-training-seed); reconcile `INTENT.md`'s
+  relocate-only non-goals line with D9's joint action space.
+
+## 2026-09-16: D22 env overhaul + purge of all pre-D22 artifacts
+
+- Code audit (no training logs) found six S0 blockers; fixed as config
+  v1.4, logged in D22 (winlim 500 default, urgent-first candidates,
+  legible demand signal, anywhere relocation, reward rescale,
+  max_pending 80).
+- `runs/` and `results/` purged (checkpoints, evals, figures, videos).
+  `docs/shift-results.md` is a stub; `docs/demand-shift.md` keeps the
+  taxonomy/mechanisms only. Do NOT mix pre/post-D22 seeds in one aggregate.
+- Next: retrain IPPO + MAPPO on S0 (v1.4) to competence, tune baseline
+  (D3), then frozen-policy eval S0–S6.
+
+## 2026-09-16 (later): D27 LP baseline repaired and tuned
+
+- `ZoneLPRebalancer` was a silent no-op: its objective priced travel cost but
+  put no value on covering a predicted shortfall, so with all costs non-negative
+  the all-zero plan was exactly optimal. It matched greedy on all 10 shifts with
+  `pct_relocate = 0.0`. No speed/horizon/threshold tuning could change that.
+- Fixed in D27: shortfall term in the objective (`deficit_penalty_scale`),
+  demand-rate unit bug, deterministic rounding. `speed_kmh` deliberately left at
+  the env's true 30 km/h.
+- Tuned on S0+S3 only (held-out shifts untouched): defaults now
+  `lookahead_minutes=5.0`, `deficit_penalty_scale=0.4`. S0 service rate
+  70.5% vs greedy 52.9%; S3 70.6% vs 46.3%; empty km 115 → 812.
+- New sweep harness: `experiments/tune_lp_baseline.py` (writes to
+  `results/lp_tuning*/`).
+- Head-to-head re-run at 5 seeds (seed 1000–1004) over all 6 policies →
+  `results/shift_eval/` + `results/figures/`. Numbers and caveats in
+  `docs/shift-results.md`. The pre-D27 3-seed run is parked in
+  `results/shift_eval_preD27/` (invalid for citation, safe to delete).
+- Two things the re-run surfaced: the tuned LP leads every shift (S0 70.5% vs
+  best MAPPO 57.2%), and MAPPO at 400 iterations has *stopped relocating*
+  entirely (`pct_relocate` 0.01%, service rate down to greedy's). No IPPO
+  checkpoints exist, so H1–H4 remain unanswerable.
+
+## 2026-09-17: validation-selection protocol bug found and fixed
+
+- The first validation-selected pair (`ippo-v18-val` it12, `mappo-v18-val`
+  it8 → `results/shift_eval_v18best/`) is NOT a clean comparison. Two bugs:
+  (1) selection ran on the TRAINING split (same windows the policy learns
+  on); (2) selection ran in the training env itself, so its seeded resets
+  (9000–9002) rewrote the training RNG stream — enabling validation changed
+  subsequent training episodes. A separate probe also confirmed the
+  three-episode val reset replays only the first val window (cursor reset).
+- Fixed in `train.py`: selection now runs `evaluate_deterministic` in a
+  DEDICATED env deep-copied from the training config with `nyc_split="val"`
+  (`_make_validation_env`); the training env is never touched by selection
+  (toggle-verified: 2-iter training trajectories byte-identical with and
+  without `--eval-interval`). Provenance: `TrainConfig` logs
+  `eval_split/eval_seed/eval_episodes/eval_window_limit`; `best_checkpoint.json`
+  records `val_split`, `eval_seed`, `eval_episodes` (auditable selection).
+  Regression-locked in `tests/test_training_validation.py`.
+- Consequence: **`results/shift_eval_v18best/` and the v18best rows must not
+  be merged into the headline artifacts or cited as validation-selected.**
+  Treat as exploratory only. Next: retrain IPPO + MAPPO on S0 with
+  `--eval-interval` (now on the true val split), then rerun the 5-seed
+  shift eval for the fair H1–H4 comparison.
+---
+
 ## What exists right now (verified working)
 
 ### Simulation (RideGym)
@@ -42,13 +138,14 @@ stress-test on shifted distributions and plot degradation curves.
 - `src/marl_fleet_rebalancing/config.py` — `EnvConfig`, `NYCConfig`, `BandraConfig`
 - All parameters documented with source/rationale. No magic numbers.
 
-### Reward function
-- Implemented in `pettingzoo_env.py` (`_compute_reward` method)
-- Formula: `R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand`
-- Weights are config params (alpha, beta, gamma)
-- **Caveat:** empty_distance is approximate (uses status proxy, not exact distance tracking)
+### Reward function & Credit Assignment
+- Implemented in `pettingzoo_env.py` (`_compute_zone_rewards` method).
+- Formula per zone: $R_z = (1 - \text{team\_share}) \cdot R_{\text{local}, z} + \text{team\_share} \cdot \bar{R}_{\text{global}}$.
+- Local credit assignment: $+5.0$ to the zone that dispatched the completed order, $-0.1 \times \text{km}$ to the zone commanding empty movement (exact physical distance from RideGym events), and $-1.0 \times \text{wait}$ localized by order origin.
+- Default weights: $\alpha = 1.0, \beta = 0.1, \gamma = 5.0, \text{team\_share} = 0.2$.
 
 ### Docs
+- `docs/agent-mechanics.md` — Diagnostics of root issues, what agents observe, action mapping, and credit assignment.
 - `docs/decisions.md` — D1-D8 decisions logged
 - `docs/demand-shift.md` — S0-S6 shift taxonomy
 - `docs/literature.md` — gap sentence + adjacent work table
@@ -95,14 +192,15 @@ stress-test on shifted distributions and plot degradation curves.
   Smoke-verified on Bandra (CUDA, 2 iters, same-seed byte-identical
   metrics + checkpoint). No experiment runner beyond train.
 
-### Baselines
-- `src/marl_fleet_rebalancing/baselines/heuristic_baseline.py` — LP-based
-  rolling-horizon rebalancer (MIVR-lite, D3) EXISTS but targets the raw
-  RideGym dict interface; needs a port to the PettingZoo wrapper env for a
-  fair comparison, plus tuning with effort comparable to RL (D3).
-- No greedy nearest-idle floor yet (random policy in `main.py` is the
-  current floor).
-- No tuning infrastructure
+### Baselines — DONE 2026-09-16 (D27)
+- `baselines/greedy_baseline.py` — nearest-idle dispatch floor (zero relocation).
+- `baselines/lp_baseline.py` — rolling-horizon LP rebalancer on the wrapper env,
+  repaired and tuned in D27 (it was a silent no-op before; see
+  `references/lp-rebalancer-zero-transfers.md`).
+- `experiments/tune_lp_baseline.py` — sweep harness; tuning evidence in
+  `results/lp_tuning*/`.
+- `baselines/heuristic_baseline.py` — earlier LP rebalancer on the raw RideGym
+  dict interface; superseded by `lp_baseline.py`, kept for reference.
 
 ### Metrics / evaluation
 - No metric logging beyond the reward
@@ -195,15 +293,23 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 5. Train on NYC base demand, verify agents learn something
 
 ### Phase 3: Baselines
-1. Implement greedy nearest-idle dispatch (the floor)
-2. Port LP rebalancer (`baselines/heuristic_baseline.py`) to the wrapper env
+1. Implement greedy nearest-idle dispatch (the floor) — **DONE 2026-09-11** (`baselines/greedy_baseline.py`)
+2. Port LP rebalancer to the wrapper env — **DONE 2026-09-11** (`baselines/lp_baseline.py` + integrated in `experiments/evaluate.py`)
 3. Tune all baselines with comparable effort to RL (D3 / RLSCALE-BENCH lesson)
+   — **DONE 2026-09-16 (D27)**; sweep in `experiments/tune_lp_baseline.py`.
+   Caveat: only the LP needed tuning (greedy has no parameters), and the tuned
+   LP now leads every MAPPO run on service rate.
 
-### Phase 4: Demand shift experiments
-1. Implement shift injection (spatial, magnitude, event)
-2. Freeze trained policies, evaluate on shifted scenarios
-3. Plot degradation curves
-4. IPPO vs MAPPO head-to-head
+### Phase 4: Demand shift experiments (pending v1.4 retrain)
+1. Shift injection (spatial, magnitude, burst, permute) — DONE
+   (`experiments/shift_eval.py`; S0–S6 per `docs/demand-shift.md`).
+2. Freeze trained policies, evaluate on shifted scenarios — **DONE
+   2026-09-17** (5 seeds, S0–S6, both D28 policies + baselines;
+   `results/shift_eval/`).
+3. IPPO vs MAPPO head-to-head + H1–H4 writeup — **DONE 2026-09-17, revised
+   2026-09-19**: `docs/shift-results.md` (5 training seeds/algo, paired
+   deltas; answer: H1 on absolute SR, H3 on retention, H4 residue on
+   S2a/S3; LP headline).
 
 ---
 
@@ -252,8 +358,11 @@ Wrapper NYC support DONE 2026-09-08 (D13): the wrapper replays the splits via
 
 - **Sample-rate/fleet sizing**: full-NYC peaks (~15k/hr vs 50 drivers) are
   unservable at full rate. Must settle before training (spaces freeze).
-- **Baseline understanding**: LP + greedy plan stands; "gotta understand the
-  baseline" is ongoing work.
+- ~~**Baseline understanding**: LP + greedy plan stands~~ — closed by D27: the
+  LP was no-op'ing on a missing objective term, now repaired and tuned. Open
+  follow-up: why it still relocates at ~7% of actions once 45 of 62 zones read
+  as short (its shortfall estimate ignores the busy fleet freeing up inside the
+  horizon).
 - **Reward weights**: equal start, revisit if tuning stalls.
 
 ## Contact

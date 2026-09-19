@@ -32,7 +32,7 @@ class MAPPOConfig:
     hidden_dim: int = 256
 
     # --- Rollout / optimization ---
-    rollout_episodes: int = 2      # episodes collected per PPO update
+    rollout_episodes: int = 6      # episodes collected per PPO update
     epochs: int = 4                # passes over the rollout per update
     minibatches: int = 4
     clip_coef: float = 0.2
@@ -113,6 +113,10 @@ class MAPPO:
             "critic": self.critic.state_dict(),
         }
 
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.actor.load_state_dict(state_dict["actor"])
+        self.critic.load_state_dict(state_dict["critic"])
+
     def update(self, buffer: RolloutBuffer) -> dict[str, float]:
         """PPO-clip update over one filled buffer. Returns loss metrics."""
         assert buffer.states is not None, (
@@ -122,16 +126,17 @@ class MAPPO:
         cfg = self.config
         advantages, returns = buffer.compute_gae(cfg.gamma, cfg.gae_lambda)
         flat = buffer.flatten()
-        b_obs = torch.as_tensor(flat["obs"], device=self.device)
-        b_mask = torch.as_tensor(flat["action_mask"], device=self.device)
-        b_actions = torch.as_tensor(flat["actions"], device=self.device)
-        b_logprobs = torch.as_tensor(flat["logprobs"], device=self.device)
-        b_states = torch.as_tensor(flat["states"], device=self.device)
+        # CPU-resident: only minibatches move to device (see IPPO.update).
+        b_obs = torch.as_tensor(flat["obs"])
+        b_mask = torch.as_tensor(flat["action_mask"])
+        b_actions = torch.as_tensor(flat["actions"])
+        b_logprobs = torch.as_tensor(flat["logprobs"])
+        b_states = torch.as_tensor(flat["states"])
         b_advantages = torch.as_tensor(
-            advantages.ravel()[buffer.filled.ravel()], device=self.device,
+            advantages.ravel()[buffer.filled.ravel()],
         )
         b_returns = torch.as_tensor(
-            returns.ravel()[buffer.filled.ravel()], device=self.device,
+            returns.ravel()[buffer.filled.ravel()],
         )
         # Advantage normalization (standard PPO practice).
         b_advantages = (b_advantages - b_advantages.mean()) / (
@@ -146,24 +151,26 @@ class MAPPO:
         }
         update_steps = 0
         for _epoch in range(cfg.epochs):
-            perm = torch.randperm(num_samples, device=self.device)
+            perm = torch.randperm(num_samples)
             for start in range(0, num_samples, batch_size):
                 idx = perm[start : start + batch_size]
-                logits, _ = self.actor.forward(b_obs[idx], b_mask[idx])
-                values = self.critic.forward(b_states[idx])
+                dev = self.device
+                logits, _ = self.actor.forward(b_obs[idx].to(dev), b_mask[idx].to(dev))
+                values = self.critic.forward(b_states[idx].to(dev))
                 dist = torch.distributions.Categorical(logits=logits)
-                logprobs = dist.log_prob(b_actions[idx])
+                logprobs = dist.log_prob(b_actions[idx].to(dev))
                 entropy = dist.entropy().mean()
 
-                ratio = torch.exp(logprobs - b_logprobs[idx])
-                surr1 = ratio * b_advantages[idx]
+                ratio = torch.exp(logprobs - b_logprobs[idx].to(dev))
+                adv_idx = b_advantages[idx].to(dev)
+                surr1 = ratio * adv_idx
                 surr2 = torch.clamp(
                     ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef,
-                ) * b_advantages[idx]
+                ) * adv_idx
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 value_loss = nn.functional.mse_loss(
-                    values, b_returns[idx],
+                    values, b_returns[idx].to(dev),
                 )
 
                 loss = (
