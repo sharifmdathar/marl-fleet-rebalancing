@@ -62,7 +62,14 @@ class GreedyZoneDispatcher:
         valid_indices = np.where(dispatch_mask)[0]
 
         if len(valid_indices) > 0:
-            # First index corresponds to closest order to zone centroid
-            return int(1 + valid_indices[0])
+            candidates = env._zone_candidate_orders[env._zone_int_id(agent)]
+            centroid = np.asarray(env.relocation_points[env._zone_int_id(agent)])
+            nearest = min(
+                valid_indices,
+                key=lambda i: np.sum(
+                    (np.asarray(candidates[int(i)]["origin"]) - centroid) ** 2
+                ),
+            )
+            return int(1 + nearest)
 
         return 0
