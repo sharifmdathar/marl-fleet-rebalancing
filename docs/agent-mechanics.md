@@ -11,7 +11,7 @@ Instead of treating each vehicle as an independent agent (which scales poorly wh
 * **Geographic Zones ($Z$)**: The city map is partitioned into discrete zones ($Z = 25$ on Bandra West, $Z = 62$ on NYC).
 * **One Agent per Zone**: Each zone is governed by its own reinforcement learning controller (`zone_0` to `zone_Z-1`).
 * **Parameter Sharing**: All zone agents share the same actor and critic neural network weights. To give each agent its own spatial identity, each agent receives its own normalized GPS centroid in its observation.
-* **Turn-Based Execution**: During each simulation turn (e.g. every $0.1$ minutes / 6 seconds), zone agents take turns in a randomly shuffled order to assign orders and relocate idle vehicles within their jurisdiction.
+* **Turn-Based Execution**: During each simulation turn (every $0.5$ minutes / 30 seconds), zone agents take turns in a randomly shuffled order to assign orders and relocate idle vehicles within their jurisdiction.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
