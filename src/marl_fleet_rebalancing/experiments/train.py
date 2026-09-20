@@ -224,6 +224,10 @@ def collect_rollout(
     per turn instead of calling ``learner.act()`` once per zone. This keeps
     the GPU busy processing batch_size=N_zones instead of batch_size=1.
 
+    **Sequential mode** (when env._sequential_mode is True): zones decide
+    actions one at a time, each seeing the effects of prior zones' actions
+    within the same turn. This improves coordination but disables batching.
+
     Rewards close at the agent's next selection (PettingZoo delayed-close
     semantics): the reward read for an agent is the one produced by the env
     step that followed its previous action. Rollouts must end exactly at
@@ -252,65 +256,54 @@ def collect_rollout(
     acts_relocate = 0
     episode_ended = False
 
-    # Per-agent observation/mask buffers for batch collection.
-    # Each slot is a single observation vector (obs_dim,) not a full
-    # episode rollout, so allocate (num_zones, obs_dim).
-    _obs_dim = obs_dim  # for the closure below
-    obs_batch = np.empty(
-        (num_zones, buffer.obs.shape[2]), dtype=np.float32,
-    )
-    mask_batch = np.empty(
-        (num_zones, buffer.action_mask.shape[2]), dtype=bool,
-    )
-    # MAPPO centralized-state batch (D18 fix): per-agent state = global
-    # state + own zone_location, matching train.py's state_dim. IPPO leaves
-    # this None and uses decentralized actor values.
-    if use_state:
-        assert buffer.states is not None, (
-            "use_state=True requires a RolloutBuffer with state_dim (MAPPO)."
-        )
-        state_batch: np.ndarray | None = np.empty(
-            (num_zones, buffer.states.shape[2]), dtype=np.float32,
-        )
-    else:
-        state_batch = None
+    _sequential = getattr(env, "_sequential_mode", False)
 
-    while counts.min() < total_turns or env.agents:
-        if not env.agents:
-            if episode_ended:
-                kpi = env.kpi_summary()
-                served_total += int(kpi["served"])
-                cancelled_total += int(kpi["cancelled"])
-                empty_km_total += float(kpi["empty_km"])
-                if kpi["avg_wait"] > 0:
-                    wait_times_all.append(kpi["avg_wait"])
-                episodes += 1
+    if _sequential:
+        # Sequential decoding: zone-by-zone, no batching
+        while counts.min() < total_turns or env.agents:
+            if not env.agents:
+                if episode_ended:
+                    kpi = env.kpi_summary()
+                    served_total += int(kpi["served"])
+                    cancelled_total += int(kpi["cancelled"])
+                    empty_km_total += float(kpi["empty_km"])
+                    if kpi["avg_wait"] > 0:
+                        wait_times_all.append(kpi["avg_wait"])
+                    episodes += 1
+                    episode_ended = False
+                if counts.min() < total_turns:
+                    env.reset(seed=None)
+                continue
+
+            sel_order = [int(z) for z in env._agent_order]
+
+            if not any(counts[s] < total_turns for s in sel_order):
+                if not episode_ended:
+                    kpi = env.kpi_summary()
+                    served_total += int(kpi["served"])
+                    cancelled_total += int(kpi["cancelled"])
+                    empty_km_total += float(kpi["empty_km"])
+                    if kpi["avg_wait"] > 0:
+                        wait_times_all.append(kpi["avg_wait"])
+                    episodes += 1
+                for agent in list(env.agents):
+                    if agent in pending:
+                        s_slot, s_turn = pending.pop(agent)
+                        buffer.close(
+                            s_slot, s_turn,
+                            float(env.rewards.get(agent, 0.0)),
+                            done=bool(
+                                env.terminations.get(agent, False)
+                                or env.truncations.get(agent, False)
+                            ),
+                        )
+                    env.step(None)
                 episode_ended = False
-            if counts.min() < total_turns:
-                env.reset(seed=None)
-            continue
+                continue
 
-        # Selection-ordered turn (AEC correctness): env.step() records the
-        # action for the CURRENTLY SELECTED agent, so a turn's 25 steps must
-        # walk env._agent_order exactly. The pre-batching loop stepped
-        # agent_selection directly; batching must preserve that walk, or zone
-        # actions silently execute on the wrong zones (found by audit).
-        sel_order = [int(z) for z in env._agent_order]
-
-        if not any(counts[s] < total_turns for s in sel_order):
-            # All turns collected but agents remain: drain without acting.
-            # The episode's KPIs are accounted BEFORE the drain flush below
-            # (an extra RideGym step) can pollute them. Pending delayed
-            # rewards are closed from the per-agent reward tables directly.
-            if not episode_ended:
-                kpi = env.kpi_summary()
-                served_total += int(kpi["served"])
-                cancelled_total += int(kpi["cancelled"])
-                empty_km_total += float(kpi["empty_km"])
-                if kpi["avg_wait"] > 0:
-                    wait_times_all.append(kpi["avg_wait"])
-                episodes += 1
-            for agent in list(env.agents):
+            # Sequential zone-by-zone decoding
+            for slot in sel_order:
+                agent = f"zone_{slot}"
                 if agent in pending:
                     s_slot, s_turn = pending.pop(agent)
                     buffer.close(
@@ -321,84 +314,42 @@ def collect_rollout(
                             or env.truncations.get(agent, False)
                         ),
                     )
-                env.step(None)
-            episode_ended = False
-            continue
+                if (
+                    counts[slot] >= total_turns
+                    or env.terminations.get(agent, False)
+                    or env.truncations.get(agent, False)
+                ):
+                    if env.terminations.get(agent, False) or env.truncations.get(agent, False):
+                        episode_ended = True
+                    env.step(None)
+                    continue
 
-        # Phase 1: close delayed rewards + observe. No env steps here, so the
-        # Per-agent tables are read directly (D18 fix): env.last() reports
-        # only the currently-selected agent, so calling it per zone
-        # misattributes rewards and done-flags. Skipping the second
-        # env.last() build also removes a redundant observation per agent.
-        # MAPPO (use_state): values come from the centralized critic over
-        # per-agent global states; the actor head's decentralized values are
-        # discarded, per MAPPO.act's documented contract.
-        g_state = env.state() if use_state else None
-        dead: set[int] = set()
-        live_idx: list[int] = []
-        for i, slot in enumerate(sel_order):
-            agent = f"zone_{slot}"
-            if agent in pending:
-                s_slot, s_turn = pending.pop(agent)
-                buffer.close(
-                    s_slot, s_turn,
-                    float(env.rewards.get(agent, 0.0)),
-                    done=bool(
-                        env.terminations.get(agent, False)
-                        or env.truncations.get(agent, False)
-                    ),
-                )
-            if (
-                counts[slot] >= total_turns
-                or env.terminations.get(agent, False)
-                or env.truncations.get(agent, False)
-            ):
-                if env.terminations.get(agent, False) or env.truncations.get(agent, False):
-                    episode_ended = True
-                    dead.add(slot)
-                continue
-            obs_dict = env.observe(agent)
-            obs_batch[i] = obs_to_vector(obs_dict)
-            mask_batch[i] = env.action_mask(agent)
-            if use_state:
-                assert g_state is not None and state_batch is not None
-                state_batch[i] = np.concatenate(
-                    [g_state, np.asarray(
-                        obs_dict["zone_location"].ravel(), dtype=np.float32,
-                    )],
-                )
-            live_idx.append(i)
+                obs_dict = env.observe(agent)
+                obs_vec = obs_to_vector(obs_dict)
+                mask = env.action_mask(agent)
 
-        # Single batched forward pass for the live zones (if any).
-        # act_of maps zone slot -> (batch position, action, logprob, value).
-        act_of: dict[int, tuple[int, int, float, float]] = {}
-        if live_idx:
-            _act_t, _logp_t, _val_t = learner.act(
-                obs_batch[live_idx], mask_batch[live_idx],
-            )
-            act_values = _act_t.astype(np.int64)
-            logprobs = _logp_t.astype(np.float64)
-            if use_state:
-                # Centralized critic values (D18 fix).
-                assert isinstance(learner, MAPPO)
-                assert state_batch is not None
-                values = learner.value(state_batch[live_idx]).astype(np.float64)
-            else:
-                values = _val_t.astype(np.float64)
-            for j, i in enumerate(live_idx):
-                act_of[sel_order[i]] = (
-                    i, int(act_values[j]), float(logprobs[j]), float(values[j]),
-                )
-
-        # Phase 2: walk the selection order, stepping each agent exactly
-        # once. Dead/completed zones step None (no-op that keeps the walk
-        # aligned); live zones step their batched action. This preserves the
-        # pre-batching attribute-every-action-to-the-selected-agent semantics.
-        for slot in sel_order:
-            agent = f"zone_{slot}"
-            if slot in act_of:
-                i, act_val, logprob, value = act_of[slot]
-                turn = int(counts[slot])
+                if use_state:
+                    g_state = env.state()
+                    state_vec = np.concatenate(
+                        [g_state, np.asarray(
+                            obs_dict["zone_location"].ravel(), dtype=np.float32,
+                        )],
+                    )
+                    assert isinstance(learner, MAPPO)
+                    _act_t, _logp_t, _ = learner.act(
+                        obs_vec[None, :], mask[None, :],
+                    )
+                    _val_t = learner.value(state_vec[None, :])
+                    act_val = int(_act_t[0])
+                    logprob = float(_logp_t[0])
+                    value = float(_val_t[0])
+                else:
+                    _act_t, _logp_t, _val_t = learner.act(
+                        obs_vec[None, :], mask[None, :],
+                    )
+                    act_val = int(_act_t[0])
+                    logprob = float(_logp_t[0])
+                    value = float(_val_t[0])
 
                 if act_val == 0:
                     acts_idle += 1
@@ -407,19 +358,190 @@ def collect_rollout(
                 else:
                     acts_relocate += 1
 
+                turn = int(counts[slot])
                 buffer.store(
-                    slot, turn, obs_batch[i], mask_batch[i],
+                    slot, turn, obs_vec, mask,
                     act_val, logprob, value,
-                    state=(state_batch[i] if (
-                        use_state and state_batch is not None) else None),
+                    state=(state_vec if (
+                        use_state and state_vec is not None) else None),
                 )
                 counts[slot] += 1
                 pending[agent] = (slot, turn)
                 env.step(act_val)
-            else:
-                env.step(None)
+                # In sequential mode, apply shadow state update immediately
+                # so the next zone's observe() sees the effects of this action
+                if _sequential:
+                    env._apply_action_sequentially(act_val, slot)
+    else:
 
-    # Account final episode's KPIs
+        # Per-agent observation/mask buffers for batch collection.
+        # Each slot is a single observation vector (obs_dim,) not a full
+        # episode rollout, so allocate (num_zones, obs_dim).
+        _obs_dim = obs_dim  # for the closure below
+        obs_batch = np.empty(
+            (num_zones, buffer.obs.shape[2]), dtype=np.float32,
+        )
+        mask_batch = np.empty(
+            (num_zones, buffer.action_mask.shape[2]), dtype=bool,
+        )
+        # MAPPO centralized-state batch (D18 fix): per-agent state = global
+        # state + own zone_location, matching train.py's state_dim. IPPO leaves
+        # this None and uses decentralized actor values.
+        if use_state:
+            assert buffer.states is not None, (
+                "use_state=True requires a RolloutBuffer with state_dim (MAPPO)."
+            )
+            state_batch: np.ndarray | None = np.empty(
+                (num_zones, buffer.states.shape[2]), dtype=np.float32,
+            )
+        else:
+            state_batch = None
+
+        while counts.min() < total_turns or env.agents:
+            if not env.agents:
+                if episode_ended:
+                    kpi = env.kpi_summary()
+                    served_total += int(kpi["served"])
+                    cancelled_total += int(kpi["cancelled"])
+                    empty_km_total += float(kpi["empty_km"])
+                    if kpi["avg_wait"] > 0:
+                        wait_times_all.append(kpi["avg_wait"])
+                    episodes += 1
+                    episode_ended = False
+                if counts.min() < total_turns:
+                    env.reset(seed=None)
+                continue
+
+            # Selection-ordered turn (AEC correctness): env.step() records the
+            # action for the CURRENTLY SELECTED agent, so a turn's 25 steps must
+            # walk env._agent_order exactly. The pre-batching loop stepped
+            # agent_selection directly; batching must preserve that walk, or zone
+            # actions silently execute on the wrong zones (found by audit).
+            sel_order = [int(z) for z in env._agent_order]
+
+            if not any(counts[s] < total_turns for s in sel_order):
+                # All turns collected but agents remain: drain without acting.
+                # The episode's KPIs are accounted BEFORE the drain flush below
+                # (an extra RideGym step) can pollute them. Pending delayed
+                # rewards are closed from the per-agent reward tables directly.
+                if not episode_ended:
+                    kpi = env.kpi_summary()
+                    served_total += int(kpi["served"])
+                    cancelled_total += int(kpi["cancelled"])
+                    empty_km_total += float(kpi["empty_km"])
+                    if kpi["avg_wait"] > 0:
+                        wait_times_all.append(kpi["avg_wait"])
+                    episodes += 1
+                for agent in list(env.agents):
+                    if agent in pending:
+                        s_slot, s_turn = pending.pop(agent)
+                        buffer.close(
+                            s_slot, s_turn,
+                            float(env.rewards.get(agent, 0.0)),
+                            done=bool(
+                                env.terminations.get(agent, False)
+                                or env.truncations.get(agent, False)
+                            ),
+                        )
+                    env.step(None)
+                episode_ended = False
+                continue
+
+            # Phase 1: close delayed rewards + observe. No env steps here, so the
+            # Per-agent tables are read directly (D18 fix): env.last() reports
+            # only the currently-selected agent, so calling it per zone
+            # misattributes rewards and done-flags. Skipping the second
+            # env.last() build also removes a redundant observation per agent.
+            # MAPPO (use_state): values come from the centralized critic over
+            # per-agent global states; the actor head's decentralized values are
+            # discarded, per MAPPO.act's documented contract.
+            g_state = env.state() if use_state else None
+            dead: set[int] = set()
+            live_idx: list[int] = []
+            for i, slot in enumerate(sel_order):
+                agent = f"zone_{slot}"
+                if agent in pending:
+                    s_slot, s_turn = pending.pop(agent)
+                    buffer.close(
+                        s_slot, s_turn,
+                        float(env.rewards.get(agent, 0.0)),
+                        done=bool(
+                            env.terminations.get(agent, False)
+                            or env.truncations.get(agent, False)
+                        ),
+                    )
+                if (
+                    counts[slot] >= total_turns
+                    or env.terminations.get(agent, False)
+                    or env.truncations.get(agent, False)
+                ):
+                    if env.terminations.get(agent, False) or env.truncations.get(agent, False):
+                        episode_ended = True
+                        dead.add(slot)
+                    continue
+                obs_dict = env.observe(agent)
+                obs_batch[i] = obs_to_vector(obs_dict)
+                mask_batch[i] = env.action_mask(agent)
+                if use_state:
+                    assert g_state is not None and state_batch is not None
+                    state_batch[i] = np.concatenate(
+                        [g_state, np.asarray(
+                            obs_dict["zone_location"].ravel(), dtype=np.float32,
+                        )],
+                    )
+                live_idx.append(i)
+
+            # Single batched forward pass for the live zones (if any).
+            # act_of maps zone slot -> (batch position, action, logprob, value).
+            act_of: dict[int, tuple[int, int, float, float]] = {}
+            if live_idx:
+                _act_t, _logp_t, _val_t = learner.act(
+                    obs_batch[live_idx], mask_batch[live_idx],
+                )
+                act_values = _act_t.astype(np.int64)
+                logprobs = _logp_t.astype(np.float64)
+                if use_state:
+                    # Centralized critic values (D18 fix).
+                    assert isinstance(learner, MAPPO)
+                    assert state_batch is not None
+                    values = learner.value(state_batch[live_idx]).astype(np.float64)
+                else:
+                    values = _val_t.astype(np.float64)
+                for j, i in enumerate(live_idx):
+                    act_of[sel_order[i]] = (
+                        i, int(act_values[j]), float(logprobs[j]), float(values[j]),
+                    )
+
+            # Phase 2: walk the selection order, stepping each agent exactly
+            # once. Dead/completed zones step None (no-op that keeps the walk
+            # aligned); live zones step their batched action. This preserves the
+            # pre-batching attribute-every-action-to-the-selected-agent semantics.
+            for slot in sel_order:
+                agent = f"zone_{slot}"
+                if slot in act_of:
+                    i, act_val, logprob, value = act_of[slot]
+                    turn = int(counts[slot])
+
+                    if act_val == 0:
+                        acts_idle += 1
+                    elif 1 <= act_val <= env._max_pending:
+                        acts_dispatch += 1
+                    else:
+                        acts_relocate += 1
+
+                    buffer.store(
+                        slot, turn, obs_batch[i], mask_batch[i],
+                        act_val, logprob, value,
+                        state=(state_batch[i] if (
+                            use_state and state_batch is not None) else None),
+                    )
+                    counts[slot] += 1
+                    pending[agent] = (slot, turn)
+                    env.step(act_val)
+                else:
+                    env.step(None)
+
+        # Account final episode's KPIs
     if episode_ended:
         kpi = env.kpi_summary()
         served_total += int(kpi["served"])
@@ -912,6 +1034,11 @@ def main() -> None:
                         help="Parallel rollout envs (default: 1 = serial). "
                              "Parallelism is across episodes; zones within a "
                              "turn stay sequential. Use ~n_cores-1.")
+    parser.add_argument("--sequential-decoding", action="store_true", default=False,
+                        help="Enable sequential zone-by-zone decoding within a turn "
+                             "(each zone sees prior zones' actions). Disables batching.")
+    parser.add_argument("--max-relocations-per-turn", type=int, default=0,
+                        help="Max relocations per zone per turn (0 = unlimited)")
     args = parser.parse_args()
 
     algo_cfg: IPPOConfig | MAPPOConfig = (
@@ -950,6 +1077,10 @@ def main() -> None:
         if pct > 1.0:
             pct = pct / 100.0
         env_cfg.target_zone_demand_pct = pct
+    if args.sequential_decoding:
+        env_cfg.sequential_decoding = True
+    if args.max_relocations_per_turn > 0:
+        env_cfg.max_relocations_per_turn = args.max_relocations_per_turn
 
     train_cfg = TrainConfig(
         env_config=env_cfg,

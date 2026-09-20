@@ -182,6 +182,17 @@ class RideGymAEC(AECEnv):
         # driver_id -> target_zone_idx (destination of ongoing relocation)
         self._driver_relocation_target: dict[int, int] = {}
 
+        # Sequential decoding state (shadow copies for incremental updates)
+        self._sequential_mode = config.sequential_decoding
+        self._max_relocations_per_turn = config.max_relocations_per_turn
+        # Shadow copies updated after each zone acts in sequential mode
+        self._shadow_zone_fleet_state: np.ndarray | None = None
+        self._shadow_zone_idle_counts: np.ndarray | None = None
+        self._shadow_pending_per_zone: np.ndarray | None = None
+        # Per-turn tracking for sequential decoding
+        self._claimed_orders_this_turn: set[int] = set()
+        self._relocations_this_turn: dict[int, int] = {}  # zone -> count
+
     # ------------------------------------------------------------------ setup
 
     def _make_order_generator(
@@ -516,6 +527,9 @@ class RideGymAEC(AECEnv):
 
         self._rebuild_caches()
 
+        if self._sequential_mode:
+            self._reset_sequential_state()
+
         self.agents = self.possible_agents[:]
         self._agent_order = self._rng.permutation(self._num_zones)
         self.agent_selection = self.agents[int(self._agent_order[0])]
@@ -537,25 +551,51 @@ class RideGymAEC(AECEnv):
         assert self._last_obs is not None
         zone_idx = self._zone_int_id(agent)
 
-        zone_drivers = float(self._zone_fleet_state[zone_idx, 0])
-        zone_idle_frac = (
-            self._zone_fleet_state[zone_idx, 1] / zone_drivers
-            if zone_drivers > 0 else 0.0
+        use_shadow = (
+            self._sequential_mode
+            and self._shadow_zone_fleet_state is not None
+            and self._shadow_zone_idle_counts is not None
+            and self._shadow_pending_per_zone is not None
         )
-        zone_state = np.array(
-            [
-                zone_drivers,
-                zone_idle_frac,
-                float(self._pending_per_zone[zone_idx]),
-                float(self._zone_fleet_state[zone_idx, 3]),
-            ],
-            dtype=np.float32,
-        )
+
+        if use_shadow:
+            zone_drivers = float(self._shadow_zone_fleet_state[zone_idx, 0])
+            zone_idle_frac = (
+                self._shadow_zone_fleet_state[zone_idx, 1] / zone_drivers
+                if zone_drivers > 0 else 0.0
+            )
+            zone_state = np.array(
+                [
+                    zone_drivers,
+                    zone_idle_frac,
+                    float(self._shadow_pending_per_zone[zone_idx]),
+                    float(self._shadow_zone_fleet_state[zone_idx, 3]),
+                ],
+                dtype=np.float32,
+            )
+        else:
+            zone_drivers = float(self._zone_fleet_state[zone_idx, 0])
+            zone_idle_frac = (
+                self._zone_fleet_state[zone_idx, 1] / zone_drivers
+                if zone_drivers > 0 else 0.0
+            )
+            zone_state = np.array(
+                [
+                    zone_drivers,
+                    zone_idle_frac,
+                    float(self._pending_per_zone[zone_idx]),
+                    float(self._zone_fleet_state[zone_idx, 3]),
+                ],
+                dtype=np.float32,
+            )
 
         return {
             "zone_location": self._zone_centroids_norm[zone_idx],
             "zone_state": zone_state,
-            "all_zone_state": self._zone_fleet_state,
+            "all_zone_state": (
+                self._shadow_zone_fleet_state if use_shadow
+                else self._zone_fleet_state
+            ),
             "pending_orders": self._zone_pending_features[zone_idx],
             "pending_mask": self._zone_pending_mask[zone_idx],
             "pending_passengers": self._zone_pending_features[zone_idx, :, 4],
@@ -571,8 +611,22 @@ class RideGymAEC(AECEnv):
         if self._last_obs is None:
             return mask
         zone_idx = self._zone_int_id(agent)
-        # Dispatch orders: valid if there is at least one dispatchable driver (idle or relocating, D14)
-        has_dispatchable = bool(getattr(self, "_zone_dispatchable_counts", self._zone_idle_counts)[zone_idx] > 0)
+
+        use_shadow = (
+            self._sequential_mode
+            and self._shadow_zone_idle_counts is not None
+            and self._shadow_pending_per_zone is not None
+        )
+
+        if use_shadow:
+            has_dispatchable = bool(self._shadow_zone_idle_counts[zone_idx] > 0)
+            has_idle = bool(self._shadow_zone_idle_counts[zone_idx] > 0)
+        else:
+            # Dispatch orders: valid if there is at least one dispatchable driver (idle or relocating, D14)
+            has_dispatchable = bool(getattr(self, "_zone_dispatchable_counts", self._zone_idle_counts)[zone_idx] > 0)
+            # Relocate actions: only valid if there is a purely IDLE driver in this zone (D14)
+            has_idle = bool(self._zone_idle_counts[zone_idx] > 0)
+
         if has_dispatchable:
             candidates = self._zone_candidate_orders[zone_idx] if zone_idx < len(self._zone_candidate_orders) else []
             for i, cand in enumerate(candidates[: self._max_pending]):
@@ -580,17 +634,21 @@ class RideGymAEC(AECEnv):
                 if cand["order_id"] not in getattr(self, "_claimed_orders_this_turn", set()):
                     mask[1 + i] = True
 
-        # Relocate actions: only valid if there is a purely IDLE driver in this zone (D14)
-        has_idle = bool(self._zone_idle_counts[zone_idx] > 0)
         if has_idle:
+            if use_shadow and self._max_relocations_per_turn > 0:
+                count = self._relocations_this_turn.get(zone_idx, 0)
+                if count >= self._max_relocations_per_turn:
+                    return mask
             neighbor_only = getattr(self._cfg, "neighbor_relocation_only", False)
             neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
+            idle_counts = self._shadow_zone_idle_counts if use_shadow else self._zone_idle_counts
+            pending_per_zone = self._shadow_pending_per_zone if use_shadow else self._pending_per_zone
             for j in neighbours:
                 if j != zone_idx and 0 <= j < self._num_zones:
                     # Surplus-target relocation masking (D24):
                     # Mask out target zone j if it already holds an idle vehicle surplus
-                    idle_j = int(self._zone_idle_counts[j])
-                    pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
+                    idle_j = int(idle_counts[j])
+                    pending_j = int(np.round(pending_per_zone[j] * max(self._num_drivers, 1)))
                     if idle_j <= max(pending_j, 1):
                         mask[1 + self._max_pending + j] = True
         return mask
@@ -613,6 +671,71 @@ class RideGymAEC(AECEnv):
         if 0 <= target_zone < self._num_zones:
             return {"relocate": int(target_zone)}
         return None
+
+    def _apply_action_sequentially(self, action: int, zone_idx: int) -> bool:
+        """Apply action to shadow state for sequential decoding. Returns True if valid."""
+        if not self._sequential_mode:
+            return True
+
+        if (
+            self._shadow_zone_idle_counts is None
+            or self._shadow_pending_per_zone is None
+            or self._shadow_zone_fleet_state is None
+        ):
+            return True
+
+        decoded = self._decode_action(action, zone_idx)
+        if decoded is None:
+            return True
+
+        if "orders" in decoded:
+            oid = decoded["orders"][0]
+            if oid in self._claimed_orders_this_turn:
+                return False
+            self._claimed_orders_this_turn.add(oid)
+            self._shadow_zone_idle_counts[zone_idx] = max(
+                0, self._shadow_zone_idle_counts[zone_idx] - 1
+            )
+            self._shadow_pending_per_zone[zone_idx] = max(
+                0.0, self._shadow_pending_per_zone[zone_idx] - 1.0 / max(self._num_drivers, 1)
+            )
+            self._shadow_zone_fleet_state[zone_idx, 1] = (
+                self._shadow_zone_idle_counts[zone_idx] / max(self._num_drivers, 1)
+            )
+            return True
+
+        if "relocate" in decoded:
+            target_zone = decoded["relocate"]
+            if self._max_relocations_per_turn > 0:
+                count = self._relocations_this_turn.get(zone_idx, 0)
+                if count >= self._max_relocations_per_turn:
+                    return False
+            if self._shadow_zone_idle_counts[zone_idx] <= 0:
+                return False
+            self._relocations_this_turn[zone_idx] = (
+                self._relocations_this_turn.get(zone_idx, 0) + 1
+            )
+            self._shadow_zone_idle_counts[zone_idx] -= 1
+            self._shadow_zone_idle_counts[target_zone] += 1
+            self._shadow_zone_fleet_state[zone_idx, 1] = (
+                self._shadow_zone_idle_counts[zone_idx] / max(self._num_drivers, 1)
+            )
+            self._shadow_zone_fleet_state[target_zone, 1] = (
+                self._shadow_zone_idle_counts[target_zone] / max(self._num_drivers, 1)
+            )
+            return True
+
+        return True
+
+    def _reset_sequential_state(self) -> None:
+        """Reset shadow state and per-turn tracking for a new turn."""
+        if not self._sequential_mode:
+            return
+        self._shadow_zone_fleet_state = self._zone_fleet_state.copy()
+        self._shadow_zone_idle_counts = self._zone_idle_counts.copy()
+        self._shadow_pending_per_zone = self._pending_per_zone.copy()
+        self._claimed_orders_this_turn = set()
+        self._relocations_this_turn = {}
 
     def _advance_selection(self) -> None:
         if not self.agents:
@@ -898,6 +1021,8 @@ class RideGymAEC(AECEnv):
             self._actions_this_turn = {}
             self._turn_complete = False
             self._claimed_orders_this_turn = set()
+            if self._sequential_mode:
+                self._reset_sequential_state()
 
     def _kpi_counts(self) -> dict[str, float]:
         from ride_gym.enums import OrderStatus

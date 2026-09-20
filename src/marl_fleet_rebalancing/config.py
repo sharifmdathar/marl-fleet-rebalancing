@@ -134,6 +134,16 @@ class EnvConfig:
     # 0.0 disables (legacy behavior). Typical: 1.0-3.0.
     prospective_bonus_scale: float = 0.0
 
+    # --- Sequential decoding (coordination fix) ---
+    # When True, zones decide actions sequentially within a turn: each zone
+    # sees the effects of earlier zones' actions (claimed orders, relocated
+    # drivers) before making its decision. This improves coordination but
+    # disables batched forward passes in training.
+    sequential_decoding: bool = False
+    # Maximum relocations a single zone can command per turn (0 = unlimited).
+    # Prevents any one zone from hoarding all relocation capacity.
+    max_relocations_per_turn: int = 0
+
     # --- Seeding ---
     seed: int | None = None
 
