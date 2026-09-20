@@ -101,10 +101,17 @@ def evaluate_deterministic(
     rewrote its RNG stream and silently changed subsequent training episodes.
     The caller owns both envs; this function never resets anything after the
     val episodes.
+
+    Sequential-decoding envs are evaluated with sequential semantics: zones
+    are observed and stepped one at a time so each zone's observation sees
+    the shadow-state effects of earlier zones' actions, matching the
+    training-time rollout protocol. Batched envs keep the single batched
+    forward pass.
     """
     served = cancelled = 0
     empty_km = 0.0
     wait_sum = 0.0
+    sequential = bool(getattr(env, "_sequential_mode", False))
     for i in range(episodes):
         env.reset(seed=base_seed + i)
         while env.agents and not env._terminated:
@@ -115,6 +122,20 @@ def evaluate_deterministic(
                         break
                     env.step(None)
                 continue
+
+            if sequential:
+                for slot in order:
+                    agent = f"zone_{slot}"
+                    obs_vec = obs_to_vector(env.observe(agent))
+                    mask = env.action_mask(agent)
+                    act, _, _ = learner.act(
+                        obs_vec[None, :], mask[None, :], deterministic=True,
+                    )
+                    act_val = int(act[0])
+                    env.step(act_val)
+                    env._apply_action_sequentially(act_val, slot)
+                continue
+
             obs_list, mask_list = [], []
             for slot in order:
                 agent = f"zone_{slot}"

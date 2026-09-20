@@ -82,6 +82,30 @@ def evaluate_policy_on_env(
             ))
 
             if policy_type == "checkpoint":
+                if getattr(env, "_sequential_mode", False):
+                    # Sequential decoding: observe/decide/step one zone at a
+                    # time so each zone sees the shadow-state effects of
+                    # earlier zones' actions within the turn (matches the
+                    # training rollout protocol).
+                    for slot in order:
+                        agent = f"zone_{slot}"
+                        obs = env.observe(agent)
+                        mask = env.action_mask(agent)
+                        act, _, _ = policy.act(
+                            obs_to_vector(obs)[None, :], mask[None, :],
+                            deterministic=deterministic,
+                        )
+                        act_val = int(act[0])
+                        if act_val == 0:
+                            acts_idle += 1
+                        elif 1 <= act_val <= env._max_pending:
+                            acts_dispatch += 1
+                        else:
+                            acts_relocate += 1
+                        env.step(act_val)
+                        env._apply_action_sequentially(act_val, slot)
+                    continue
+
                 obs_list = []
                 mask_list = []
                 for slot in order:
@@ -115,6 +139,8 @@ def evaluate_policy_on_env(
                     else:
                         acts_relocate += 1
                     env.step(act_val)
+                    if getattr(env, "_sequential_mode", False):
+                        env._apply_action_sequentially(act_val, slot)
 
             elif policy_type == "random":
                 for slot in order:
@@ -129,6 +155,8 @@ def evaluate_policy_on_env(
                     else:
                         acts_relocate += 1
                     env.step(act_val)
+                    if getattr(env, "_sequential_mode", False):
+                        env._apply_action_sequentially(act_val, slot)
             else:
                 raise ValueError(f"Unknown policy_type: {policy_type}")
 
