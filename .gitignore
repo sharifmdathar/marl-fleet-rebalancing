@@ -42,6 +42,8 @@ Thumbs.db
 cache/
 data/
 dataset/
+# Ignore dataset symlink as well (raw data lives outside the repo)
+/dataset
 *.gpickle
 *.gpickle.matrices.npz
 
