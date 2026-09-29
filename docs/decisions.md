@@ -618,6 +618,22 @@ Format: date, status, decision, why, what would change our mind.
 - Revisit if: attention pooling under-performs the MLP on train/val KPIs
   once training starts — `arch="mlp"` remains the default and a same-effort
   fallback, not a one-way door.
+- **Pilot (2026-09-29, NOT a reported result — AGENTS.md rule 1 minimum is
+  5 seeds; this is 2, on Bandra, short horizon, informal engineering
+  signal only):** IPPO, 40 iterations, seeds {0,1}, identical hyperparams.
+  Best validation service rate: mlp 41.7%/41.7% (both seeds peaked at
+  it30, one seed decayed to 37.6% by it40); attention 44.3%/44.2% (one
+  peaked it30 and decayed to 34.2%, one still rising at it40 = run end).
+  Both trained cleanly (service rate 35%->45%, entropy falling, EV rising,
+  no NaNs/divergence). Attention costs ~1.8x wall-clock/iteration (13.5s
+  vs 7.5s rollout) from the added attention ops. Read: too noisy and too
+  small-scale (25 zones, no real neighbor-topology pressure) to pick a
+  winner — Bandra doesn't stress the property `attention` was built for
+  (62-zone NYC neighbor structure + larger pending sets). Decision:
+  `arch="mlp"` stays the default for now (cheaper, no regression seen);
+  before the real study commits seed-compute to either, re-run this same
+  A/B directly on NYC S0 (now that `docs/nyc-pipeline.md` data exists)
+  rather than deciding from the Bandra pilot alone.
 
 
 
