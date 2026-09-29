@@ -19,7 +19,7 @@ import torch.nn as nn
 from marl_fleet_rebalancing.agents.ippo import RolloutBuffer, _explained_variance
 from marl_fleet_rebalancing.networks.encoder import (
     CentralizedCritic,
-    ZoneActorCritic,
+    build_zone_policy,
 )
 
 
@@ -30,6 +30,7 @@ class MAPPOConfig:
 
     # --- Network ---
     hidden_dim: int = 256
+    arch: str = "mlp"              # "mlp" or "attention" (D33); actor only
 
     # --- Rollout / optimization ---
     rollout_episodes: int = 6      # episodes collected per PPO update
@@ -61,13 +62,17 @@ class MAPPO:
         action_dim: int,
         config: MAPPOConfig,
         device: torch.device | None = None,
+        num_zones: int | None = None,
+        max_pending: int | None = None,
+        hist_len: int | None = None,
     ) -> None:
         self.config = config
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu",
         )
-        self.actor = ZoneActorCritic(
-            observation_dim, action_dim, config.hidden_dim,
+        self.actor = build_zone_policy(
+            config.arch, observation_dim, action_dim, config.hidden_dim,
+            num_zones=num_zones, max_pending=max_pending, hist_len=hist_len,
         ).to(self.device)
         self.critic = CentralizedCritic(
             state_dim, config.hidden_dim,

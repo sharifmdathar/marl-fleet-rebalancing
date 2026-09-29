@@ -89,8 +89,12 @@ def load_trained_policy(
 
     # Pre-inspect checkpoint weights to accurately size actor and critic (backward compatibility)
     weights = torch.load(checkpoint_path, map_location=torch.device("cpu"), weights_only=True)
+    ckpt_arch = run_manifest.get("algo_config", {}).get("arch", "mlp")
 
-    if "actor" in weights and "trunk.0.weight" in weights["actor"]:
+    # trunk.0 is the flat-MLP's first layer (input=observation_dim); the
+    # attention encoder's trunk.0 takes the pooled context dim instead, so
+    # this backward-compat resize only applies to the mlp arch (D33).
+    if ckpt_arch == "mlp" and "actor" in weights and "trunk.0.weight" in weights["actor"]:
         ckpt_obs_dim = weights["actor"]["trunk.0.weight"].shape[1]
         if ckpt_obs_dim != observation_dim:
             observation_dim = ckpt_obs_dim

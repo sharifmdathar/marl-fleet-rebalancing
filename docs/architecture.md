@@ -37,7 +37,10 @@ marl_fleet_rebalancing/
     tune_lp_baseline.py              # LP baseline hyperparameter sweep (train/val shifts only)
   networks/
     encoder.py                       # obs flattening + ZoneActorCritic MLP
-                                     # + CentralizedCritic (MAPPO value head)
+                                     # + ZoneAttentionEncoder (D33, opt-in via
+                                     # IPPOConfig/MAPPOConfig.arch) + a
+                                     # build_zone_policy() factory + Centra-
+                                     # lizedCritic (MAPPO value head)
   visualization.py                   # custom MP4 renderer + interactive viewer
 references/                          # diagnosis notes (e.g. lp-rebalancer-zero-transfers.md)
 data/

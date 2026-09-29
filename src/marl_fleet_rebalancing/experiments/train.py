@@ -433,6 +433,11 @@ def _worker_init(
     torch.set_num_threads(1)
     env, _, _ = _make_env(env_name, 0, None, base_env_cfg=env_cfg)
     cpu = torch.device("cpu")
+    arch_shape = {
+        "num_zones": env._num_zones,
+        "max_pending": env_cfg.max_pending,
+        "hist_len": env_cfg.demand_history_len,
+    }
     if use_state:
         assert isinstance(algo_cfg, MAPPOConfig)
         learner: IPPO | MAPPO = MAPPO(
@@ -441,6 +446,7 @@ def _worker_init(
             action_dim=action_dim,
             config=algo_cfg,
             device=cpu,
+            **arch_shape,
         )
     else:
         assert isinstance(algo_cfg, IPPOConfig)
@@ -449,6 +455,7 @@ def _worker_init(
             action_dim=action_dim,
             config=algo_cfg,
             device=cpu,
+            **arch_shape,
         )
     _WORKER_CTX.update(
         env=env,
@@ -560,6 +567,11 @@ def train(
     sample_obs = env.observe(any_agent)
     zone_loc_dim = len(sample_obs["zone_location"].ravel())
     state_dim = (len(env.state()) + zone_loc_dim) if use_state else None
+    arch_shape = {
+        "num_zones": env._num_zones,
+        "max_pending": env_cfg.max_pending,
+        "hist_len": env_cfg.demand_history_len,
+    }
     if use_state:
         assert isinstance(train_cfg.algo_config, MAPPOConfig)
         state_dim_: int = state_dim if state_dim is not None else 0
@@ -568,6 +580,7 @@ def train(
             state_dim=state_dim_,
             action_dim=action_dim,
             config=train_cfg.algo_config,
+            **arch_shape,
         )
     else:
         assert isinstance(train_cfg.algo_config, IPPOConfig)
@@ -575,6 +588,7 @@ def train(
             observation_dim=observation_dim,
             action_dim=action_dim,
             config=train_cfg.algo_config,
+            **arch_shape,
         )
 
     # ---- run manifest: config + seed + scenario (AGENTS rules) ----------
@@ -837,6 +851,9 @@ def main() -> None:
                         help="Penalty per cancelled order in zone (default: 2.0)")
     parser.add_argument("--entropy-coef", type=float, default=None,
                         help="PPO entropy bonus coefficient (default: 0.01)")
+    parser.add_argument("--arch", choices=["mlp", "attention"], default=None,
+                        help="Policy trunk (default: mlp; attention = D33 "
+                             "masked-attention pooling over orders/zones)")
     parser.add_argument("--nyc-window-limit", type=int, default=None,
                         help="Per-window order cap for NYC (sample-rate lever)")
     parser.add_argument("--rollout-episodes", type=int, default=None,
@@ -869,6 +886,8 @@ def main() -> None:
         algo_cfg.rollout_episodes = args.rollout_episodes
     if args.entropy_coef is not None:
         algo_cfg.entropy_coef = args.entropy_coef
+    if args.arch is not None:
+        algo_cfg.arch = args.arch
 
     env_cfg = BandraConfig() if args.env == "bandra" else NYCConfig()
     if args.alpha is not None:

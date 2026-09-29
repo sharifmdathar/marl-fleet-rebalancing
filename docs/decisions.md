@@ -577,6 +577,48 @@ Format: date, status, decision, why, what would change our mind.
   sequentially per turn. Eliminates intra-turn dispatch collision no-ops and
   guarantees 100% fresh action masks matching standard PettingZoo AEC semantics.
 
+## D33 — Attention policy trunk as a plug-in alternative to the flat MLP
+- Date: 2026-09-29, Status: accepted
+- Problem: the TODO's own Phase 5 plan calls for an "architecture choice
+  (MLP vs GNN vs attention)" step before training starts. The existing
+  `ZoneActorCritic` trunk flattens `all_zone_state` (62 zones) and
+  `pending_orders` (30 slots) into one fixed-order vector, so the network
+  has to relearn from scratch which entries are which zone/order, and gets
+  no benefit from the `neighbor_mask`/`demand_hist` fields added in D30 —
+  the plain MLP has no structural reason to weight a neighbor zone
+  differently from a distant one. This is a network-only change: no env
+  dynamics, reward, or observation/action space is touched (the forbidden-
+  actions list in AGENTS.md governs those, not the policy trunk), so no
+  config version bump.
+- Decision: add `ZoneAttentionEncoder` (`networks/encoder.py`) as a second
+  trunk, selected via `IPPOConfig.arch` / `MAPPOConfig.arch` (`"mlp"`
+  default, `"attention"` opt-in) through a `build_zone_policy()` factory.
+  It reconstructs the flat obs vector's known layout (same key order as
+  `obs_to_vector`, so no wrapper or buffer change) into two sets and pools
+  each with masked attention using the zone's own state as the query:
+  1. Pending orders — permutation-invariant pooling over the (masked)
+     order set, instead of a fixed-slot concatenation that the MLP has to
+     treat positionally.
+  2. All-zone state + demand history — one pooling layer over the 62
+     zones' `(all_zone_state, demand_hist)` embeddings, with an additive
+     learned bias from `neighbor_mask` so the network starts with "attend
+     to my neighbors first" as an inductive prior (matches the
+     `neighbor_relocation_only` action-space restriction) but is not
+     hard-limited to them — useful under demand shift, where the
+     training-time neighbor prior may not transfer.
+  Both algorithms share this trunk (only the critic differs, per D4), so
+  IPPO vs MAPPO stays a one-variable comparison; `arch` is an orthogonal
+  axis, off by default.
+- Verification (`tests/test_attention_arch.py`, all in the existing
+  Bandra-tiny-config style, no NYC/real training run): I/O-contract parity
+  with `ZoneActorCritic.act()`/`.forward()`, a hand-built empty-pending-set
+  case (no NaN from softmax over an all-masked row), and one full
+  `collect_rollout` + `IPPO.update()` PPO step with `arch="attention"`
+  checked for finite losses. Full suite: 23/23 pass.
+- Revisit if: attention pooling under-performs the MLP on train/val KPIs
+  once training starts — `arch="mlp"` remains the default and a same-effort
+  fallback, not a one-way door.
+
 
 
 

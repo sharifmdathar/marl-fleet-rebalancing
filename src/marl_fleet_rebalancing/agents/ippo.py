@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from marl_fleet_rebalancing.networks.encoder import ZoneActorCritic
+from marl_fleet_rebalancing.networks.encoder import build_zone_policy
 
 
 @dataclass
@@ -24,6 +24,7 @@ class IPPOConfig:
 
     # --- Network ---
     hidden_dim: int = 256
+    arch: str = "mlp"              # "mlp" or "attention" (D33)
 
     # --- Rollout / optimization ---
     rollout_episodes: int = 6      # episodes collected per PPO update
@@ -183,13 +184,17 @@ class IPPO:
         action_dim: int,
         config: IPPOConfig,
         device: torch.device | None = None,
+        num_zones: int | None = None,
+        max_pending: int | None = None,
+        hist_len: int | None = None,
     ) -> None:
         self.config = config
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu",
         )
-        self.policy = ZoneActorCritic(
-            observation_dim, action_dim, config.hidden_dim,
+        self.policy = build_zone_policy(
+            config.arch, observation_dim, action_dim, config.hidden_dim,
+            num_zones=num_zones, max_pending=max_pending, hist_len=hist_len,
         ).to(self.device)
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(), lr=config.learning_rate,
