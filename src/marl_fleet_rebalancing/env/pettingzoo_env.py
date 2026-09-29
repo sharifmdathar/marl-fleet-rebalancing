@@ -161,6 +161,9 @@ class RideGymAEC(AECEnv):
         self._zone_fleet_state = np.zeros(
             (self._num_zones, 4), dtype=np.float32,
         )
+        self._hist_len = max(int(getattr(config, "demand_history_len", 4)), 1)
+        self._demand_history: deque[np.ndarray] = deque(maxlen=self._hist_len)
+        self._demand_hist_arr = np.zeros((self._num_zones, self._hist_len), dtype=np.float32)
         self._zone_centroids_norm = self._normalized_centroids()
 
         # Per-zone candidate orders (Point B: sorted closest-first per zone)
@@ -336,6 +339,7 @@ class RideGymAEC(AECEnv):
     def _make_obs_space(self) -> Dict:
         z = self._num_zones
         p = self._max_pending
+        h = max(int(getattr(self._cfg, "demand_history_len", 4)), 1)
         # Zone-controller observation (D23): own-zone state + all-zone
         # fleet state + pending candidate orders + clock. Zone identity comes
         # from zone_location.
@@ -346,6 +350,8 @@ class RideGymAEC(AECEnv):
             "pending_orders": Box(0.0, 1.0, shape=(p, 6), dtype=np.float32),
             "pending_mask": Box(0.0, 1.0, shape=(p,), dtype=np.float32),
             "pending_passengers": Box(0.0, 1.0, shape=(p,), dtype=np.float32),
+            "neighbor_mask": Box(0.0, 1.0, shape=(z,), dtype=np.float32),
+            "demand_hist": Box(0.0, 1.0, shape=(z, h), dtype=np.float32),
             "time_frac": Box(0.0, 1.0, shape=(1,), dtype=np.float32),
         })
 
@@ -479,6 +485,11 @@ class RideGymAEC(AECEnv):
         self._zone_fleet_state[:, 3] = self._pending_per_zone - (zone_idle / max(self._num_drivers, 1))
         self._zone_idle_counts = zone_idle.astype(np.int64)
         self._zone_dispatchable_counts = zone_dispatchable.astype(np.int64)
+        self._demand_history.append(self._pending_per_zone.copy())
+        self._demand_hist_arr[:] = 0.0
+        n_hist = len(self._demand_history)
+        if n_hist:
+            self._demand_hist_arr[:, -n_hist:] = np.stack(list(self._demand_history), axis=1)
 
         # Clear active relocation target if driver is no longer in status RELOCATING
         if hasattr(self, "_driver_relocation_target"):
@@ -511,6 +522,7 @@ class RideGymAEC(AECEnv):
         self._driver_commander.clear()
         self._driver_relocator.clear()
         self._driver_relocation_target.clear()
+        self._demand_history.clear()
         self._claimed_orders_this_turn: set[int] = set()
         self._seen_cancelled_ids: set[int] = set()
 
@@ -551,6 +563,8 @@ class RideGymAEC(AECEnv):
             ],
             dtype=np.float32,
         )
+        neigh_vec = np.zeros(self._num_zones, dtype=np.float32)
+        neigh_vec[self._legal_relocate_targets(zone_idx)] = 1.0
 
         return {
             "zone_location": self._zone_centroids_norm[zone_idx],
@@ -559,11 +573,30 @@ class RideGymAEC(AECEnv):
             "pending_orders": self._zone_pending_features[zone_idx],
             "pending_mask": self._zone_pending_mask[zone_idx],
             "pending_passengers": self._zone_pending_features[zone_idx, :, 4],
+            "neighbor_mask": neigh_vec,
+            "demand_hist": self._demand_hist_arr,
             "time_frac": np.array(
                 [min(self.env.time / max(self.env.horizon, 1e-9), 1.0)],
                 dtype=np.float32,
             ),
         }
+
+    def _legal_relocate_targets(self, zone_idx: int) -> list[int]:
+        counts = getattr(self, "_zone_idle_counts", None)
+        if self._last_obs is None or counts is None:
+            return []
+        if not bool(counts[zone_idx] > 0):
+            return []
+        out: list[int] = []
+        neighbor_only = getattr(self._cfg, "neighbor_relocation_only", False)
+        neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
+        for j in neighbours:
+            if j != zone_idx and 0 <= j < self._num_zones:
+                idle_j = int(counts[j])
+                pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
+                if idle_j <= max(pending_j, 1):
+                    out.append(int(j))
+        return out
 
     def action_mask(self, agent: str) -> np.ndarray:
         mask = np.zeros(self._action_dim, dtype=bool)
@@ -580,19 +613,9 @@ class RideGymAEC(AECEnv):
                 if cand["order_id"] not in getattr(self, "_claimed_orders_this_turn", set()):
                     mask[1 + i] = True
 
-        # Relocate actions: only valid if there is a purely IDLE driver in this zone (D14)
-        has_idle = bool(self._zone_idle_counts[zone_idx] > 0)
-        if has_idle:
-            neighbor_only = getattr(self._cfg, "neighbor_relocation_only", False)
-            neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
-            for j in neighbours:
-                if j != zone_idx and 0 <= j < self._num_zones:
-                    # Surplus-target relocation masking (D24):
-                    # Mask out target zone j if it already holds an idle vehicle surplus
-                    idle_j = int(self._zone_idle_counts[j])
-                    pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
-                    if idle_j <= max(pending_j, 1):
-                        mask[1 + self._max_pending + j] = True
+        # Relocate actions mirror _legal_relocate_targets (single source of truth)
+        for j in self._legal_relocate_targets(zone_idx):
+            mask[1 + self._max_pending + j] = True
         return mask
 
     # ---------------------------------------------------------------- actions

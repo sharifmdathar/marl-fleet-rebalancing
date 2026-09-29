@@ -19,7 +19,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.0 (D29: decode enforces neighbor + zone ownership)
+    Version: 2.1 (D30: neighbor_mask + demand_hist in obs)
     """
 
     # --- Fleet ---
@@ -133,6 +133,7 @@ class EnvConfig:
     # Eliminates the 8-18 turn credit delay that made relocation perpetually unprofitable.
     # 0.0 disables (legacy behavior). Typical: 1.0-3.0.
     prospective_bonus_scale: float = 0.0
+    demand_history_len: int = 4
 
     # --- Seeding ---
     seed: int | None = None

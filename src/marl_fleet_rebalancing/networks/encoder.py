@@ -29,6 +29,8 @@ def obs_to_vector(obs: dict[str, np.ndarray]) -> np.ndarray:
             obs["pending_orders"].ravel(),
             obs["pending_mask"].ravel(),
             obs["pending_passengers"].ravel(),
+            obs["neighbor_mask"].ravel(),
+            obs["demand_hist"].ravel(),
             obs["time_frac"].ravel(),
         ]
     ).astype(np.float32)
@@ -39,7 +41,8 @@ def obs_dim(obs_space: Dict) -> int:
     total = 0
     for key in (
         "zone_location", "zone_state", "all_zone_state", "pending_orders",
-        "pending_mask", "pending_passengers", "time_frac",
+        "pending_mask", "pending_passengers", "neighbor_mask", "demand_hist",
+        "time_frac",
     ):
         total += int(np.prod(obs_space[key].shape))
     return total

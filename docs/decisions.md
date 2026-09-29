@@ -558,6 +558,12 @@ Format: date, status, decision, why, what would change our mind.
   global-pending dispatch fallback. Mask already enforced both; decode was
   the hole. On-mask behavior unchanged. Config 1.9 → 2.0.
 
+## D30 — Neighbor legality + demand history in obs
+- Date: 2026-09-29, Status: accepted
+- Added `neighbor_mask (z,)` mirroring relocate legality and `demand_hist
+  (z, K=4)` pending history. Single `_legal_relocate_targets` helper feeds
+  both mask and obs. Config 2.0 → 2.1.
+
 
 
 
