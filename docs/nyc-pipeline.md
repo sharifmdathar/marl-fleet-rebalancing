@@ -2,6 +2,19 @@
 
 How to set up the NYC Manhattan study area for experiments.
 
+Status (2026-09-29): pipeline run locally against `dataset/fhvhv_tripdata_2026-04.parquet`
++ `dataset/taxi_zones/` — Stage 0 (zone_centroids, 263 zones), Stage 1
+(manhattan.gpickle, 4869 nodes/10480 edges), Stage 3 (splits: 84 train / 12
+val / 12 test windows, 62 in-region zones, manifest saved) all reproduced
+the file structure below with no deviations. Stage 2 (single-window
+`orders.parquet`) was skipped — `build_splits` calls it internally per
+window and nothing else in the codebase reads the single-window file.
+Verified `NYCConfig` + `RideGymAEC` construct and reset on the real data
+(62 zones, action_dim 93, matching `docs/spaces-freeze.md`). `data/nyc/`
+and `dataset/` stay git-ignored (large/regeneratable); anyone else on this
+repo reproduces them by re-running the stages below against their own copy
+of the two manual downloads.
+
 ## Prerequisites
 
 Install data extras:
