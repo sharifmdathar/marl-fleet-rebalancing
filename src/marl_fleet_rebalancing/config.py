@@ -19,7 +19,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 1.9 (D28: relocation arrival bonus & NYC action-space compression)
+    Version: 2.0 (D29: decode enforces neighbor + zone ownership)
     """
 
     # --- Fleet ---

@@ -606,11 +606,13 @@ class RideGymAEC(AECEnv):
                 candidates = self._zone_candidate_orders[zone_idx]
                 if idx < len(candidates):
                     return {"orders": [candidates[idx]["order_id"]]}
-            elif idx < len(self._current_pending):
-                return {"orders": [self._current_pending[idx]["order_id"]]}
             return None
         target_zone = action - self._max_pending - 1
-        if 0 <= target_zone < self._num_zones:
+        if 0 <= target_zone < self._num_zones and target_zone != zone_idx:
+            if getattr(self._cfg, "neighbor_relocation_only", False):
+                neighbours = self.env.region_neighbours[zone_idx] if zone_idx < len(self.env.region_neighbours) else []
+                if target_zone not in neighbours:
+                    return None
             return {"relocate": int(target_zone)}
         return None
 

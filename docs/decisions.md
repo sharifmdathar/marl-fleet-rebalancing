@@ -552,6 +552,12 @@ Format: date, status, decision, why, what would change our mind.
   Recommend `--entropy-coef 0.05` for the first 50 iterations, then anneal
   to 0.01. This is a judgment call to be validated on train/val only.
 
+## D29 — Decode enforces neighbor + zone ownership
+- Date: 2026-09-29, Status: accepted
+- `_decode_action` now rejects non-neighbor relocate targets and drops the
+  global-pending dispatch fallback. Mask already enforced both; decode was
+  the hole. On-mask behavior unchanged. Config 1.9 → 2.0.
+
 
 
 
