@@ -159,19 +159,15 @@ def evaluate_policy_on_env(
             ))
 
             if policy_type == "checkpoint":
-                obs_list = []
-                mask_list = []
                 for slot in order:
                     agent = f"zone_{slot}"
                     obs = env.observe(agent)
-                    obs_list.append(obs_to_vector(obs))
-                    mask_list.append(env.action_mask(agent))
-
-                actions, _, _ = policy.act(
-                    np.stack(obs_list), np.stack(mask_list), deterministic=deterministic,
-                )
-                for slot, act_v in zip(order, actions):
-                    act_val = int(act_v)
+                    mask = env.action_mask(agent)
+                    obs_vec = obs_to_vector(obs)
+                    actions, _, _ = policy.act(
+                        obs_vec[None, :], mask[None, :], deterministic=deterministic,
+                    )
+                    act_val = int(actions[0])
                     if act_val == 0:
                         acts_idle += 1
                     elif 1 <= act_val <= env._max_pending:

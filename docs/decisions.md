@@ -570,6 +570,14 @@ Format: date, status, decision, why, what would change our mind.
   The commander (initiating zone) now bears the empty distance cost directly.
   Config 2.1 → 2.2.
 
+## D32 — Sequential rollout and eval stepping with fresh action masks
+- Date: 2026-09-29, Status: accepted
+- Unified rollout collection (`train.py:collect_rollout`) and shift evaluation
+  (`shift_eval.py:evaluate_policy_on_env`) to observe, mask, and step agents
+  sequentially per turn. Eliminates intra-turn dispatch collision no-ops and
+  guarantees 100% fresh action masks matching standard PettingZoo AEC semantics.
+
+
 
 
 
