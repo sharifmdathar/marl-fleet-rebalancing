@@ -885,9 +885,9 @@ class RideGymAEC(AECEnv):
         zone_rewards = self._compute_zone_rewards(info.get("events", {}), dispatched_this_turn)
 
         # Standard AEC delivery: each agent reads its attributed reward
-        for a in self.agents:
-            zi = self._zone_int_id(a)
-            self.rewards[a] += float(zone_rewards[zi])
+        self.rewards = {
+            a: float(zone_rewards[self._zone_int_id(a)]) for a in self.agents
+        }
         self._accumulate_rewards()
 
         done_flag = bool(dones["__all__"])
@@ -964,8 +964,8 @@ class RideGymAEC(AECEnv):
             self.infos = {a: {} for a in remaining}
             return
         current = self.agent_selection
-        self.rewards[current] = 0.0
         self._cumulative_rewards[current] = 0.0
+        self.rewards = {a: 0.0 for a in self.agents}
         act_val = 0 if action is None else int(action)
         self._actions_this_turn[current] = act_val
         if 1 <= act_val <= self._max_pending:
