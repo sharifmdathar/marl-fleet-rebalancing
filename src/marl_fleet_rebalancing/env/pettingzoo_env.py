@@ -713,21 +713,15 @@ class RideGymAEC(AECEnv):
                     bonus = prospective_bonus * pending_at_dest
                     local_rewards[relocator] += bonus
 
-        # 2. Empty deadhead distance penalty (-beta) with shared relocation cost
+        # 2. Empty deadhead distance penalty (-beta) charged to commanding zone
         for did, event in events.items():
             if event.get("is_empty_move", False):
                 empty_m = float(event.get("distance_moved", 0.0))
                 self._episode_empty_m += empty_m
                 empty_km = empty_m / _M_PER_KM / max(cfg.empty_distance_norm_km, 1e-9)
                 commander = self._driver_commander.get(did)
-                reloc_target = self._driver_relocation_target.get(did)
 
-                if reloc_target is not None and commander is not None and commander != reloc_target:
-                    # Relocation is a cooperative transfer: sender and receiver share the empty travel cost 50/50
-                    local_rewards[commander] -= 0.5 * cfg.beta * empty_km
-                    if 0 <= reloc_target < self._num_zones:
-                        local_rewards[reloc_target] -= 0.5 * cfg.beta * empty_km
-                elif commander is not None and 0 <= commander < self._num_zones:
+                if commander is not None and 0 <= commander < self._num_zones:
                     local_rewards[commander] -= cfg.beta * empty_km
                 else:
                     if self._last_obs is not None and did in self._last_obs:

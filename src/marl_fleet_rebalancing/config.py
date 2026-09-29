@@ -19,7 +19,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.1 (D30: neighbor_mask + demand_hist in obs)
+    Version: 2.2 (D31: receiver empty penalty removed; commander bears relocation cost)
     """
 
     # --- Fleet ---

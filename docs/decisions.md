@@ -564,6 +564,12 @@ Format: date, status, decision, why, what would change our mind.
   (z, K=4)` pending history. Single `_legal_relocate_targets` helper feeds
   both mask and obs. Config 2.0 → 2.1.
 
+## D31 — Receiver empty deadhead penalty removed
+- Date: 2026-09-29, Status: accepted
+- Removed 50/50 split of relocation empty deadhead penalty on the receiver zone.
+  The commander (initiating zone) now bears the empty distance cost directly.
+  Config 2.1 → 2.2.
+
 
 
 
