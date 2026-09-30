@@ -165,6 +165,16 @@ class TestFixesAndDemand(unittest.TestCase):
         cfg.target_zone_demand_pct = 0.80
         env = RideGymAEC(config=cfg, seed=42)
         env.reset(seed=42)
+        # Completion credit is asserted on its own, so switch off the terms
+        # that share the reward vector: the team blend mixes in the mean of
+        # all zones, and waiting/cancel penalties land in the same dict.
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.cancel_penalty = 0.0
+        credit_cfg.beta = 0.0
+        credit_env = RideGymAEC(config=credit_cfg, seed=42)
+        credit_env.reset(seed=42)
 
         any_agent = env.possible_agents[0]
         obs = env.observe(any_agent)
@@ -174,13 +184,48 @@ class TestFixesAndDemand(unittest.TestCase):
         # 2. Check that target zone 3 has significant pending demand fraction in column 2
         demand_col = obs["all_zone_state"][:, 2]
         self.assertTrue(np.all(demand_col >= 0.0))
-        # 3. Simulate rebalancing assist attribution in reward computation (D23 immediate dispatch credit)
-        env._driver_relocator[1] = 18  # Driver 1 was relocated by Zone 18
-        dispatched_this_turn = [(100, 1, 5)]  # Zone 5 dispatched Driver 1
-        rewards = env._compute_zone_rewards({}, dispatched_this_turn)
-        # Zone 5 is dispatcher, Zone 18 is relocator: both must receive non-zero positive reward
-        self.assertGreater(rewards[5], 0.0)
-        self.assertGreater(rewards[18], 0.0)
+        # 3. Served-demand credit is paid on COMPLETION, not on dispatch: a
+        # zone that only aims a car at a rider earns nothing, and a zone whose
+        # relocated car actually completes a ride earns its share.
+        from ride_gym.enums import OrderStatus
+
+        class _Order:
+            def __init__(self, status, driver):
+                self.status = status
+                self.assigned_driver = driver
+
+        credit_env.env.orders[100] = _Order(OrderStatus.PENDING, None)
+        credit_env._order_dispatcher[100] = 5
+        credit_env._driver_relocator[1] = 18  # driver 1 was relocated by zone 18
+        rewards = credit_env._compute_zone_rewards({}, [])
+        self.assertEqual(rewards[5], 0.0, "dispatch alone must not be paid")
+        self.assertEqual(rewards[18], 0.0, "arrival must not be paid")
+
+        credit_env.env.orders[100] = _Order(OrderStatus.COMPLETED, 1)
+        rewards = credit_env._compute_zone_rewards({}, [])
+        credit5, credit18 = rewards[5], rewards[18]
+        self.assertGreater(credit5, 0.0, "dispatcher is paid on completion")
+        self.assertGreater(credit18, 0.0, "supplying zone is paid on completion")
+        self.assertAlmostEqual(
+            credit5 + credit18, credit_cfg.gamma, places=5,
+            msg="exactly one gamma is paid per completed ride",
+        )
+        self.assertAlmostEqual(
+            credit18 / credit_cfg.gamma, credit_cfg.relocator_share, places=5,
+            msg="supplying zone takes relocator_share",
+        )
+
+        # Paid exactly once: re-crediting the same completion pays nothing more.
+        again = credit_env._compute_zone_rewards({}, [])
+        self.assertEqual(again[5], 0.0)
+        self.assertEqual(again[18], 0.0)
+
+        # A ride completed by a car that was NOT relocated pays the dispatcher
+        # in full, so a normal dispatch is not diluted.
+        credit_env.env.orders[101] = _Order(OrderStatus.COMPLETED, 2)
+        credit_env._order_dispatcher[101] = 7
+        solo = credit_env._compute_zone_rewards({}, [])
+        self.assertAlmostEqual(solo[7], credit_cfg.gamma, places=5)
 
 
 if __name__ == "__main__":

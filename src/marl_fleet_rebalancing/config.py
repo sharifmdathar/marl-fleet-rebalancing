@@ -14,12 +14,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 @dataclass
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.2 (D31: receiver empty penalty removed; commander bears relocation cost)
+    Version: 2.4 (16-zone study config; relocation arrival claim)
     """
 
     # --- Fleet ---
@@ -123,21 +122,29 @@ class EnvConfig:
     # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.15/km, D25).
     alpha: float = 0.2   # weight for passenger waiting time (D25)
     beta: float = 0.15   # weight for empty repositioning distance (cost per empty km, D25)
-    gamma: float = 1.0   # weight for served demand (payoff per completed order, D25)
+    gamma: float = 1.0   # weight for served demand (payoff per COMPLETED order)
     cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
     team_share: float = 0.2  # 80% local credit + 20% team
+    # Share of gamma paid to the zone that SUPPLIED a relocated driver, when
+    # that driver's ride completes. Without it the sending zone earns nothing
+    # from rebalancing, so it learns not to send. 0 disables the split.
+    relocator_share: float = 0.35
 
-    # --- Relocation arrival bonus (D28) ---
-    # When a relocated driver arrives at its destination zone, the relocator zone
-    # receives an immediate bonus: prospective_bonus_scale * pending_demand_at_dest / num_drivers.
-    # Eliminates the 8-18 turn credit delay that made relocation perpetually unprofitable.
-    # 0.0 disables (legacy behavior). Typical: 1.0-3.0.
+    # --- Relocation arrival bonus ---
+    # Paid to the sending zone when its relocated driver arrives, scaled by the
+    # destination's pending demand. OFF by default: it paid for the arrival
+    # itself rather than for the car being useful, which rewarded moving cars
+    # for no reason. Leave at 0.0; raise only as a small bridge if the
+    # completion credit proves too slow to learn through.
     prospective_bonus_scale: float = 0.0
     demand_history_len: int = 4
+    # D34: cap relocation arrivals per zone per turn at that zone's pending
+    # demand. Zones act on the same pre-turn snapshot, so without a claim every
+    # zone picks the same destination. True = demand-based claim, False = legacy.
+    claim_relocation_targets: bool = True
 
     # --- Seeding ---
     seed: int | None = None
-
 
 # ---------------------------------------------------------------------------
 # NYC-specific preset
@@ -145,23 +152,23 @@ class EnvConfig:
 
 @dataclass
 class NYCConfig(EnvConfig):
-    """Configuration for NYC Manhattan study area.
+    """NYC Manhattan study area: 16 busiest taxi zones, real FHVHV demand.
 
-    Zone count: ~62 taxi zones whose centroids fall inside Region A bbox
-    (-74.02, 40.70, -73.93, 40.80); loaded from zone_centroids.csv and passed
-    to RideGym as relocation_centroids (region model = real taxi zones).
+    Zone count is fixed by the dataset manifest (data/nyc16/splits/manifest.json
+    lists the LocationIDs), not by this file — rebuild it with
+    `scripts/build_zone_subset.py --num-zones 16`. 16 zones is ~4x cheaper than
+    the full 62 and sits inside the brief's scale guidance.
 
-    Fleet size: 100 drivers for a 60-minute episode.
+    Fleet and order caps preserve the pressure ratios of the 62-zone build so
+    numbers stay comparable: 100/62 = 1.61 drivers per zone -> 26 drivers;
+    500/100 = 5 orders per driver -> 130 orders per window. LP reached ~72%
+    service rate under the 62-zone ratios, which is the range to expect here.
 
-    max_pending: 30 (D28: measured peak ~28 concurrent; 80 wasted 50+ masked slots)
-
-    Demand: real FHVHV windows from data/nyc/splits via
-    MultiWindowNYCOrderGenerator.
-
-    Network: manhattan.gpickle
+    Network: manhattan.gpickle (unchanged; only the zone subset and demand
+    filtering change).
     """
 
-    num_drivers: int = 100
+    num_drivers: int = 26
     driver_capacity: int = 4
     dt: float = 0.5
     horizon: float = 60.0
@@ -170,17 +177,21 @@ class NYCConfig(EnvConfig):
     max_party_size: int = 3
     order_source: str = "nyc"
     nyc_split: str = "train"
+    nyc_splits_dir: str = "data/nyc16/splits"
     network_path: str = "data/nyc/manhattan.gpickle"
     speed_kmh: float = 30.0
-    nyc_window_limit: int | None = 500
-    max_pending: int = 30     # D28: was 80; actual peak ~28 concurrent
+    nyc_window_limit: int | None = 130
+    # Observed peak concurrent pending over 5 episodes is 15; 16 leaves one
+    # slot of headroom. Sizing this to the data keeps the action space tight
+    # (1 + 16 + 16 = 33) instead of wasting masked slots on empty entries.
+    max_pending: int = 16
     alpha: float = 0.2
     beta: float = 0.15
     gamma: float = 1.0
     cancel_penalty: float = 1.0
     team_share: float = 0.2
-    prospective_bonus_scale: float = 2.0  # D28: immediate relocation arrival credit
-
+    relocator_share: float = 0.35
+    prospective_bonus_scale: float = 0.0
 
 # ---------------------------------------------------------------------------
 # Bandra West preset (for quick local testing)

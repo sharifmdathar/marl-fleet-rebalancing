@@ -18,8 +18,6 @@ state. This keeps the D9 joint dispatch+rebalancing action space while the
 decision granularity is zones, per D10.
 
 All numeric constants come from EnvConfig — no magic numbers here.
-Design decisions are documented in docs/pettingzoo-design-decisions.md and
-docs/decisions.md (D9, D10, D13).
 """
 
 from __future__ import annotations
@@ -52,7 +50,6 @@ from marl_fleet_rebalancing.demand.generators import (
 
 _M_PER_KM = 1000.0
 
-
 def _normalize_xy(
     x: float, y: float, area_min: tuple[float, float], area_range: tuple[float, float],
 ) -> tuple[float, float]:
@@ -60,7 +57,6 @@ def _normalize_xy(
         (x - area_min[0]) / max(area_range[0], 1e-9),
         (y - area_min[1]) / max(area_range[1], 1e-9),
     )
-
 
 class RideGymAEC(AECEnv):
     """PettingZoo AEC environment wrapping a RidePoolEnv with zone-controller agents.
@@ -178,6 +174,9 @@ class RideGymAEC(AECEnv):
         # Local credit assignment mappings (Point A & D16):
         # order_id -> zone_idx (which zone controller dispatched this order)
         self._order_dispatcher: dict[int, int] = {}
+        # Completed order ids already credited this episode, so completion
+        # credit is paid exactly once per ride.
+        self._seen_completed_ids: set[int] = set()
         # driver_id -> zone_idx (which zone controller commanded this driver)
         self._driver_commander: dict[int, int] = {}
         # driver_id -> zone_idx (which zone initiated relocation)
@@ -294,6 +293,19 @@ class RideGymAEC(AECEnv):
         return paths
 
     @staticmethod
+    def _manifest_zone_ids(config: EnvConfig) -> set[int] | None:
+        """Zone subset declared by the splits manifest, if it declares one.
+
+        The manifest is the single source of truth for which taxi zones the
+        study uses, so a zone subset never has to be restated in code.
+        """
+        manifest_path = Path(config.nyc_splits_dir) / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        ids = json.loads(manifest_path.read_text()).get("zone_ids")
+        return {int(v) for v in ids} if ids else None
+
+    @staticmethod
     def _region_centroids(config: EnvConfig, network: OSMnxNetwork) -> list[tuple[float, float]]:
         """Region centres (one per zone-controller agent) in network coordinates.
 
@@ -316,6 +328,13 @@ class RideGymAEC(AECEnv):
                     f"No zone centroids from {config.nyc_zone_centroids_path} "
                     f"fall inside the network bounds {bounds}."
                 )
+            selected = RideGymAEC._manifest_zone_ids(config)
+            if selected is not None:
+                inside = inside[inside["LocationID"].isin(selected)]
+                if inside.empty:
+                    raise ValueError(
+                        f"manifest zone_ids {sorted(selected)} match no in-bounds centroid."
+                    )
             return list(zip(inside["lon"].astype(float), inside["lat"].astype(float)))
 
         rows, cols = config.relocation_grid
@@ -519,11 +538,13 @@ class RideGymAEC(AECEnv):
         self._prev_served = 0
         self._episode_empty_m = 0.0
         self._order_dispatcher.clear()
+        self._seen_completed_ids.clear()
         self._driver_commander.clear()
         self._driver_relocator.clear()
         self._driver_relocation_target.clear()
         self._demand_history.clear()
         self._claimed_orders_this_turn: set[int] = set()
+        self._reloc_inbound_this_turn: dict[int, int] = {}
         self._seen_cancelled_ids: set[int] = set()
 
         self._rebuild_caches()
@@ -590,12 +611,20 @@ class RideGymAEC(AECEnv):
         out: list[int] = []
         neighbor_only = getattr(self._cfg, "neighbor_relocation_only", False)
         neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
+        inbound = getattr(self, "_reloc_inbound_this_turn", None)
+        claim = bool(getattr(self._cfg, "claim_relocation_targets", True))
         for j in neighbours:
             if j != zone_idx and 0 <= j < self._num_zones:
                 idle_j = int(counts[j])
                 pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
-                if idle_j <= max(pending_j, 1):
-                    out.append(int(j))
+                if idle_j > max(pending_j, 1):
+                    continue
+                # D34: intra-turn arrival claim. Every zone acts on the same
+                # pre-turn snapshot, so without a claim they all pick the same
+                # destination and flood it (104 drivers into one zone per turn).
+                if claim and inbound is not None and int(inbound.get(j, 0)) >= max(pending_j, 1):
+                    continue
+                out.append(int(j))
         return out
 
     def action_mask(self, agent: str) -> np.ndarray:
@@ -652,6 +681,22 @@ class RideGymAEC(AECEnv):
         self._turn_complete = True
         self._flush_turn()
 
+    def _newly_completed_ids(self) -> list[int]:
+        """Order ids that reached COMPLETED since the last call.
+
+        Completion, not dispatch, is when a zone earns: it is the only point
+        where "sent a car" and "a passenger was actually carried" differ.
+        """
+        from ride_gym.enums import OrderStatus
+
+        done = {
+            oid for oid, o in self.env.orders.items()
+            if o.status == OrderStatus.COMPLETED
+        }
+        new = done - self._seen_completed_ids
+        self._seen_completed_ids = done
+        return list(new)
+
     def _compute_zone_rewards(
         self,
         events: dict[int, dict],
@@ -683,35 +728,45 @@ class RideGymAEC(AECEnv):
             if o.status == OrderStatus.COMPLETED
         )
 
-        # 1. Immediate served demand attribution (+gamma) with rebalancing assist sharing (D23)
-        if dispatched_this_turn:
-            for oid, did, dispatcher in dispatched_this_turn:
-                relocator = self._driver_relocator.get(did)
-                if dispatcher is not None and 0 <= dispatcher < self._num_zones:
-                    if relocator is not None and relocator != dispatcher and 0 <= relocator < self._num_zones:
-                        # Rebalancing assist credit: 70% to local dispatcher, 30% to the zone that supplied the vehicle
-                        local_rewards[dispatcher] += 0.7 * cfg.gamma
-                        local_rewards[relocator] += 0.3 * cfg.gamma
-                    else:
-                        local_rewards[dispatcher] += cfg.gamma
+        # 1. Served-demand credit (+gamma) paid on COMPLETION, not on dispatch.
+        # Dispatch-time credit paid a zone in full for aiming a car at a waiting
+        # rider, whether or not that rider was ever picked up, so two separate
+        # gestures (dispatch + arrival) were both paid while the outcome was
+        # never paid. The do-nothing policy then becomes competitive and the
+        # agent drifts toward freezing. Completion is the only moment that
+        # distinguishes a useful relocation from a wasted one.
+        #
+        # When the serving driver was supplied by a different zone (it was
+        # relocated there earlier), the supplying zone keeps a share: that is
+        # the only place a rebalancing decision earns anything.
+        for oid in self._newly_completed_ids():
+            order = self.env.orders[oid]
+            did = getattr(order, "assigned_driver", None)
+            dispatcher = self._order_dispatcher.get(oid)
+            if dispatcher is None or not (0 <= dispatcher < self._num_zones):
+                continue
+            relocator = self._driver_relocator.get(did) if did is not None else None
+            if relocator is not None and relocator != dispatcher and 0 <= relocator < self._num_zones:
+                local_rewards[dispatcher] += (1.0 - cfg.relocator_share) * cfg.gamma
+                local_rewards[relocator] += cfg.relocator_share * cfg.gamma
+            else:
+                local_rewards[dispatcher] += cfg.gamma
+            if did is not None:
                 self._driver_relocator.pop(did, None)
 
-        # 1b. Relocation arrival bonus (D28: immediate credit when relocated driver arrives)
-        # Eliminates the 8-18 turn delay where the relocator zone had to wait
-        # for the driver to be dispatched by the destination zone.
-        # Bonus = prospective_bonus_scale * pending_demand_at_destination / num_drivers
+        # 1b. Relocation arrival bonus: off by default. It paid the sending zone
+        # for the arrival itself, which made moving look profitable without the
+        # moved car ever serving anyone. Kept as an opt-in nudge, not a payment.
         prospective_bonus = float(getattr(cfg, "prospective_bonus_scale", 0.0))
         if prospective_bonus > 0.0:
             for did in getattr(self, "_relocator_arrivals", []):
                 relocator = self._driver_relocator.get(did)
                 if relocator is not None and 0 <= relocator < self._num_zones:
-                    # Driver is now at destination; current_region is the target zone
                     d = self._last_obs[did]["self"]
                     dest_zone = int(d.get("current_region", 0))
                     dest_zone = max(0, min(dest_zone, self._num_zones - 1))
                     pending_at_dest = float(self._pending_per_zone[dest_zone])
-                    bonus = prospective_bonus * pending_at_dest
-                    local_rewards[relocator] += bonus
+                    local_rewards[relocator] += prospective_bonus * pending_at_dest
 
         # 2. Empty deadhead distance penalty (-beta) charged to commanding zone
         for did, event in events.items():
@@ -917,6 +972,7 @@ class RideGymAEC(AECEnv):
             self._actions_this_turn = {}
             self._turn_complete = False
             self._claimed_orders_this_turn = set()
+            self._reloc_inbound_this_turn = {}
 
     def _kpi_counts(self) -> dict[str, float]:
         from ride_gym.enums import OrderStatus
@@ -976,6 +1032,15 @@ class RideGymAEC(AECEnv):
                 if not hasattr(self, "_claimed_orders_this_turn"):
                     self._claimed_orders_this_turn = set()
                 self._claimed_orders_this_turn.add(candidates[cand_idx]["order_id"])
+        elif act_val > self._max_pending:
+            zone_idx = self._zone_int_id(current)
+            target = act_val - self._max_pending - 1
+            if not hasattr(self, "_reloc_inbound_this_turn"):
+                self._reloc_inbound_this_turn = {}
+            if self._decode_action(act_val, zone_idx) is not None:
+                self._reloc_inbound_this_turn[target] = (
+                    self._reloc_inbound_this_turn.get(target, 0) + 1
+                )
         self._advance_selection()
 
     def state(self) -> np.ndarray:
