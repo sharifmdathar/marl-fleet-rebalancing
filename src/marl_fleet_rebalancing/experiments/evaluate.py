@@ -119,10 +119,21 @@ def load_trained_policy(
         )
     else:
         algo_cfg = IPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(IPPOConfig, k)})
+        # The attention trunk reconstructs the obs layout from the space
+        # geometry, not from a flat width, so it must be told the shapes.
+        layout = {}
+        if algo_cfg.arch == "attention":
+            sample = eval_env.observe(any_agent)
+            layout = {
+                "num_zones": sample["all_zone_state"].shape[0],
+                "max_pending": sample["pending_orders"].shape[0],
+                "hist_len": sample["demand_hist"].shape[1],
+            }
         learner = IPPO(
             observation_dim=observation_dim,
             action_dim=action_dim,
             config=algo_cfg,
+            **layout,
         )
 
     learner.load_state_dict(weights)
