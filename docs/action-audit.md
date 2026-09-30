@@ -12,7 +12,6 @@ Mask enforces neighbor-only + surplus-target + claimed-order checks
 back to the global pending list, breaking zone ownership. PPO masks with
 -inf so on-policy behavior is masked-correct, but any mask bug executes an
 illegal hop instead of noop. Fix: decode returns None for non-neighbor
-targets, drop the global fallback. Needs decisions.md entry + bump
 (behavior change for off-mask actions only).
 
 ## 3. Forced noop: accept, mitigate later

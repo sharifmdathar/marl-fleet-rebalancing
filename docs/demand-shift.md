@@ -91,7 +91,7 @@ The old labels are deprecated but their CSVs stay on disk. New definitions:
 
 PURGED 2026-09-16 (D22): all pre-D22 eval data deleted. S2c (magnitude
 ×1.0) stays dropped — byte-identical config to S0, pure compute waste.
-Repopulate per `docs/shift-results.md` after v1.4 retraining.
+Regenerate from a fresh eval run; the pre-env-2.3 tables were deleted.
 
 ## Fair-comparison checklist
 

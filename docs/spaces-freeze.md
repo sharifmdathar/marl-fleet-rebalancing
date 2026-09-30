@@ -1,7 +1,5 @@
 # Spaces freeze (v1.9, NYC only)
 
-Changes need a decisions.md entry + version bump.
-
 Action: Discrete(93) = 1 + 30 + 62
 - 0 noop, 1..30 dispatch k-th candidate, 31..92 relocate to a-31
 

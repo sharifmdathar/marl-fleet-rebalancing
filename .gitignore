@@ -61,3 +61,7 @@ dataset/
 runs/
 *.pt
 *log.txt
+
+# Eval artifacts: regenerated per run, never committed. All pre-env-2.3
+# results were deleted as invalid.
+results/
