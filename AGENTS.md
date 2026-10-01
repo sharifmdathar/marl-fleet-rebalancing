@@ -12,6 +12,41 @@ work, not about what the project currently is. The research targets live in
   without saying so.
 - Distinguish measured, inferred, and assumed. Label them.
 
+## Mistakes already made here — do not repeat
+
+Concrete failures from this project. Each cost days.
+
+- **Check reward constants against reward arithmetic before setting them.**
+  `relocator_share = 0.35` sat below the break-even `beta × km_per_relocation`
+  = 0.374, so relocation was net-negative even when it worked perfectly, and
+  the agent learned to churn. Worked example: env 2.8.
+- **Never report a metric that can be bought.** Service rate alone is
+  purchasable with deadhead distance; a policy scored +8.8pp over LP while
+  being 2.4x worse per empty km. Always pair a gain with the resource it cost.
+- **A short run cannot grade a long-horizon question.** 40 iterations said
+  nothing about a 200-iteration plateau. Check the full-length trend before
+  concluding, and say which you have.
+- **Apply a fix at train AND eval, or nowhere.** The relocation-claim fix was
+  evaluated on a checkpoint trained without it, giving a fake +7pp.
+- **Do not instrument by mutating the state you are measuring.** Tracing the
+  completion reward consumed the `_seen_completed_ids` delta before the real
+  call, reporting "0 credits" twice when the credit fired on 64% of
+  completions. Score first, restore, then call through.
+- **Verify a diagnostic before believing its output.** A probe read stale
+  generator state and claimed all demand sat in one zone; the generator was
+  correct.
+- **A view that crops can hide the thing being measured.** Zooming to the zone
+  extent cut 29% of road nodes off-screen, so cars leaving the frame were
+  invisible and "cars moved north-east" was an artifact.
+- **Compare paired, never two means.** Per-window demand varies 36-69%; paired
+  on identical windows the same comparison has half the spread. See
+  `docs/eval-noise.md`.
+- **Validate an agent's targeting directly, not only its score.** Validation
+  service rate hid a policy targeting at chance. Relocation precision is the
+  acceptance test.
+- **Do not diagnose from an undertrained checkpoint.** An iteration-30 policy
+  was analysed for hours before anyone checked it had converged.
+
 ## Do not fabricate process
 
 - No backdating commits, no invented authorship, no synthetic "prior work"
@@ -53,6 +88,9 @@ work, not about what the project currently is. The research targets live in
 - Frame the contribution around the experimental question. Do not claim a new
   algorithm unless one was actually built.
 - State limitations and external-validity limits explicitly.
+- When an earlier claim turns out to be wrong, record the correction where the
+  original was made. Do not quietly supersede it.
+- Correct a public claim in the same breath as making a new one.
 
 ## Repo hygiene
 

@@ -82,3 +82,24 @@ observation already contains current per-zone demand (`all_zone_state[:, 2]`)
 and an explicit deficit (column 3), so the information is present. Precision
 above chance is the acceptance test for the next training run — not validation
 service rate, which is what misdirected this investigation.
+
+## Claims from before this analysis that were wrong
+
+Recorded rather than deleted, so the record is not quietly rewritten.
+
+- **"The trained RL policy beats the LP rebalancer, +8.80pp, 12/12 windows."**
+  True for service rate only. LP delivers 31.8 service-rate points per 100
+  empty km against RL's 14.2, so on efficiency the ordering reverses. The
+  +8.80pp figure came from comparing against LP on *default* hyperparameters;
+  after re-tuning LP the gap was smaller, and after measuring distance it is
+  not the advantage it appeared.
+- **"The relocation-claim fix (D34) gave +7pp on argmax."** Measured by
+  evaluating a checkpoint trained *without* D34 using the mask *with* D34. The
+  corrected reward trains with it from the start and shows no such gain.
+- **"Validation service rate 40-52% means the policy is weak."** That range is
+  the noise floor of a single-policy mean over 12 hard windows. The policy's own
+  per-window spread is 3.1-3.9pp. Reading it as weakness sent this
+  investigation down the wrong path for several days.
+- **"The do-nothing policy is a safe fallback that scores ≈ −3.2."** It scores
+  **0% service rate** and −15.11. The near-flat reward was the actual defect,
+  not evidence of safety.
