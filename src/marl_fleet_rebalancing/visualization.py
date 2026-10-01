@@ -237,6 +237,28 @@ def _compute_zone_polygons(
         return []
 
 
+def _draw_zone_borders(ax, zone_polys) -> None:
+    """Outline every zone region so the partition is readable without heat.
+
+    The zone centroids alone do not show where one region ends and the next
+    begins, which makes it impossible to tell whether a car is inside the
+    zone whose demand it is serving.
+    """
+    import numpy as np
+
+    for poly in zone_polys:
+        if poly is None or poly.is_empty:
+            continue
+        geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
+        for g in geoms:
+            coords = np.asarray(g.exterior.coords)
+            ax.plot(
+                coords[:, 0], coords[:, 1],
+                color="#1565c0", linewidth=1.1, alpha=0.75,
+                linestyle="--", zorder=1,
+            )
+
+
 def _draw_zone_demand_heatmap(
     ax,
     frame: dict,
@@ -325,6 +347,8 @@ def _draw_frame(
     reloc_pts = getattr(recorder, "relocation_points", None)
     if show_heatmap and reloc_pts and zone_polys:
         _draw_zone_demand_heatmap(ax, frame, reloc_pts, zone_polys, show_heatmap=True)
+    elif reloc_pts and zone_polys:
+        _draw_zone_borders(ax, zone_polys)
 
     if reloc_pts:
         zx = [p[0] for p in reloc_pts]
@@ -501,6 +525,7 @@ def render_animation(
     dpi: int = 100,
     description: str = "",
     show_heatmap: bool = False,
+    zoom_to_zones: bool = True,
     duration_sec: float | None = None,
 ) -> str:
     """Render a recorded trajectory to an MP4 with a clean custom layout."""
@@ -516,7 +541,23 @@ def render_animation(
 
     precomputed_segs, bounds = _precompute_network_segments(recorder.network)
     reloc_pts = getattr(recorder, "relocation_points", None)
-    zone_polys = _compute_zone_polygons(reloc_pts, bounds) if show_heatmap else None
+    if reloc_pts and zoom_to_zones:
+        # Zones cover ~65% of the network bbox. Cropping to them hides the
+        # other 29% of road nodes and any car that drives there, so this
+        # zoom may only EXPAND the view past the network bounds, never
+        # shrink it below the area the fleet can actually reach.
+        pad_lon = (max(p[0] for p in reloc_pts) - min(p[0] for p in reloc_pts)) * 0.12 + 1e-4
+        pad_lat = (max(p[1] for p in reloc_pts) - min(p[1] for p in reloc_pts)) * 0.12 + 1e-4
+        bounds = (
+            min(bounds[0], min(p[0] for p in reloc_pts) - pad_lon),
+            min(bounds[1], min(p[1] for p in reloc_pts) - pad_lat),
+            max(bounds[2], max(p[0] for p in reloc_pts) + pad_lon),
+            max(bounds[3], max(p[1] for p in reloc_pts) + pad_lat),
+        )
+    # Zone boundaries are drawn whenever zones are known, not only with the
+    # heatmap: without them the regions are invisible and the frame reads as
+    # one undifferentiated map.
+    zone_polys = _compute_zone_polygons(reloc_pts, bounds) if reloc_pts else None
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
     fig.subplots_adjust(top=0.90, bottom=0.06, left=0.04, right=0.98)

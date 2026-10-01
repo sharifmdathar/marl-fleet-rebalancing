@@ -70,14 +70,16 @@ class LPBaselineConfig:
     rebalance_frequency_minutes: float = 1.0  # LP replanning interval
     smoothing_alpha: float = 0.3  # EMA smoothing factor for demand rates
     demand_init_rate: float = 30.0  # prior demand rate per zone (orders/hour)
-    min_idle_to_rebalance: int = 2  # minimum fleet idle count to trigger LP
+    min_idle_to_rebalance: int = 1  # minimum fleet idle count to trigger LP
     speed_kmh: float = 30.0  # assumed average vehicle travel speed
     # Value of filling one vehicle of predicted shortfall, as a multiple of the
     # mean inter-zone travel time (dimensionless, so it ports across networks).
     # 0.0 reproduces the historical no-op behaviour; higher values relocate more
-    # aggressively. Swept on S0/S3 (AGENTS.md rule 3 — never on held-out
-    # scenarios); 0.4 was the best min-over-shifts SR at comparable empty km.
-    deficit_penalty_scale: float = 0.4
+    # aggressively. Re-swept on the 16-zone build (24 configs, 5 episodes, S0
+    # and S3 only per AGENTS.md rule 3): the 0.4 default from the 62-zone
+    # sweep gave 54.0% service rate, while 0.5 gives 58.6%. Re-tune before
+    # quoting this baseline on any other scale.
+    deficit_penalty_scale: float = 0.5
 
 
 def solve_rebalance_lp(

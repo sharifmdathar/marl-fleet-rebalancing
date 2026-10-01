@@ -41,11 +41,21 @@ from ride_gym.order_generator import (
 from ride_gym.osmnx_network import OSMnxNetwork
 
 from marl_fleet_rebalancing.config import EnvConfig
+from marl_fleet_rebalancing.demand.drifting_hotspot import (
+    DriftingHotspotOrderGenerator,
+)
 from marl_fleet_rebalancing.demand.generators import (
     BurstOrderGenerator,
     ParameterizedZoneOrderGenerator,
     PermutedZoneOrderGenerator,
     UniformSampledNYCOrderGenerator,
+)
+from marl_fleet_rebalancing.demand.local_hub import LocalHubOrderGenerator
+from marl_fleet_rebalancing.demand.sequential_surge import (
+    SequentialSurgeOrderGenerator,
+)
+from marl_fleet_rebalancing.demand.two_zone_hotspot import (
+    TwoZoneHotspotOrderGenerator,
 )
 
 _M_PER_KM = 1000.0
@@ -120,6 +130,19 @@ class RideGymAEC(AECEnv):
 
         # Dynamic from RideGym — adapts to any map's zone/centroid count
         self._num_zones = len(self.env.relocation_points)
+        # Order generators built above inferred the adjacency graph from the
+        # centroids; verify it matches what RideGym derived, so a scenario that
+        # relies on adjacency cannot silently use a different graph.
+        derived = self._region_neighbours_from_centroids(centroids)
+        actual = tuple(
+            tuple(int(x) for x in nbrs) for nbrs in self.env.region_neighbours
+        )
+        if derived != actual:
+            raise ValueError(
+                "zone adjacency mismatch: generator-side derivation disagrees "
+                "with the env's own graph; relocation scenarios would target "
+                "the wrong neighbours."
+            )
         # Zone-controller agents (D10) — one agent per zone
         self.possible_agents = [f"zone_{i}" for i in range(self._num_zones)]
 
@@ -272,6 +295,55 @@ class RideGymAEC(AECEnv):
                 strength=config.perm_strength,
                 seed=self._seed,
             )
+        elif mode == "localhub":
+            assert centroids is not None
+            gen = LocalHubOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                stage1_zone=config.localhub_stage1_zone,
+                stage2_zone=config.localhub_stage2_zone,
+                switch_min=config.localhub_switch_min,
+                region_neighbours=self._region_neighbours_from_centroids(centroids),
+                seed=self._seed,
+            )
+        elif mode == "surge2":
+            assert centroids is not None
+            gen = SequentialSurgeOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                stage1_zone=config.surge_zone1,
+                stage2_zone=config.surge_zone2,
+                surge_pct=config.surge_pct,
+                stage1_end_min=config.surge_stage1_end_min,
+                stage2_start_min=config.surge_stage2_start_min,
+                seed=self._seed,
+            )
+        elif mode == "hotspot2":
+            assert centroids is not None
+            gen = TwoZoneHotspotOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                hotspot_zones=(config.hotspot_zone_a, config.hotspot_zone_b),
+                hotspot_pct=config.hotspot_pct,
+                split=config.hotspot_split,
+                seed=self._seed,
+            )
+        elif mode == "drift":
+            assert centroids is not None
+            gen = DriftingHotspotOrderGenerator(
+                base_generator=gen,
+                network=network,
+                relocation_centroids=centroids,
+                source_zone=config.drift_source_zone,
+                dest_zone=config.drift_dest_zone,
+                ramp_start_min=config.drift_ramp_start_min,
+                ramp_end_min=config.drift_ramp_end_min,
+                source_pct=config.drift_source_pct,
+                seed=self._seed,
+            )
         elif mode != "none":
             raise ValueError(f"Unknown demand_shift_mode: {mode!r}")
 
@@ -291,6 +363,30 @@ class RideGymAEC(AECEnv):
                 f"Split {config.nyc_split!r} has no windows in {manifest_path}."
             )
         return paths
+
+    @staticmethod
+    def _region_neighbours_from_centroids(
+        centroids: list[tuple[float, float]], k: int = 8,
+    ) -> tuple[tuple[int, ...], ...]:
+        """K-nearest-centre adjacency, matching RideGym's centroid model.
+
+        Order generators are built before the RideGym env exists, so the
+        adjacency graph has to be derived here. The rule mirrors
+        ``RidePoolEnv._build_region_neighbours`` (K nearest other centres by
+        Euclidean distance, K = relocation_neighbours_k, default 8); the
+        constructor asserts the two agree.
+        """
+        arr = np.asarray(centroids, dtype=float)
+        n = len(arr)
+        if n == 0:
+            return tuple()
+        kk = max(0, min(k, n - 1))
+        out = []
+        for i in range(n):
+            d2 = ((arr - arr[i]) ** 2).sum(axis=1)
+            d2[i] = np.inf
+            out.append(tuple(int(j) for j in np.argsort(d2)[:kk]))
+        return tuple(out)
 
     @staticmethod
     def _manifest_zone_ids(config: EnvConfig) -> set[int] | None:

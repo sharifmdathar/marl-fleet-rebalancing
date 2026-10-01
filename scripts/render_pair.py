@@ -25,6 +25,8 @@ from marl_fleet_rebalancing.visualization import TrajectoryRecorder, render_anim
 def record_episode(env, policy, seed, stochastic):
     env.reset(seed=seed)
     rec = TrajectoryRecorder()
+    # Without this the zone overlay and its labels are silently skipped.
+    rec.relocation_points = list(env.env.relocation_points)
     last_time = -1.0
     reloc = 0
     total = 0

@@ -40,7 +40,7 @@ from marl_fleet_rebalancing.experiments.shift_eval import (
 OUT_DIR = Path("results/lp_tuning")
 
 # Scenarios that may be inspected while tuning (train + val).
-TUNING_SHIFTS = ("S0", "S3")
+TUNING_SHIFTS = ("S0", "S3")  # train + val only; never the held-out eval scenarios
 
 
 def _kpi(res: dict[str, Any], shift: str, metric: str) -> float:

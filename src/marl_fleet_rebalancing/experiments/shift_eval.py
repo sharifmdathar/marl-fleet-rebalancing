@@ -44,17 +44,24 @@ RESULTS_DIR = Path("results/shift_eval")
 
 # Active standardized shift scenarios:
 # (label, nyc_window_limit, target_zone, target_zone_pct, shift_param, description)
+# nyc_window_limit is the order cap per window. The 16-zone study runs 130
+# orders against 26 cars (5 orders/driver); the magnitude scenarios scale that
+# proportionally, so severity is a multiple of the in-distribution rate rather
+# than an absolute order count.
+_WINDOW = 130
+
 SHIFTS = [
-    ("S0", 500, None, None, None, "In-distribution base (train)"),
-    ("S1", 500, None, 1.0, "permute", "Spatial permutation (rot offset = nz//2)"),
-    ("S2a", 250, None, None, None, "Magnitude ×0.5 (surge/trough)"),
-    ("S2b", 375, None, None, None, "Magnitude ×0.75"),
-    ("S2d", 750, None, None, None, "Magnitude ×1.5"),
-    ("S2e", 1000, None, None, None, "Magnitude ×2.0"),
-    ("S3", 500, None, None, "temporal", "Temporal phase shift (val split)"),
-    ("S4", 500, 1, 60.0, "concentrate", "Cold-zone concentration (60% to z1)"),
-    ("S5", 500, 0, 20.0, "burst", "Event burst (20% in [20,30]m to z0)"),
-    ("S6", 500, None, None, "real", "Real held-out demand (test split)"),
+    ("S0", _WINDOW, None, None, None, "In-distribution base (train)"),
+    ("S1", _WINDOW, None, 1.0, "permute", "Spatial permutation (rot offset = nz//2)"),
+    ("S2a", int(_WINDOW * 0.5), None, None, None, "Magnitude ×0.5 (surge/trough)"),
+    ("S2b", int(_WINDOW * 0.75), None, None, None, "Magnitude ×0.75"),
+    ("S2d", int(_WINDOW * 1.5), None, None, None, "Magnitude ×1.5"),
+    ("S2e", _WINDOW * 2, None, None, None, "Magnitude ×2.0"),
+    ("S3", _WINDOW, None, None, "temporal", "Temporal phase shift (val split)"),
+    ("S4", _WINDOW, 1, 60.0, "concentrate", "Cold-zone concentration (60% to z1)"),
+    ("S5", _WINDOW, 0, 20.0, "burst", "Event burst (20% in [20,30]m to z0)"),
+    ("S6", _WINDOW, None, None, "real", "Real held-out demand (test split)"),
+    ("S7", _WINDOW, None, None, "drift", "Drifting hotspot (A=zone12 -> D=zone10)"),
 ]
 
 EVAL_EPISODES = 5
@@ -108,6 +115,8 @@ def make_shifted_env(
             cfg.demand_shift_mode = "none"
             cfg.target_zone = target_zone
             cfg.target_zone_demand_pct = target_zone_pct
+        elif shift_param == "drift":
+            cfg.demand_shift_mode = "drift"
         elif shift_param == "real":
             cfg.nyc_split = "test"
         else:

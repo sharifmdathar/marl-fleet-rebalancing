@@ -18,7 +18,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.4 (16-zone study config; relocation arrival claim)
+    Version: 2.8 (reward rebalanced: beta 0.15->0.06, relocator_share 0.35->0.45)
     """
 
     # --- Fleet ---
@@ -56,6 +56,46 @@ class EnvConfig:
     # S1 spatial permutation: per-order remap probability (0..1) through a
     # fixed rotation of offset perm_offset zones (None = num_zones // 2).
     perm_strength: float | None = None
+    # --- Two-zone hotspot (fixed concentration, no drift) ---
+    # hotspot_pct of orders are redirected into hotspot_zone_a and
+    # hotspot_zone_b and stay there for the whole episode. hotspot_split
+    # divides that share between them (0.5 = even). Order count and timestamps
+    # are preserved.
+    hotspot_zone_a: int = 8
+    hotspot_zone_b: int = 13
+    hotspot_pct: float = 60.0
+    hotspot_split: float = 0.5
+    # --- Sequential two-stage surge ---
+    # surge_pct of orders concentrate into surge_zone1 for the first stage and
+    # into surge_zone2 for the second, handing over linearly between
+    # surge_stage1_end_min and surge_stage2_start_min. Unlike the drift
+    # scenario this CREATES a surge at the first hub rather than only moving
+    # demand that was already there.
+    surge_zone1: int = 10
+    surge_zone2: int = 12
+    surge_pct: float = 60.0
+    surge_stage1_end_min: float = 18.0
+    surge_stage2_start_min: float = 32.0
+    # --- Local hub (all demand at exactly one of two zones) ---
+    # Every order originates at localhub_stage1_zone before localhub_switch_min
+    # and at localhub_stage2_zone after it; no order originates anywhere else.
+    # Destinations are restricted to zones adjacent to the active hub, so each
+    # trip is a local hop. Reuses the surge zone pair by default.
+    localhub_stage1_zone: int = 10
+    localhub_stage2_zone: int = 12
+    localhub_switch_min: float = 25.0
+    # --- Drifting hotspot (demand migrates between two distant hubs) ---
+    # Before drift_ramp_start_min, drift_source_pct of orders originate at
+    # drift_source_zone. That share falls to 0 by drift_ramp_end_min, so the
+    # late episode has all of its demand at drift_dest_zone. Timestamps and
+    # order counts are preserved.
+    # Source A=12 has 8 neighbours and sits 9.05 km from D=10, which is 4.26 km
+    # from A's nearest neighbour: the new hub is across the map, not one hop.
+    drift_source_zone: int = 12
+    drift_dest_zone: int = 10
+    drift_ramp_start_min: float = 20.0
+    drift_ramp_end_min: float = 35.0
+    drift_source_pct: float = 0.6
     perm_offset: int | None = None
 
     # --- Simulation ---
@@ -121,14 +161,26 @@ class EnvConfig:
     # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand - cancel_penalty
     # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.15/km, D25).
     alpha: float = 0.2   # weight for passenger waiting time (D25)
-    beta: float = 0.15   # weight for empty repositioning distance (cost per empty km, D25)
+    # Cost per empty repositioning km. At 0.15 with ~2.5 km per relocation a
+    # single move cost 0.374 against a completion worth gamma=1.0, so distance
+    # was heavy enough to cancel the entire served-demand credit: the trained
+    # policy netted -0.9 reward per episode against LP's +49.6, while buying
+    # its service rate with 2.6x the deadhead. 0.06 keeps deadhead a real
+    # penalty that discriminates good moves from bad, without dominating the
+    # service term it is meant to modulate.
+    beta: float = 0.06
     gamma: float = 1.0   # weight for served demand (payoff per COMPLETED order)
     cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
     team_share: float = 0.2  # 80% local credit + 20% team
-    # Share of gamma paid to the zone that SUPPLIED a relocated driver, when
-    # that driver's ride completes. Without it the sending zone earns nothing
-    # from rebalancing, so it learns not to send. 0 disables the split.
-    relocator_share: float = 0.35
+    # Share of gamma paid to the zone that SUPPLIED a relocated driver when
+    # that driver's ride completes.
+    #
+    # Must exceed beta * km_per_relocation, or a relocation is net-negative even
+    # when it works perfectly and the zone learns never to send. Measured at
+    # 2.49 km per relocation and beta=0.15 that floor is 0.374; 0.35 sat just
+    # under it, which is why the trained policy relocated constantly at ~25%
+    # hit rate and still scored worse than doing almost nothing.
+    relocator_share: float = 0.45
 
     # --- Relocation arrival bonus ---
     # Paid to the sending zone when its relocated driver arrives, scaled by the
@@ -186,11 +238,11 @@ class NYCConfig(EnvConfig):
     # (1 + 16 + 16 = 33) instead of wasting masked slots on empty entries.
     max_pending: int = 16
     alpha: float = 0.2
-    beta: float = 0.15
+    beta: float = 0.06
     gamma: float = 1.0
     cancel_penalty: float = 1.0
     team_share: float = 0.2
-    relocator_share: float = 0.35
+    relocator_share: float = 0.45
     prospective_bonus_scale: float = 0.0
 
 # ---------------------------------------------------------------------------
