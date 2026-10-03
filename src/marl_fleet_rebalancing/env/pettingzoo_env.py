@@ -698,35 +698,73 @@ class RideGymAEC(AECEnv):
             ),
         }
 
+    def _hops_to_nearest_demand(self) -> dict[int, int] | None:
+        """BFS hop distance from every zone to the nearest zone with demand."""
+        demand = [j for j in range(self._num_zones) if self._pending_per_zone[j] > 0]
+        if not demand:
+            return None
+        dist = {j: 0 for j in demand}
+        frontier = deque(demand)
+        while frontier:
+            cur = frontier.popleft()
+            nbrs = (self.env.region_neighbours[cur]
+                    if cur < len(self.env.region_neighbours) else ())
+            for j in nbrs:
+                if j not in dist:
+                    dist[j] = dist[cur] + 1
+                    frontier.append(j)
+        return dist
+
     def _legal_relocate_targets(self, zone_idx: int) -> list[int]:
         counts = getattr(self, "_zone_idle_counts", None)
         if self._last_obs is None or counts is None:
             return []
         if not bool(counts[zone_idx] > 0):
             return []
-        out: list[int] = []
+
         neighbor_only = getattr(self._cfg, "neighbor_relocation_only", False)
-        neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
+        neighbours = (
+            self.env.region_neighbours[zone_idx]
+            if (neighbor_only and zone_idx < len(self.env.region_neighbours))
+            else range(self._num_zones)
+        )
         inbound = getattr(self, "_reloc_inbound_this_turn", None)
         claim = bool(getattr(self._cfg, "claim_relocation_targets", True))
         require_demand = bool(getattr(self._cfg, "require_destination_demand", True))
+
+        def pending_at(j: int) -> int:
+            return int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
+
+        def surplus_ok(j: int) -> bool:
+            return int(counts[j]) <= max(pending_at(j), 1)
+
+        hops = self._hops_to_nearest_demand() if require_demand else None
+        demanded_here = any(
+            pending_at(k) >= 1 and surplus_ok(k) for k in neighbours
+        )
+
+        out: list[int] = []
         for j in neighbours:
-            if j != zone_idx and 0 <= j < self._num_zones:
-                idle_j = int(counts[j])
-                pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
-                # A destination with nobody waiting cannot benefit from a car.
-                # Admitting such targets made 69% of the offered menu useless
-                # and capped achievable relocation precision regardless of what
-                # the policy learned.
-                if require_demand and pending_j < 1:
-                    continue
-                if idle_j > max(pending_j, 1):
-                    continue
-                # D34: intra-turn arrival claim. Every zone acts on the same
-                # pre-turn snapshot, so without a claim they all pick the same
-                # destination and flood it (104 drivers into one zone per turn).
-                if claim and inbound is not None and int(inbound.get(j, 0)) >= max(pending_j, 1):
-                    continue
+            if j == zone_idx or not (0 <= j < self._num_zones):
+                continue
+            if not surplus_ok(j):
+                continue
+            # D34 intra-turn arrival claim: every zone acts on the same
+            # pre-turn snapshot, so without a claim they all pick the same
+            # destination and flood it (104 drivers into one zone per turn).
+            if (claim and inbound is not None
+                    and int(inbound.get(j, 0)) >= max(pending_at(j), 1)):
+                continue
+            if not require_demand or pending_at(j) >= 1:
+                out.append(int(j))
+                continue
+            # No demand here. Admit it only if it moves the car closer to the
+            # nearest demand AND no neighbour already has demand, so a car
+            # several hops from a hotspot can start closing in instead of
+            # being frozen. Demanded neighbours are preferred, which keeps the
+            # common menu free of demand-free options.
+            if (hops is not None and not demanded_here
+                    and hops.get(j, 99) < hops.get(zone_idx, 99)):
                 out.append(int(j))
         return out
 
