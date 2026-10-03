@@ -709,10 +709,17 @@ class RideGymAEC(AECEnv):
         neighbours = self.env.region_neighbours[zone_idx] if (neighbor_only and zone_idx < len(self.env.region_neighbours)) else range(self._num_zones)
         inbound = getattr(self, "_reloc_inbound_this_turn", None)
         claim = bool(getattr(self._cfg, "claim_relocation_targets", True))
+        require_demand = bool(getattr(self._cfg, "require_destination_demand", True))
         for j in neighbours:
             if j != zone_idx and 0 <= j < self._num_zones:
                 idle_j = int(counts[j])
                 pending_j = int(np.round(self._pending_per_zone[j] * max(self._num_drivers, 1)))
+                # A destination with nobody waiting cannot benefit from a car.
+                # Admitting such targets made 69% of the offered menu useless
+                # and capped achievable relocation precision regardless of what
+                # the policy learned.
+                if require_demand and pending_j < 1:
+                    continue
                 if idle_j > max(pending_j, 1):
                     continue
                 # D34: intra-turn arrival claim. Every zone acts on the same

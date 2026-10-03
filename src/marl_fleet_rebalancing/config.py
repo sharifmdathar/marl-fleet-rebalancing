@@ -18,7 +18,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.8 (reward rebalanced: beta 0.15->0.06, relocator_share 0.35->0.45)
+    Version: 2.9 (relocation destination must have unmet demand)
     """
 
     # --- Fleet ---
@@ -194,6 +194,14 @@ class EnvConfig:
     # demand. Zones act on the same pre-turn snapshot, so without a claim every
     # zone picks the same destination. True = demand-based claim, False = legacy.
     claim_relocation_targets: bool = True
+    # D35: a relocation destination must have at least one waiting rider.
+    # Measured on the 16-zone build, the previous rule offered 5.6 targets per
+    # turn of which 69% had nobody waiting, and in 16% of turns even the
+    # highest-demand option was demand-free — a ceiling on relocation precision
+    # that no reward shaping could lift. Requiring demand cuts the menu to
+    # 1.7 targets per turn, all of them useful, and leaves 16% of turns with no
+    # legal move (the zone correctly does nothing). False restores the old rule.
+    require_destination_demand: bool = True
 
     # --- Seeding ---
     seed: int | None = None
