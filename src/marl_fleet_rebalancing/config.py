@@ -18,7 +18,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 2.9 (relocation destination must have unmet demand)
+    Version: 3.0 (relay-chain credit: every contributing zone is paid)
     """
 
     # --- Fleet ---

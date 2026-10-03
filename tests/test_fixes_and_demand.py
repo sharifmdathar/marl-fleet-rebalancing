@@ -196,7 +196,7 @@ class TestFixesAndDemand(unittest.TestCase):
 
         credit_env.env.orders[100] = _Order(OrderStatus.PENDING, None)
         credit_env._order_dispatcher[100] = 5
-        credit_env._driver_relocator[1] = 18  # driver 1 was relocated by zone 18
+        credit_env._driver_relocator[1] = [18]  # driver 1 was relocated by zone 18
         rewards = credit_env._compute_zone_rewards({}, [])
         self.assertEqual(rewards[5], 0.0, "dispatch alone must not be paid")
         self.assertEqual(rewards[18], 0.0, "arrival must not be paid")
@@ -226,6 +226,63 @@ class TestFixesAndDemand(unittest.TestCase):
         credit_env._order_dispatcher[101] = 7
         solo = credit_env._compute_zone_rewards({}, [])
         self.assertAlmostEqual(solo[7], credit_cfg.gamma, places=5)
+
+
+    def test_relay_chain_credits_every_contributing_zone(self):
+        """A car relayed A->B->C must pay A, B and C, not only C.
+
+        Relocation is neighbour-only, so reaching a distant hotspot needs
+        several hops. Overwriting the relocator on each hop made multi-hop
+        repositioning unprofitable: the zone that started the journey and
+        every intermediate zone earned nothing.
+        """
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.cancel_penalty = 0.0
+        credit_cfg.beta = 0.0
+        env = RideGymAEC(config=credit_cfg, seed=7)
+        env.reset(seed=7)
+
+        from ride_gym.enums import OrderStatus
+
+        class _Order:
+            def __init__(self, status, driver):
+                self.status = status
+                self.assigned_driver = driver
+
+        # zone 9 dispatches driver 3, which was relayed through 4 and then 6.
+        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        env._order_dispatcher[500] = 9
+        env._driver_relocator[3] = [4, 6]
+
+        rewards = env._compute_zone_rewards({}, [])
+        share = credit_cfg.relocator_share * credit_cfg.gamma
+        self.assertAlmostEqual(rewards[9] / credit_cfg.gamma, 1.0 - credit_cfg.relocator_share,
+                               places=5, msg="dispatcher keeps 1 - relocator_share")
+        for z in (4, 6):
+            self.assertAlmostEqual(rewards[z], share / 2, places=5,
+                                   msg="each relaying zone splits the share equally")
+        self.assertEqual(rewards[5], 0.0, "unrelated zones earn nothing")
+
+        # A zone that handled the car twice is paid once.
+        env2 = RideGymAEC(config=credit_cfg, seed=7)
+        env2.reset(seed=7)
+        env2.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        env2._order_dispatcher[500] = 9
+        env2._driver_relocator[3] = [4, 6, 4]
+        r2 = env2._compute_zone_rewards({}, [])
+        self.assertAlmostEqual(r2[4], share / 2, places=5,
+                               msg="a revisited zone is not paid twice")
+
+        # A car that was never relocated pays the dispatcher in full.
+        env3 = RideGymAEC(config=credit_cfg, seed=7)
+        env3.reset(seed=7)
+        env3.env.orders[500] = _Order(OrderStatus.COMPLETED, 2)
+        env3._order_dispatcher[500] = 9
+        r3 = env3._compute_zone_rewards({}, [])
+        self.assertAlmostEqual(r3[9], credit_cfg.gamma, places=5)
+
 
 
 if __name__ == "__main__":

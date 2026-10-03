@@ -203,7 +203,7 @@ class RideGymAEC(AECEnv):
         # driver_id -> zone_idx (which zone controller commanded this driver)
         self._driver_commander: dict[int, int] = {}
         # driver_id -> zone_idx (which zone initiated relocation)
-        self._driver_relocator: dict[int, int] = {}
+        self._driver_relocator: dict[int, list[int]] = {}
         # driver_id -> target_zone_idx (destination of ongoing relocation)
         self._driver_relocation_target: dict[int, int] = {}
 
@@ -887,9 +887,19 @@ class RideGymAEC(AECEnv):
             if dispatcher is None or not (0 <= dispatcher < self._num_zones):
                 continue
             relocator = self._driver_relocator.get(did) if did is not None else None
-            if relocator is not None and relocator != dispatcher and 0 <= relocator < self._num_zones:
+            # A relocated car may be relayed through several zones before it
+            # serves anyone, because relocation is neighbour-only. Crediting
+            # only the final hop made multi-hop repositioning unprofitable: the
+            # zone that started the journey earned nothing and the intermediate
+            # zones earned nothing. Split the relocator share across every
+            # distinct zone that contributed.
+            chain = [z for z in dict.fromkeys(relocator or ()) if z != dispatcher]
+            if chain:
+                share = cfg.relocator_share * cfg.gamma / len(chain)
                 local_rewards[dispatcher] += (1.0 - cfg.relocator_share) * cfg.gamma
-                local_rewards[relocator] += cfg.relocator_share * cfg.gamma
+                for z in chain:
+                    if 0 <= z < self._num_zones:
+                        local_rewards[z] += share
             else:
                 local_rewards[dispatcher] += cfg.gamma
             if did is not None:
@@ -902,12 +912,12 @@ class RideGymAEC(AECEnv):
         if prospective_bonus > 0.0:
             for did in getattr(self, "_relocator_arrivals", []):
                 relocator = self._driver_relocator.get(did)
-                if relocator is not None and 0 <= relocator < self._num_zones:
+                if relocator and 0 <= relocator[-1] < self._num_zones:
                     d = self._last_obs[did]["self"]
                     dest_zone = int(d.get("current_region", 0))
                     dest_zone = max(0, min(dest_zone, self._num_zones - 1))
                     pending_at_dest = float(self._pending_per_zone[dest_zone])
-                    local_rewards[relocator] += prospective_bonus * pending_at_dest
+                    local_rewards[relocator[-1]] += prospective_bonus * pending_at_dest
 
         # 2. Empty deadhead distance penalty (-beta) charged to commanding zone
         for did, event in events.items():
@@ -1055,7 +1065,13 @@ class RideGymAEC(AECEnv):
                 driver_id = zone_idle_queues[zone_idx].popleft()
                 target_zone = decoded["relocate"]
                 self._driver_commander[driver_id] = zone_idx
-                self._driver_relocator[driver_id] = zone_idx
+                # Accumulate the relay chain rather than overwriting: a car
+                # travelling A->B->C->D must credit every zone that handled it,
+                # not just C. Distinct zones only, so a car that loops back is
+                # not paid twice for the same zone.
+                chain = self._driver_relocator.setdefault(driver_id, [])
+                if zone_idx not in chain:
+                    chain.append(zone_idx)
                 self._driver_relocation_target[driver_id] = target_zone
                 ridegym_actions[driver_id] = decoded
 
