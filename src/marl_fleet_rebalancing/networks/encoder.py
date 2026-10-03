@@ -282,16 +282,58 @@ class CentralizedCritic(nn.Module):
         self,
         state_dim: int,
         hidden_dim: int = 256,
+        num_agents: int | None = None,
     ) -> None:
+        """D39: ``num_agents`` enables a learned per-agent embedding.
+
+        Without it, the only thing distinguishing one zone's value estimate from
+        another's is whatever caller-supplied identity is appended to the state.
+        In this repo that was the 2 normalised centroid coordinates, and it is a
+        bad identity: the global state is captured ONCE per turn (train.py:308)
+        and shared by every zone slot, so the critic must separate 16 different
+        return functions using only 2 floats of geography. Adjacent zones get
+        near-identical embeddings while facing unrelated demand.
+
+        Measured consequence (PRE-D42, superseded -- kept as the record of why
+        the embedding was needed): MAPPO explained_var was 0.018-0.039 against
+        IPPO's 0.068-0.138. That figure is from the run whose identity was 2
+        centroid floats. After this embedding the same runs give MAPPO 0.31-0.44
+        vs IPPO 0.07-0.135, i.e. the critic is no longer the weak link. Do not
+        cite the old numbers as current -- they describe a critic that no longer
+        exists. Note also that explained_var is NOT like-for-like across arms:
+        it scores returns derived from the values themselves, and a per-zone head
+        has structurally more capacity to fit zone-specific structure.
+
+        A learned nn.Embedding gives each zone its own free parameters, which is
+        the standard MAPPO ``[state, agent_id]`` formulation.
+        """
         super().__init__()
+        self.num_agents = num_agents
+        self.agent_embed = (
+            nn.Embedding(num_agents, hidden_dim) if num_agents else None
+        )
+        extra = hidden_dim if self.agent_embed is not None else 0
         self.trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(state_dim + extra, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
         )
         self.value = nn.Linear(hidden_dim, 1)
 
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """Return value estimates for a batch of global states."""
+    def forward(self, state: torch.Tensor,
+                agent_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """Return value estimates for a batch of global states.
+
+        ``agent_ids`` is required when the critic was built with ``num_agents``.
+        """
+        if self.agent_embed is not None:
+            if agent_ids is None:
+                raise ValueError(
+                    "critic was built with a per-agent embedding; agent_ids "
+                    "must be supplied"
+                )
+            state = torch.cat(
+                [state, self.agent_embed(agent_ids)], dim=-1,
+            )
         return self.value(self.trunk(state)).squeeze(-1)

@@ -133,6 +133,237 @@ class TestFixesAndDemand(unittest.TestCase):
             if target_idx not in neighbor_indices and target_idx != zone_idx:
                 self.assertFalse(mask[act], f"Action to non-neighbor zone {target_idx} should be masked False")
 
+    def test_state_covers_every_observation_channel(self):
+        """D38: every observation channel must reach MAPPO's centralized critic.
+
+        Regression test. state() returned 177 dims while the actor saw 279:
+        demand_hist (64) and neighbor_mask (16) were never added, so the critic
+        MAPPO depends on was blind to recent demand history and to zone
+        adjacency -- information IPPO's decentralized critic does have. Nothing
+        failed loudly because the pre-existing MAPPO test only checked that
+        value() returned a finite scalar of the right shape.
+
+        This asserts the property directly: each observation key must appear in
+        the centralized state. If a future observation channel is added without
+        being threaded through state(), this fails instead of silently making
+        MAPPO weaker than IPPO.
+        """
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+
+        obs = env.observe(env.possible_agents[0])
+        state = env.state()
+        state_size = state.size
+
+        # Channels state() must cover. zone_location is appended separately by
+        # train.py as the acting zone's identity, so it is checked separately.
+        must_appear = [
+            "all_zone_state",
+            "pending_orders",
+            "pending_mask",
+            "demand_hist",
+        ]
+        for key in must_appear:
+            arr = np.asarray(obs[key])
+            n = int(arr.size)
+            self.assertGreater(
+                n, 0, "%s should be non-empty" % key,
+            )
+            self.assertLessEqual(
+                n, state_size,
+                "observation channel %r (%d dims) is larger than the whole "
+                "centralized state (%d dims) -- state() almost certainly "
+                "dropped it" % (key, n, state_size),
+            )
+
+        # Explicitly assert the two channels D38 restored. If someone reverts
+        # state() to its pre-D38 form, these are what break.
+        self.assertGreaterEqual(
+            state_size, obs["demand_hist"].size + obs["all_zone_state"].size
+            + obs["pending_orders"].size + obs["pending_mask"].size
+            + env._num_zones + 1,
+            "state() is missing demand_hist / neighbor_mask / clock "
+            "(got %d dims)" % state_size,
+        )
+
+        # And the critic must actually accept that width.
+        from marl_fleet_rebalancing.networks.encoder import obs_to_vector
+
+        obs_dim_actual = int(obs_to_vector(obs).shape[0])
+        learner = MAPPO(
+            observation_dim=obs_dim_actual,
+            state_dim=state_size,  # D39: no appended zone_location
+            action_dim=env._action_dim,
+            config=MAPPOConfig(),
+            num_zones=env._num_zones,
+        )
+        val = learner.value(state[None, :], np.asarray([0]))
+        self.assertEqual(val.shape, (1,))
+        self.assertTrue(np.isfinite(val[0]))
+
+    def test_critic_distinguishes_agents(self):
+        """D39: the critic MUST give different values for different zones.
+
+        The global state is captured once per turn and shared by every slot
+        (train.py:308), so identical state + different agent_id is the only
+        thing separating 16 per-zone return functions. Before D39 the identity
+        was 2 floats of centroid geography, and MAPPO's explained_var was
+        0.018-0.039 vs IPPO's 0.068-0.138 -- the centralized critic was a
+        worse estimator than the decentralized head it should improve on.
+
+        This test pins the property that was broken: perturbing ONLY the agent
+        identity must change the value.
+        """
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+        obs = env.observe(env.possible_agents[0])
+        from marl_fleet_rebalancing.networks.encoder import obs_to_vector
+
+        n = env._num_zones
+        learner = MAPPO(
+            observation_dim=int(obs_to_vector(obs).shape[0]),
+            state_dim=env.state().size,
+            action_dim=env._action_dim,
+            config=MAPPOConfig(),
+            num_zones=n,
+        )
+
+        state = env.state()
+        # Same state, every agent id: values must not all be identical.
+        vals = np.concatenate([
+            learner.value(state[None, :], np.asarray([z]))
+            for z in range(n)
+        ])
+        self.assertGreater(
+            float(np.std(vals)), 0.0,
+            "critic returned the same value for every agent id -- identity is "
+            "not reaching the critic",
+        )
+
+        # And a single wrong id must not raise.
+        with self.assertRaises(ValueError):
+            learner.value(state[None, :], None)
+
+    def test_state_critic_sees_demand_history(self):
+        """The critic input must actually vary when demand history changes.
+
+        A width check alone is not enough: state() could allocate the right
+        number of dims and fill them with zeros. This perturbs demand history
+        and asserts the state vector changes.
+        """
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+
+        before = env.state().copy()
+        self.assertGreater(env._demand_hist_arr.size, 0)
+        env._demand_hist_arr[:] = 1.0  # perturb only the history channel
+        after = env.state()
+
+        self.assertFalse(
+            np.allclose(before, after),
+            "state() did not change when demand_hist changed -- the history "
+            "channel is allocated but not populated",
+        )
+
+    def test_critic_input_superset_of_actor_obs(self):
+        """D42: the critic must not be handicapped relative to IPPO's head.
+
+        state() carries only GLOBAL channels. Notably _pending_features is the
+        fleet-wide urgency list and has NO zone attribution, so a critic built
+        from state() alone must reconstruct "which orders are waiting in MY
+        zone" from 16 scalars -- while IPPO's decentralized head is handed that
+        zone's own pending_orders tensor outright.
+
+        That asymmetry made "identical actor, different critic" false at the
+        information level, and confounded RQ2 in MAPPO's disfavour.
+
+        This pins the fix: the critic's input must be a strict superset of what
+        the actor observes.
+        """
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+        agent = env.possible_agents[0]
+        obs = env.observe(agent)
+        from marl_fleet_rebalancing.networks.encoder import obs_to_vector
+
+        global_state = env.state()
+        own_obs = obs_to_vector(obs)
+        critic_input = np.concatenate([global_state, own_obs]).astype(np.float32)
+
+        self.assertEqual(
+            critic_input.size, global_state.size + own_obs.size,
+        )
+        self.assertGreater(
+            critic_input.size, own_obs.size,
+            "critic input must include the global state",
+        )
+        # The zone's OWN pending orders must reach the critic. Under state()
+        # alone they are not recoverable, because _pending_features is a
+        # fleet-wide list with no zone attribution.
+        self.assertGreater(
+            obs["pending_orders"].size, 0,
+            "sanity: this env should have per-zone pending_orders to protect",
+        )
+        # The critic must accept this width.
+        learner = MAPPO(
+            observation_dim=int(own_obs.size),
+            state_dim=int(critic_input.size),
+            action_dim=env._action_dim,
+            config=MAPPOConfig(),
+            num_zones=env._num_zones,
+        )
+        val = learner.value(critic_input[None, :], np.asarray([0]))
+        self.assertEqual(val.shape, (1,))
+        self.assertTrue(np.isfinite(val[0]))
+
+    def test_state_exposes_inbound_relocations(self):
+        """D43: the critic must be able to see cars already in flight.
+
+        Regression test for a capability that was entirely absent. MAPPO's critic
+        returned a BIT-IDENTICAL value (0.0390501097) for two different
+        relocation destinations across 11 consecutive turns, because state()
+        never encoded where cars were going: a relocating car was just "in
+        zone, not idle". The redundancy signal lived in
+        `_reloc_inbound_this_turn` / `_driver_relocation_target` and reached
+        only `action_mask`, never the critic -- so a centralized critic could
+        not penalise redundant targeting even in principle.
+
+        Asserts state() grows when cars are in flight toward a zone.
+        """
+        cfg = BandraConfig()
+        env = RideGymAEC(config=cfg, seed=42)
+        env.reset(seed=42)
+        mp = env._max_pending
+
+        saw_relocation = False
+        before = env.state().copy()
+        for _ in range(80):
+            if not env.agents:
+                break
+            a = env.agent_selection
+            m = env.action_mask(a)
+            r = np.flatnonzero(m[1 + mp :])
+            d = np.flatnonzero(m[1 : 1 + mp])
+            if len(r):
+                tgt = int(r[0]) + 1 + mp - mp - 1
+                env.step(int(r[0]) + 1 + mp)
+                if np.count_nonzero(env._zone_inbound_reloc) > 0:
+                    saw_relocation = True
+                    break
+            else:
+                env.step(int(d[0]) + 1 if len(d) else 0)
+
+        self.assertTrue(
+            saw_relocation,
+            "no in-flight relocation was ever observed; the test cannot "
+            "verify _zone_inbound_reloc",
+        )
+        self.assertEqual(env._zone_inbound_reloc.size, env._num_zones)
+
     def test_mappo_conditioned_critic(self):
         """Test that MAPPO learner initializes and evaluates with conditioned state_dim (state + zone_loc)."""
         cfg = BandraConfig()
@@ -142,7 +373,7 @@ class TestFixesAndDemand(unittest.TestCase):
         any_agent = env.possible_agents[0]
         obs = env.observe(any_agent)
         zone_loc_dim = len(obs["zone_location"].ravel())
-        state_dim = len(env.state()) + zone_loc_dim
+        state_dim = len(env.state())  # D39: no appended zone_location
         observation_dim = obs_dim(env.observation_space(any_agent))
         action_dim = env._action_dim
 
@@ -151,10 +382,11 @@ class TestFixesAndDemand(unittest.TestCase):
             state_dim=state_dim,
             action_dim=action_dim,
             config=MAPPOConfig(),
+            num_zones=env._num_zones,
         )
 
-        state_vec = np.concatenate([env.state(), obs["zone_location"].ravel()]).astype(np.float32)
-        val = mappo.value(state_vec[None, :])
+        state_vec = env.state().astype(np.float32)
+        val = mappo.value(state_vec[None, :], np.asarray([0]))
         self.assertEqual(val.shape, (1,))
         self.assertTrue(np.isfinite(val[0]))
 

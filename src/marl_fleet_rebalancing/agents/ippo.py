@@ -85,6 +85,17 @@ class RolloutBuffer:
             if state_dim is not None
             else None
         )
+        # D39: which zone owns each row, so MAPPO's critic can apply a learned
+        # per-agent embedding. The global state is shared across agents within a
+        # turn, so without this the critic cannot tell the rows apart.
+        self.agent_ids = (
+            np.broadcast_to(
+                np.arange(num_agents, dtype=np.int64)[:, None],
+                (num_agents, num_turns),
+            ).copy()
+            if state_dim is not None
+            else None
+        )
 
     def store(
         self,
@@ -162,6 +173,7 @@ class RolloutBuffer:
             }
             if self.states is not None:
                 flat["states"] = self.states.reshape(self.capacity, -1)
+                flat["agent_ids"] = self.agent_ids.reshape(self.capacity)
             return flat
         mask = self.filled.ravel()
         flat = {
@@ -172,6 +184,7 @@ class RolloutBuffer:
         }
         if self.states is not None:
             flat["states"] = self.states.reshape(self.capacity, -1)[mask]
+            flat["agent_ids"] = self.agent_ids.reshape(self.capacity)[mask]
         return flat
 
 

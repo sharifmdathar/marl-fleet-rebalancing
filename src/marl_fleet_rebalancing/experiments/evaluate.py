@@ -82,6 +82,27 @@ def load_trained_policy(
     eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
     eval_env.reset(seed=run_manifest.get("seed", 42))
 
+    # D40: split provenance guard.
+    #
+    # The manifest records `eval_split` (what checkpoint SELECTION used, e.g.
+    # "val") and separately `env_config.nyc_split` (what this function rebuilds,
+    # which is the TRAINING split). So every evaluation silently ran on training
+    # windows while the checkpoint had been chosen for validation performance --
+    # incoherent, and it measured memorisation rather than generalisation.
+    #
+    # EnvConfig overrides already applied above (target_zone etc.) take
+    # precedence, so an explicit `--split` still wins.
+    if is_nyc and getattr(env_cfg, "nyc_split", None) == "train":
+        sel = run_manifest.get("eval_split", "val")
+        env_cfg.nyc_split = sel
+        eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
+        eval_env.reset(seed=run_manifest.get("seed", 42))
+        print(
+            "NOTE: manifest env_config.nyc_split was 'train' while checkpoint "
+            "selection used eval_split='%s'. Evaluating on '%s' instead of the "
+            "training split." % (sel, sel),
+        )
+
     any_agent = eval_env.possible_agents[0]
     observation_dim = obs_dim(eval_env.observation_space(any_agent))
     action_dim = eval_env._action_dim
@@ -101,21 +122,41 @@ def load_trained_policy(
 
     state_dim = None
     if use_state:
+        algo_cfg = MAPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(MAPPOConfig, k)})
+        sample_obs = eval_env.observe(any_agent)
         if "critic" in weights and "trunk.0.weight" in weights["critic"]:
-            state_dim = weights["critic"]["trunk.0.weight"].shape[1]
+            critic_in = weights["critic"]["trunk.0.weight"].shape[1]
+            # D39: when the critic carries a per-agent embedding, trunk.0's
+            # input is state_dim + embedding_dim, not state_dim. Reading the
+            # raw width built a critic expecting 513 dims and fed it 257,
+            # which failed at the first forward pass.
+            embed_w = weights["critic"].get("agent_embed.weight")
+            if embed_w is not None:
+                state_dim = critic_in - int(embed_w.shape[1])
+            else:
+                # Pre-D39 checkpoints appended zone_location (2 dims).
+                state_dim = critic_in - 2
         else:
-            sample_obs = eval_env.observe(any_agent)
-            zone_loc_dim = len(sample_obs["zone_location"].ravel())
-            state_dim = len(eval_env.state()) + zone_loc_dim
+            state_dim = len(eval_env.state())
+        # D42: post-D42 the critic input is [global state | own observation], so
+        # state_dim includes the actor's observation width. Derived from the
+        # checkpoint above rather than recomputed, so this is only a fallback.
 
     # Reconstruct Learner
     if use_state:
         algo_cfg = MAPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(MAPPOConfig, k)})
+        # MAPPO needs the same attention layout as IPPO (D33) plus num_zones for
+        # the critic's per-agent embedding (D39). Passing neither made every
+        # attention-arch MAPPO checkpoint fail to load:
+        #   ValueError: attention arch requires num_zones, max_pending, hist_len
         learner: IPPO | MAPPO = MAPPO(
             observation_dim=observation_dim,
             state_dim=state_dim,
             action_dim=action_dim,
             config=algo_cfg,
+            num_zones=sample_obs["all_zone_state"].shape[0],
+            max_pending=sample_obs["pending_orders"].shape[0],
+            hist_len=sample_obs["demand_hist"].shape[1],
         )
     else:
         algo_cfg = IPPOConfig(**{k: v for k, v in run_manifest.get("algo_config", {}).items() if hasattr(IPPOConfig, k)})
@@ -189,8 +230,29 @@ def evaluate_policy(
 
             if policy_type == "checkpoint":
                 learner = policy
-                # Backward compatibility: if checkpoint was trained with legacy (Z, 2) fleet state
-                if hasattr(learner, "actor") and learner.actor.trunk[0].in_features < obs_dim(env.observation_space(agent)):
+                # Backward compatibility: checkpoints trained with the legacy
+                # (Z, 2) fleet state need all_zone_state truncated to 2 columns.
+                #
+                # This MUST only apply to the flat-MLP actor. ZoneAttentionEncoder
+                # also exposes .trunk, but its trunk[0] consumes the POOLED
+                # context dim, not the flat observation width, so comparing
+                # trunk[0].in_features against the flat width is meaningless for
+                # it -- it read as "legacy", truncated all_zone_state to (Z, 2),
+                # and every attention-arch checkpoint then died in the encoder
+                # with a reshape error.
+                from marl_fleet_rebalancing.networks.encoder import ZoneActorCritic
+                # IPPO exposes .policy; MAPPO exposes .actor. Reading
+                # learner.actor unconditionally raised AttributeError on every
+                # IPPO checkpoint.
+                actor = getattr(learner, "actor", None)
+                if actor is None:
+                    actor = getattr(learner, "policy", None)
+                is_flat_mlp = isinstance(actor, ZoneActorCritic)
+                if (
+                    is_flat_mlp
+                    and actor.trunk[0].in_features
+                    < obs_dim(env.observation_space(agent))
+                ):
                     obs_in = dict(obs)
                     obs_in["all_zone_state"] = obs["all_zone_state"][:, :2]
                     obs_vec = obs_to_vector(obs_in)
@@ -353,6 +415,9 @@ def main() -> None:
             raise ValueError(f"Unknown policy type: {policy_type}")
 
     print(f"Config loaded: Algo={algo} | Scenario={scenario} | Zones={env._num_zones} | Drivers={env._num_drivers}")
+    print(f"  data split: {getattr(env._cfg, 'nyc_split', 'n/a')}"
+          + (f"  (checkpoint selected on eval_split='{manifest.get('eval_split', 'n/a')}')"
+             if policy_type == "checkpoint" else ""))
 
     record_animation = args.output is not None or args.interactive
 

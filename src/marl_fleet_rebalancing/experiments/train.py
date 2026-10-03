@@ -334,10 +334,13 @@ def collect_rollout(
 
             if use_state:
                 assert g_state is not None
+                # D42: [global state | own observation]. The global part is
+                # shared by every agent this turn; the own-observation part is
+                # what makes the critic's input a superset of IPPO's critic
+                # input rather than a subset. Identity still comes from the
+                # learned embedding (D39), not from appended coordinates.
                 state_vec = np.concatenate(
-                    [g_state, np.asarray(
-                        obs_dict["zone_location"].ravel(), dtype=np.float32,
-                    )],
+                    [g_state, np.asarray(obs_vec, dtype=np.float32)],
                 )
             else:
                 state_vec = None
@@ -348,7 +351,9 @@ def collect_rollout(
 
             if use_state:
                 assert isinstance(learner, MAPPO)
-                value = float(learner.value(state_vec[None, :])[0])
+                value = float(learner.value(
+                    state_vec[None, :], np.asarray([slot]),
+                )[0])
             else:
                 value = float(val_t[0])
 
@@ -565,8 +570,15 @@ def train(
     action_dim = env._action_dim
     use_state = algo_name == "mappo"
     sample_obs = env.observe(any_agent)
-    zone_loc_dim = len(sample_obs["zone_location"].ravel())
-    state_dim = (len(env.state()) + zone_loc_dim) if use_state else None
+    zone_loc_dim = 0  # D39: identity is a learned embedding, not appended coords
+    # D42: the critic must see AT LEAST what IPPO's decentralized head sees.
+    # state() carries only GLOBAL channels -- notably _pending_features, the
+    # fleet-wide urgency list, which has no zone attribution -- so the critic
+    # had to reconstruct "which orders are waiting in MY zone" from 16 scalars.
+    # IPPO's head is handed that zone's own pending_orders tensor directly.
+    # Concatenating the acting zone's own observation removes the asymmetry
+    # that confounded RQ2: critic input = [global state | own observation].
+    state_dim = (len(env.state()) + observation_dim) if use_state else None
     arch_shape = {
         "num_zones": env._num_zones,
         "max_pending": env_cfg.max_pending,

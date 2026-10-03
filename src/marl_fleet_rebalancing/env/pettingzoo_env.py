@@ -177,12 +177,22 @@ class RideGymAEC(AECEnv):
         )
         self._pending_mask = np.zeros(self._max_pending, dtype=np.float32)
         self._pending_per_zone = np.zeros(self._num_zones, dtype=np.float32)
+        self._zone_total_counts = np.zeros(self._num_zones, dtype=np.int64)
         self._zone_fleet_state = np.zeros(
             (self._num_zones, 4), dtype=np.float32,
         )
         self._hist_len = max(int(getattr(config, "demand_history_len", 4)), 1)
         self._demand_history: deque[np.ndarray] = deque(maxlen=self._hist_len)
         self._demand_hist_arr = np.zeros((self._num_zones, self._hist_len), dtype=np.float32)
+        # D37: running max-abs scale per all_zone_state column, kept for audit.
+        # Normalisation divides by the scale seen so far in the episode rather
+        # than a constant, so no channel is scaled relative to another by a
+        # hand-picked number. Exposed via obs_scales() for the scale audit.
+        self._obs_scales = np.zeros(4, dtype=np.float64)
+        self._demand_hist_scale = 0.0
+        # D43: per-zone cars-in-flight and its running scale
+        self._zone_inbound_reloc = np.zeros(self._num_zones, dtype=np.float32)
+        self._inbound_reloc_scale = 0.0
         self._zone_centroids_norm = self._normalized_centroids()
 
         # Per-zone candidate orders (Point B: sorted closest-first per zone)
@@ -598,13 +608,65 @@ class RideGymAEC(AECEnv):
         self._zone_fleet_state[:, 2] = self._pending_per_zone
         # Column 3 (D23): explicit supply-demand deficit (>0 deficit, <0 surplus)
         self._zone_fleet_state[:, 3] = self._pending_per_zone - (zone_idle / max(self._num_drivers, 1))
+
+        # D37: per-channel normalisation of all_zone_state.
+        #
+        # The four columns previously shared a raw scale and were wildly
+        # mismatched. Measured over 400 turns on NYC16 (env 3.0), before this
+        # change:
+        #
+        #   col  fleet total/26   max 0.3846   std 0.1016
+        #   col  idle/26          max 0.0385   std 0.0127
+        #   col  pending/26       max 0.1538   std 0.0402   <- the demand signal
+        #   col  deficit          max 0.1154   std 0.0359
+        #
+        # Demand (col 2) was ~2.5x weaker than fleet size, and ONE waiting rider
+        # in a 26-car fleet reads 1/26 = 0.0385 -- a 0.04 difference on a channel
+        # whose neighbour swings by 0.38. The policy could not resolve demand at
+        # that resolution, which is consistent with it relocating to demand-free
+        # zones 81.6% of the time (LP: 36.2%) and with raising beta changing
+        # nothing: a uniform cost cannot fix a missing signal.
+        #
+        # Each column is now divided by its own running max-abs scale, so a
+        # channel occupies the full [-1, 1] range of its Box regardless of fleet
+        # size or demand volume. Scales are per-instance state, not constants, so
+        # no magic numbers and no fleet-size coupling (col 2 no longer shrinks
+        # when the fleet grows).
+        for col in range(4):
+            # D41: divide by the RUNNING max, and never shrink it. The previous
+            # version (D37) divided by the CURRENT turn's max and only recorded
+            # the running value without using it, so the same physical
+            # configuration encoded differently depending on this turn's peak.
+            # Non-stationary input to both value functions.
+            m = float(np.max(np.abs(self._zone_fleet_state[:, col])))
+            if m > 1e-9:
+                self._obs_scales[col] = max(self._obs_scales[col], m)
+            s = self._obs_scales[col]
+            if s > 1e-9:
+                self._zone_fleet_state[:, col] /= s
         self._zone_idle_counts = zone_idle.astype(np.int64)
+        # D37: raw per-zone totals, kept so observe() can form ratios without
+        # de-normalising the scaled matrix.
+        self._zone_total_counts = zone_totals.astype(np.int64)
         self._zone_dispatchable_counts = zone_dispatchable.astype(np.int64)
         self._demand_history.append(self._pending_per_zone.copy())
         self._demand_hist_arr[:] = 0.0
         n_hist = len(self._demand_history)
         if n_hist:
             self._demand_hist_arr[:, -n_hist:] = np.stack(list(self._demand_history), axis=1)
+            # D37: same per-channel treatment for the demand history. It is the
+            # only other place raw pending demand reaches the policy, and it had
+            # the same 0.04-vs-0.38 scale problem as all_zone_state col 2.
+            m = float(np.max(np.abs(self._demand_hist_arr)))
+            if m > 1e-9:
+                # D41: running max, and scale the history ONCE per turn using
+                # that running max. D37 divided the whole history array by the
+                # max across all entries, so whenever a new peak arrived every
+                # PAST entry was retroactively rescaled -- the encoding of a
+                # configuration depended on peaks that happened later.
+                self._demand_hist_scale = max(self._demand_hist_scale, m)
+            if self._demand_hist_scale > 1e-9:
+                self._demand_hist_arr /= self._demand_hist_scale
 
         # Clear active relocation target if driver is no longer in status RELOCATING
         if hasattr(self, "_driver_relocation_target"):
@@ -612,6 +674,11 @@ class RideGymAEC(AECEnv):
                 d = self._last_obs[did]["self"]
                 if d["status"] != "relocating":
                     self._driver_relocation_target.pop(did, None)
+
+        # D43 note: the inbound-relocation aggregation deliberately does NOT live
+        # here. It must run after this turn's targets are assigned, which is
+        # inside _flush_turn. Computing it here read the previous turn's
+        # targets and then overwrote the fresh value.
 
     # ------------------------------------------------------------------ reset
 
@@ -639,6 +706,10 @@ class RideGymAEC(AECEnv):
         self._driver_relocator.clear()
         self._driver_relocation_target.clear()
         self._demand_history.clear()
+        self._obs_scales[:] = 0.0
+        self._demand_hist_scale = 0.0
+        self._zone_inbound_reloc[:] = 0.0
+        self._inbound_reloc_scale = 0.0
         self._claimed_orders_this_turn: set[int] = set()
         self._reloc_inbound_this_turn: dict[int, int] = {}
         self._seen_cancelled_ids: set[int] = set()
@@ -667,15 +738,28 @@ class RideGymAEC(AECEnv):
         zone_idx = self._zone_int_id(agent)
 
         zone_drivers = float(self._zone_fleet_state[zone_idx, 0])
+        # D37: all_zone_state is per-channel normalised, so ratios must be taken on
+        # RAW counts kept alongside it. Deriving them by de-normalising gave
+        # idle_frac up to 1.5, outside this Box's (-1, 1) bound -- caught by
+        # api_test's out-of-bounds check.
+        zone_total_raw = float(self._zone_total_counts[zone_idx])
         zone_idle_frac = (
-            self._zone_fleet_state[zone_idx, 1] / zone_drivers
-            if zone_drivers > 0 else 0.0
+            float(self._zone_idle_counts[zone_idx]) / zone_total_raw
+            if zone_total_raw > 0 else 0.0
+        )
+        zone_drivers = (
+            self._zone_fleet_state[zone_idx, 0]
+            if self._obs_scales[0] > 1e-9 else 0.0
+        )
+        zone_pending = (
+            self._zone_fleet_state[zone_idx, 2]
+            if self._obs_scales[2] > 1e-9 else 0.0
         )
         zone_state = np.array(
             [
                 zone_drivers,
                 zone_idle_frac,
-                float(self._pending_per_zone[zone_idx]),
+                zone_pending,
                 float(self._zone_fleet_state[zone_idx, 3]),
             ],
             dtype=np.float32,
@@ -1075,6 +1159,21 @@ class RideGymAEC(AECEnv):
                 self._driver_relocation_target[driver_id] = target_zone
                 ridegym_actions[driver_id] = decoded
 
+        # D43: refresh the per-zone inbound count AFTER targets are assigned.
+        # _rebuild_caches runs before this loop, so aggregating there would
+        # only ever expose the PREVIOUS turn's targets and the count read as
+        # zero on the turn a car actually left.
+        inbound = np.zeros(self._num_zones, dtype=np.float32)
+        for did, tgt in self._driver_relocation_target.items():
+            t = int(tgt)
+            if 0 <= t < self._num_zones:
+                inbound[t] += 1.0
+        self._inbound_reloc_scale = max(
+            self._inbound_reloc_scale, float(np.max(np.abs(inbound))),
+        )
+        if self._inbound_reloc_scale > 1e-9:
+            self._zone_inbound_reloc = inbound / self._inbound_reloc_scale
+
         obs, _rewards, dones, info = self.env.step(ridegym_actions)
 
         # Detect relocation arrivals BEFORE updating _last_obs (D28):
@@ -1178,6 +1277,12 @@ class RideGymAEC(AECEnv):
             return
         current = self.agent_selection
         self._cumulative_rewards[current] = 0.0
+        # Clear the whole rewards dict, not just this agent's entry.
+        # _accumulate_rewards() already folded every zone's turn reward into
+        # _cumulative_rewards at flush time, so the per-agent dict is spent by
+        # this point and must not be left holding stale values from the previous
+        # turn: an AEC consumer sums env.rewards after every step, so a surviving
+        # entry double-counts (caught by PettingZoo's api_test).
         self.rewards = {a: 0.0 for a in self.agents}
         act_val = 0 if action is None else int(action)
         self._actions_this_turn[current] = act_val
@@ -1201,8 +1306,22 @@ class RideGymAEC(AECEnv):
         self._advance_selection()
 
     def state(self) -> np.ndarray:
-        """Centralized state (for MAPPO's shared critic): all-zone fleet state
-        + pending-order features + clock."""
+        """Centralized state for MAPPO's shared critic.
+
+        D38: this now carries EVERY channel the actor observation exposes, not
+        a subset. It previously returned 177 dims while the actor saw 279 --
+        ``demand_hist`` (64) and ``neighbor_mask`` (16) were missing. Those
+        arrived at D30 as observation-only additions and this function was
+        never revisited, so the one component MAPPO exists to improve was blind
+        to recent demand history and to which zones are legal targets. IPPO's
+        decentralized critic sees those in its own 279-dim observation, so MAPPO
+        was starting with LESS information than IPPO, which inverts the intended
+        comparison.
+
+        ``tests/test_fixes_and_demand.py::test_state_covers_every_observation_
+        channel`` fails if a future observation channel is added without being
+        added here, so this class of drift cannot recur silently.
+        """
         if self._last_obs is None:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(
@@ -1210,12 +1329,65 @@ class RideGymAEC(AECEnv):
                 self._zone_fleet_state.flatten(),
                 self._pending_features.flatten(),
                 self._pending_mask,
+                self._demand_hist_arr.flatten(),
+                self._legal_target_mask_flat(),
+                self._inbound_reloc_counts(),
                 np.array(
                     [min(self.env.time / max(self.env.horizon, 1e-9), 1.0)],
                     dtype=np.float32,
                 ),
             ]
         ).astype(np.float32)
+
+    def _inbound_reloc_counts(self) -> np.ndarray:
+        """D43: per-zone count of cars currently RELOCATING TOWARD it.
+
+        Why this exists. Wasted relocation is overwhelmingly a car being sent
+        where another zone is *already* sending one. Measured on trained MAPPO:
+        the critic returned a BIT-IDENTICAL value (0.0390501097) for two
+        different relocation destinations for 11 consecutive turns, because
+        `state()` never encoded where cars were going -- a relocating car is
+        just "in zone, not idle". The redundancy signal existed in the env
+        (`_reloc_inbound_this_turn`, `_driver_relocation_target`) but reached
+        only `action_mask`, never the critic. So a centralized critic could not
+        penalise redundant targeting even in principle.
+
+        D34's intra-turn claim suppresses duplicates *within* one turn. This
+        exposes the cross-turn remainder: cars that departed earlier and are
+        still in flight. Read-only; does not alter the mask.
+        """
+        out = np.zeros(self._num_zones, dtype=np.float32)
+        if self._last_obs is None:
+            return out
+        counts = getattr(self, "_zone_inbound_reloc", None)
+        if counts is not None:
+            out[:] = counts
+        return out
+
+    def _legal_target_mask_flat(self) -> np.ndarray:
+        """Zone adjacency indicator, the centralized stand-in for neighbor_mask.
+
+        CAVEAT, deliberate: the actor's ``neighbor_mask`` is the ACTING zone's
+        legal-target set, which depends on where the agent sits and on live fleet
+        state. A single global vector cannot encode one mask per zone without an
+        O(num_zones^2) tensor, and the critic is shared across agents, so the
+        critic gets the static adjacency structure instead. That is strictly more
+        information than before (previously absent entirely) and is the part of
+        neighbor_mask that does not vary per acting zone.
+
+        The acting zone's own full mask remains available to the actor, and
+        train.py appends zone identity to this state, so the critic can at least
+        resolve which zone it is scoring.
+        """
+        out = np.zeros(self._num_zones, dtype=np.float32)
+        if self._last_obs is None:
+            return out
+        for z in range(self._num_zones):
+            nbrs = self.env.region_neighbours[z] if z < len(self.env.region_neighbours) else ()
+            for j in nbrs:
+                if 0 <= j < self._num_zones:
+                    out[j] = 1.0
+        return out
 
     def close(self) -> None:
         if hasattr(self.env, "close"):

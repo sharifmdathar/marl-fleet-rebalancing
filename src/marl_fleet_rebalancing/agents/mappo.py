@@ -76,7 +76,9 @@ class MAPPO:
         ).to(self.device)
         self.critic = CentralizedCritic(
             state_dim, config.hidden_dim,
+            num_agents=num_zones,
         ).to(self.device)
+        self.num_zones = num_zones
         self.optimizer = torch.optim.Adam(
             list(self.actor.parameters()) + list(self.critic.parameters()),
             lr=config.learning_rate,
@@ -105,11 +107,21 @@ class MAPPO:
             value.cpu().numpy(),
         )
 
-    def value(self, state_batch: np.ndarray) -> np.ndarray:
-        """Centralized value estimates for a batch of global states."""
+    def value(self, state_batch: np.ndarray,
+             agent_ids: np.ndarray | None = None) -> np.ndarray:
+        """Centralized value estimates for a batch of global states.
+
+        ``agent_ids`` identifies WHICH zone each state row is scoring. Required:
+        the global state is shared by every agent within a turn, so without an
+        identity the critic cannot separate the 16 per-zone return functions.
+        """
         state_t = torch.as_tensor(state_batch, device=self.device)
+        ids_t = (
+            torch.as_tensor(agent_ids, dtype=torch.long, device=self.device)
+            if agent_ids is not None else None
+        )
         with torch.no_grad():
-            value = self.critic.forward(state_t)
+            value = self.critic.forward(state_t, ids_t)
         return value.cpu().numpy()
 
     def state_dict(self) -> dict:
@@ -143,6 +155,12 @@ class MAPPO:
         b_returns = torch.as_tensor(
             returns.ravel()[buffer.filled.ravel()],
         )
+        # D39: which zone each stored row belongs to. flat["agent_ids"] is
+        # raveled in the same slot-major order as obs/actions.
+        b_agent_ids = (
+            torch.as_tensor(flat["agent_ids"], dtype=torch.long)
+            if "agent_ids" in flat else None
+        )
         # Advantage normalization (standard PPO practice).
         b_advantages = (b_advantages - b_advantages.mean()) / (
             b_advantages.std() + 1e-8
@@ -161,7 +179,11 @@ class MAPPO:
                 idx = perm[start : start + batch_size]
                 dev = self.device
                 logits, _ = self.actor.forward(b_obs[idx].to(dev), b_mask[idx].to(dev))
-                values = self.critic.forward(b_states[idx].to(dev))
+                values = self.critic.forward(
+                    b_states[idx].to(dev),
+                    None if b_agent_ids is None
+                    else b_agent_ids[idx].to(dev),
+                )
                 dist = torch.distributions.Categorical(logits=logits)
                 logprobs = dist.log_prob(b_actions[idx].to(dev))
                 entropy = dist.entropy().mean()

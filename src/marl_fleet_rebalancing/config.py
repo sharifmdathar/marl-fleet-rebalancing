@@ -101,7 +101,21 @@ class EnvConfig:
     # --- Simulation ---
     dt: float = 0.5             # minutes per step (30 sim-seconds, D23)
     horizon: float = 60.0       # episode length in minutes
-    order_timeout: float = 2.0  # minutes before unassigned order is cancelled
+    # Minutes an unassigned order survives before it cancels (env 3.0, D35).
+    # Was 2.0, chosen arbitrarily rather than from any operational figure, and
+    # that value sat BELOW every anchor found: a relocation leg is ~2.5 km at
+    # 30 km/h (~5 min travel), so 2.0 min of patience meant a repositioned car
+    # routinely arrived after its rider had given up. Measured on NYC16 base
+    # demand, 5 paired seeds: lifting the timeout to 5.0 raises service rate
+    # under every policy arm tested (dispatch-only 46.7%, dispatch-first 65.4%
+    # at 2.0 min). NYC anchors: platform average total wait 5.49 min (HVFHV,
+    # 2026); TLC WAV benchmarks <10 min for 80% of trips; accept-to-board
+    # pickup time ~303 s mean. 5.0 is the primary arm, with 2.0 retained as a
+    # documented sensitivity arm. NOTE (inferred, not derived): those sources
+    # measure TOTAL wait (accept + en route + board), whereas this field is
+    # unassigned-order patience. They bound the plausible range; they do not
+    # measure this quantity directly.
+    order_timeout: float = 5.0
 
     # --- Order generation ---
     num_orders: int = 800       # total orders to generate over the episode
@@ -194,14 +208,12 @@ class EnvConfig:
     # demand. Zones act on the same pre-turn snapshot, so without a claim every
     # zone picks the same destination. True = demand-based claim, False = legacy.
     claim_relocation_targets: bool = True
-    # D35: a relocation destination must have at least one waiting rider.
-    # Measured on the 16-zone build, the previous rule offered 5.6 targets per
-    # turn of which 69% had nobody waiting, and in 16% of turns even the
-    # highest-demand option was demand-free — a ceiling on relocation precision
-    # that no reward shaping could lift. Requiring demand cuts the menu to
-    # 1.7 targets per turn, all of them useful, and leaves 16% of turns with no
-    # legal move (the zone correctly does nothing). False restores the old rule.
-    require_destination_demand: bool = True
+    # D35 (SUPERSEDED by D36, kept so the reversal stays readable): a relocation
+    # destination had to have at least one waiting rider. It was introduced to
+    # stop RL relocating into empty zones, and it did raise precision -- but it
+    # also deleted the decision before the agent saw it (see D36). Set True only
+    # to reproduce pre-D36 numbers.
+    require_destination_demand: bool = False
 
     # --- Seeding ---
     seed: int | None = None
@@ -232,7 +244,7 @@ class NYCConfig(EnvConfig):
     driver_capacity: int = 4
     dt: float = 0.5
     horizon: float = 60.0
-    order_timeout: float = 2.0
+    order_timeout: float = 5.0  # env 3.0 (D35); see EnvConfig for the rationale
     num_orders: int = 800  # unused in nyc mode; kept for the synthetic fallback
     max_party_size: int = 3
     order_source: str = "nyc"
@@ -271,7 +283,7 @@ class BandraConfig(EnvConfig):
     driver_capacity: int = 4
     dt: float = 0.5
     horizon: float = 30.0
-    order_timeout: float = 2.0
+    order_timeout: float = 5.0  # env 3.0 (D35); see EnvConfig for the rationale
     num_orders: int = 200
     max_party_size: int = 3
     network_path: str = "data/bandra_west.gpickle"
