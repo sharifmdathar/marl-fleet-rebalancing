@@ -1356,7 +1356,11 @@ explicit input rather than a hidden constant. Verified it correctly reports
 0.45 as VIOLATED and 0.65 as HOLDS at 1.41x. Reward accounting re-verified
 exact: emitted 222.40 vs expected 222.40, difference -0.00. 41 tests pass.
 
-## D64 RESULT — works for MAPPO, regresses IPPO
+## D64 RESULT — single-seed: MAPPO targeting up, IPPO down (NOT a reported result)
+
+Correction (2026-10-04): the original heading said "works for MAPPO". That
+was a single-seed (3-episode) observation and is not a result under AGENTS.md
+(>=5 seeds). The body below already says so; the heading now does too.
 
 3 episodes, argmax, `alpha=0.2`, `share=0.65`:
 

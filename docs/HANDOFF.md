@@ -160,7 +160,12 @@ D64 raised `share` 0.45 → 0.65 to restore it.
 
 ## 6. Feasibility — the scenario is solvable
 
-MEASURED (`scripts/diag_feasibility.py`):
+MEASURED inputs (`scripts/diag_feasibility.py`), INFERRED verdict. The 0.83×
+figure assumes a 10.0 min job (ride 6.55 min + deadhead 1.46 km at an implied
+0.42 km/min ≈ 3.5 min). The same inputs give 0.55× to 1.09× depending on how
+much deadhead is charged, so the verdict is a range, not a single measured
+number. Treat "feasible with headroom" as a hypothesis until deadhead is
+measured directly.
 
 | quantity | value |
 |---|---|
