@@ -1430,3 +1430,19 @@ with `reference` measured (~1.7 riders, the mean demand at the best available
 target). Same dispatch proof-gating as now, so it is not D28's arrival bonus
 which paid without proof. Risk to watch: chasing a single hotspot at the expense
 of breadth.
+
+## D65 — scope: 16 busiest taxi zones, 26 drivers (confirmed by user 2026-10-04)
+- Date: 2026-10-04, Status: accepted (user sign-off)
+- Change: NYC study moved from 62 zones / 100 drivers / max_pending 30 /
+  action space 93 to 16 zones / 26 drivers / max_pending 16 / action space 33.
+  Zones are the 16 busiest taxi zones by train-window volume only (no val/test
+  information in the environment definition). Driver and order caps keep the
+  62-zone pressure ratios (1.61 drivers/zone, 5 orders/driver).
+- Why: compute (62 zones ~4x what the laptop can run) and the brief's 5-10 zone
+  guidance. Recorded here because the original log (D1-D34) was purged in
+  `bc53c9c`, and the commit that made the change (`b02f899`) left no decision
+  entry behind.
+- Consequence: 62-zone artifacts are not comparable to 16-zone results. Do
+  not cite numbers across the two configs. The 62-zone build remains in
+  `scripts/build_zone_subset.py`'s source directory `data/nyc/` as reference.
+- Revisit if: the advisor requires the full 62-zone scale for the final study.
