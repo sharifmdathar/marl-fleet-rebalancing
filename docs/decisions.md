@@ -667,3 +667,53 @@ observation, given the legal-target menu, recovers the best target at:
 **The information is present and learnable from the current observation.** The
 architecture, not the features, is what loses it. That is what made D54 worth
 building rather than changing the observation.
+
+---
+
+## D54 — destination-conditioned relocation head (attention arch only)
+
+**Change.** In `ZoneAttentionEncoder.forward`, the relocation columns of the
+action logits are no longer produced solely from the pooled vector `h`. Each
+candidate destination `j` now gets its own logit:
+
+    dest_logits[j] = <W_dest · zone_emb[j], W_self · self_ctx> / sqrt(H)
+                   + w · raw_feats[j]              # demand/car counts, direct
+                   + g · (centroid[j] − self_centroid)
+
+and those are added to the (zero-initialised) relocation columns of the pooled
+head. `zone_emb` is scored per destination and **never pooled on this path**.
+
+**Why.** D53 established the policy reads demand magnitude but cannot bind it to
+a destination: 16 controlled demand placements produced an identical argmax
+target, because `zone_pool` is a softmax-weighted sum and therefore
+permutation-invariant over zones. The fix is to stop destroying zone identity
+before the decision.
+
+Three terms, each addressing a measured gap:
+
+1. **Key/query score** keeps the structured zone embedding usable, but scored per
+   destination instead of averaged.
+2. **Direct raw-feature bias** gives the head demand and supply counts per
+   destination *without* passing through an embedding that was pooled away. This
+   is the term the probe showed is learnable.
+3. **Travel cost** lets deadhead distance enter the choice rather than only being
+   billed afterwards.
+
+**Scope.** Attention arch only; the flat MLP is untouched and still builds.
+Dispatch and no-op logits are unchanged, so the **action space, observation
+space and rollout buffer are all unchanged** -- no env version bump. The pooled
+head's relocation rows are zeroed at init so the two heads cannot compete.
+
+**Tests.** `tests/test_destination_conditioned_head.py`, 4 tests. They pin the
+*structural* property -- the relocation logit vector responds to where demand is,
+each destination's logit depends on its own features, and the pooled head does
+not also own the relocation columns. They deliberately do **not** assert that the
+argmax follows demand: at random init the per-zone constants legitimately
+dominate one unit of demand, so that would be asserting convergence. Whether the
+argmax now follows demand is the acceptance test
+(`scripts/diag_targeting_at_decision.py`), run after training.
+
+38 tests pass.
+
+**Invalidates.** All D51 checkpoints -- the head is new, so their weights do not
+load. Deleted with the runs.
