@@ -831,3 +831,82 @@ So the head is no longer representation-limited: it routes demand through the
 Tanh zone embedding, which is why it works at all. But the direct path the probe
 proved sufficient is starved. `travel` burns 14% of the variation and agrees
 with the full head only 3.3% of the time, so it is close to inert.
+
+---
+
+## D54 CORRECTION — the head was never the bottleneck; my acceptance test sampled
+
+**The planned D55 change was cancelled before making it**, because the premise
+was tested first and failed.
+
+### What I was about to do, and why it was wrong
+
+The D54 decomposition showed the raw-feature path contributing under 6% of
+logit variation while the key/query path decided the destination alone. I
+proposed replacing `Linear(8, 1)` with an MLP on the theory that the raw path
+was capacity-limited, since the learnability probe reached 87.5% with an MLP.
+
+That theory has two competing versions:
+
+  (A) CAPACITY -- the raw path is too small to express what the probe expressed,
+      so widening it helps.
+  (B) OPTIMISATION -- the raw path is already good and the optimiser simply
+      preferred key/query, so widening it changes nothing.
+
+`scripts/diag_raw_path_quality.py` separates them, over 406 real relocation
+opportunities, scoring each term's argmax by how needy the chosen zone is:
+
+| selector | demand ratio | top-1 |
+|---|---|---|
+| random legal target | 0.29 | 12.1% |
+| **full head** | **0.99** | **82.0% IPPO / 80.5% MAPPO** |
+| key/query alone | 0.98 | 79.3% / 82.0% |
+| raw bias alone | 0.95 | 66.0% |
+| travel alone | 0.28 | 15.8% |
+
+**The raw path is already at ratio 0.95 and 66% top-1 on its own.** It was never
+capacity-limited. Hypothesis (B) holds, so the MLP change would have been
+cosmetic at best. Cancelled.
+
+### The real problem: my acceptance test measured sampling, not the policy
+
+The full head reaches **82% top-1 / 0.99 ratio** under argmax. Yet the
+pre-registered test reported 13-20% and ratio 0.33. Both numbers were correct
+and they were measuring different things:
+
+`diag_targeting_at_decision.py` called `policy.act(..., deterministic=False)`,
+so it recorded **sampled** actions. The decomposition took **argmax**.
+
+Re-running the same test with `--deterministic`:
+
+| arm | chance | sampled | **argmax** | ratio sampled | **ratio argmax** |
+|---|---|---|---|---|---|
+| IPPO | 7.74% | 13.04% | **51.42%** | 0.31 | **0.94** |
+| MAPPO | 7.23% | 15.22% | **55.06%** | 0.34 | **0.90** |
+
+**The policy's PREFERRED destination is right 51-55% of the time, against ~8%
+chance -- and picks zones holding 1.50-1.55 unmet riders where 1.59-1.72 were
+available.** That is close to the 87.5% the supervised probe achieved on the
+same features, and it is a completely different picture from the one I reported.
+
+### What this means
+
+1. **D54 worked, and better than the pre-registered test could show.** The
+   original test was sound as a test of *executed* behaviour, and it did what it
+   was designed to do -- it caught that D51 was below chance. But it understated
+   D54 because it scored a stochastic policy.
+2. **No architecture change is needed.** The head extracts what the features
+   offer; the gap to the probe is small and is not representational.
+3. **The remaining gap is action selection, not representation.** A policy whose
+   argmax is 51-55% correct but whose samples are 13-20% correct is
+   under-confident: its relocation distribution is too flat. That is an entropy
+   or training-budget question, and possibly an evaluation-protocol question.
+4. **`--deterministic` is now the default for decision-quality tests**, and
+   sampling is reported separately as executed behaviour. Both are legitimate;
+   conflating them is not.
+
+**Method note.** This is the fourth time today a number I reported measured the
+wrong thing (3.01x margin, 4.1% chance, "output ignores demand", and now
+sampling-vs-argmax). Every one was caught by testing a premise rather than
+accepting a conclusion. The MLP change was cancelled *because* the premise was
+checked first.

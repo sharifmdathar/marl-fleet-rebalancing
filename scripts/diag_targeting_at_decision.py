@@ -88,7 +88,7 @@ def run_arm(policy, cfg, args, label: str) -> dict:
                 if hasattr(policy, "act"):
                     with torch.no_grad():
                         act, _, _ = policy.act(obs[None, :], m[None, :],
-                                               deterministic=False)
+                                               deterministic=args.deterministic)
                     a_val = int(act[0])
                 else:
                     a_val = int(policy.select_action(ag, env, env.observe(ag)))
@@ -167,6 +167,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--base-seed", type=int, default=8000)
+    ap.add_argument("--deterministic", action="store_true",
+                    help="take the argmax action instead of sampling. The "
+                         "rollout samples, but a decision-quality test should "
+                         "report what the policy PREFERS, not what it "
+                         "occasionally lands on.")
     ap.add_argument("--ippo", default=None)
     ap.add_argument("--mappo", default=None)
     args = ap.parse_args()
