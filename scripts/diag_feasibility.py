@@ -125,6 +125,9 @@ def main() -> None:
     empty_km_ep = float(k_last["empty_km"])
     empty_per_ride = empty_km_ep / max(n_completed / eps, 1e-9)
 
+    # Mean trip distance is now recorded per episode (D57 follow-up).
+    trip_km = float(k_last.get("mean_trip_km", 0.0))
+
     # Mean ride duration from the simulator's own pickup/dropoff stamps.
     durs = [t for t, _ in all_trips]
     if durs:
@@ -140,7 +143,16 @@ def main() -> None:
     print(f"  mean ride duration       : {mean_ride:.2f} min "
           f"(median {med_ride:.2f}, p90 {p90_ride:.2f})")
     print(f"  empty km per completed   : {empty_per_ride:.2f} km")
+    print(f"  MEAN TRIP DISTANCE       : {trip_km:.2f} km   (measured)")
     print()
+    if trip_km > 0 and mean_ride == mean_ride:
+        speed = trip_km / mean_ride
+        dead_min = empty_per_ride / speed
+        print(f"  implied speed            : {speed:.3f} km/min "
+              f"({speed*60:.1f} km/h)")
+        print(f"  deadhead time per ride   : {dead_min:.2f} min "
+              f"({100*dead_min/mean_ride:.0f}% of ride time)")
+        print()
 
     print("=" * 74)
     print("The feasibility ratio")
@@ -148,6 +160,16 @@ def main() -> None:
     print("  Little's Law: cars_required = arrival_rate x time_per_job")
     print()
     arrival_rate_per_min = per_hour / 60.0
+    if trip_km > 0:
+        spd = trip_km / mean_ride
+        dm = empty_per_ride / spd
+        job = mean_ride + dm
+        req = arrival_rate_per_min * job
+        print("  MEASURED case (trip distance now recorded):")
+        print(f"    job = {job:.1f} min -> need {req:.1f} cars = "
+              f"{req/env._num_drivers:.2f}x fleet  "
+              f"{'INFEASIBLE' if req > env._num_drivers else 'feasible'}")
+        print()
     # time_per_job: the ride, plus the deadhead needed to reach the rider.
     # Deadhead time is deadhead distance / speed; speed is not exposed in the
     # config, so infer it from the ride: distance is unknown here, so use the

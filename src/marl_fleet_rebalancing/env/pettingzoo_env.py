@@ -60,6 +60,24 @@ from marl_fleet_rebalancing.demand.two_zone_hotspot import (
 
 _M_PER_KM = 1000.0
 
+
+def _haversine_km(a, b) -> float:
+    """Great-circle distance in km between two (lon, lat) pairs.
+
+    D57: order `origin`/`destination` are in DEGREES, the same space as
+    `relocation_points`, so a Manhattan trip spans ~0.02-0.05 degrees. Dividing
+    that by 1000 as if it were metres yields 0.000 km, which is how the first
+    version of the trip-distance log silently reported zero.
+    """
+    lon1, lat1 = float(a[0]), float(a[1])
+    lon2, lat2 = float(b[0]), float(b[1])
+    r = 6371.0088
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dp = np.radians(lat2 - lat1)
+    dl = np.radians(lon2 - lon1)
+    h = np.sin(dp / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return float(2 * r * np.arcsin(np.sqrt(h)))
+
 def _normalize_xy(
     x: float, y: float, area_min: tuple[float, float], area_range: tuple[float, float],
 ) -> tuple[float, float]:
@@ -1325,6 +1343,7 @@ class RideGymAEC(AECEnv):
                     "cancelled_total": int(kpis["cancelled"]),
                     "avg_wait": kpis["avg_wait"],
                     "empty_km": kpis["empty_km"],
+                    "mean_trip_km": kpis["mean_trip_km"],
                 }
                 for a in self.agents
             }
@@ -1358,11 +1377,28 @@ class RideGymAEC(AECEnv):
         ]
         avg_wait = float(np.mean(wait_times)) if wait_times else 0.0
         empty_km = float(self._episode_empty_m / _M_PER_KM)
+        # D57: mean trip distance. Recorded because feasibility depends on it --
+        # cars_required = arrival_rate x time_per_job, and time_per_job needs the
+        # ride distance to convert deadhead km into deadhead time. Without this,
+        # whether the fleet is sufficient is a range (0.55x to 1.09x the fleet on
+        # NYC16) rather than a fact. Non-behavioural: a read-only statistic.
+        trip_km = []
+        for o in self.env.orders.values():
+            if o.status != OrderStatus.COMPLETED:
+                continue
+            org = getattr(o, "origin", None)
+            dst = getattr(o, "destination", None)
+            if org is None or dst is None:
+                continue
+            trip_km.append(_haversine_km(org, dst))
         return {
             "served": float(served),
             "cancelled": float(cancelled),
             "avg_wait": avg_wait,
             "empty_km": empty_km,
+            "mean_trip_km": float(np.mean(trip_km)) if trip_km else 0.0,
+            "p90_trip_km": (float(np.percentile(trip_km, 90))
+                            if trip_km else 0.0),
         }
 
     def kpi_summary(self) -> dict[str, float]:

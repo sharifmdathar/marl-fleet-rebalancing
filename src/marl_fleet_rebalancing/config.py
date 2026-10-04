@@ -191,8 +191,29 @@ class EnvConfig:
 
     # --- Reward weights ---
     # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand - cancel_penalty
-    # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.15/km, D25).
-    alpha: float = 0.2   # weight for passenger waiting time (D25)
+    # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.06/km, D25).
+    #
+    # D58: 0.2 -> 0.0132. The waiting term is charged EVERY turn a rider waits
+    # and summed over all pending riders, while served credit is charged ONCE at
+    # completion. So waiting is a running integral and service is a one-shot, and
+    # their ratio is set by the average pending count rather than by alpha/gamma.
+    # Measured per episode on NYC16 (3 episodes, val): wait -3991, served +263,
+    # deadhead -83, cancel -88 -- waiting was 90% of all reward movement, 15x
+    # the served credit and 45x the deadhead cost. Serving a rider, the thing
+    # this project is about, was a 6% perturbation, and choosing WHERE to send a
+    # car moved 1.9%.
+    #
+    # 0.0132 is the value that makes |wait| == |served| at the measured
+    # operating point, putting the shares at served 37.7%, wait 37.7%, cancel
+    # 12.6%, deadhead 11.9%. Serving becomes the single largest term and every
+    # other term is a real counterweight.
+    #
+    # CAVEAT, deliberately not fixed here: alpha is a single number fitted at one
+    # operating point, so the balance will drift as load changes -- at higher
+    # demand the integral grows and waiting will dominate again. The structural
+    # fix is to charge waiting once per rider (at cancellation) instead of every
+    # turn; that changes reward semantics and is not done implicitly.
+    alpha: float = 0.0132   # weight for passenger waiting time (D25; rescaled D58)
     # Cost per empty repositioning km. At 0.15 with ~2.5 km per relocation a
     # single move cost 0.374 against a completion worth gamma=1.0, so distance
     # was heavy enough to cancel the entire served-demand credit: the trained
@@ -285,7 +306,7 @@ class NYCConfig(EnvConfig):
     # slot of headroom. Sizing this to the data keeps the action space tight
     # (1 + 16 + 16 = 33) instead of wasting masked slots on empty entries.
     max_pending: int = 16
-    alpha: float = 0.2
+    alpha: float = 0.0132   # D58; see EnvConfig for the rescale rationale
     beta: float = 0.06
     gamma: float = 1.0
     cancel_penalty: float = 1.0
