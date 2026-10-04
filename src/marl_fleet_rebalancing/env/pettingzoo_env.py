@@ -1022,6 +1022,13 @@ class RideGymAEC(AECEnv):
             did = getattr(order, "assigned_driver", None)
             dispatcher = self._order_dispatcher.get(oid)
             if dispatcher is None or not (0 <= dispatcher < self._num_zones):
+                # D59: release the deadhead liability even when there is no
+                # dispatcher to pay. Doing this only below the `continue` left a
+                # stale commander on the driver, which then billed the next job's
+                # deadhead to whichever zone relocated last.
+                if did is not None:
+                    self._driver_relocator.pop(did, None)
+                    self._driver_commander.pop(did, None)
                 continue
             # D49: the dispatcher is paid the FULL served credit, always.
             #
@@ -1038,6 +1045,14 @@ class RideGymAEC(AECEnv):
             # distinct work, so both are paid for it.
             local_rewards[dispatcher] += cfg.gamma
             self._order_relocator_paid.pop(oid, None)
+            if did is not None:
+                self._driver_relocator.pop(did, None)
+                # D59: the relocating zone's liability for this job ends with
+                # the job. Section 1c clears it at dispatch, but a driver can
+                # also be dispatched and then complete, so clear here too --
+                # otherwise a stale commander bills the NEXT job's deadhead to
+                # whichever zone relocated last.
+                self._driver_commander.pop(did, None)
 
         # 1c. D48: the relocating zone is paid when its car is DISPATCHED to a
         # rider, not when that ride completes.
@@ -1068,6 +1083,10 @@ class RideGymAEC(AECEnv):
                     local_rewards[relocator] += cfg.relocator_share * cfg.gamma
                     self._order_relocator_paid[oid] = relocator
             self._driver_relocator.pop(did, None)
+            # D59: the relocating zone's liability for this job ends with it.
+            # Otherwise the stale commander carries into the driver's next job
+            # and bills that zone for deadhead it did not cause.
+            self._driver_commander.pop(did, None)
 
         # 1b. Relocation arrival bonus: off by default. It paid the sending zone
         # for the arrival itself, which made moving look profitable without the
@@ -1299,7 +1318,19 @@ class RideGymAEC(AECEnv):
             if getattr(order, "assigned_driver", None) != did:
                 continue
             self._order_dispatcher[oid] = zone_idx
-            self._driver_commander[did] = zone_idx
+            # D59: do NOT overwrite the commander when the driver was relocated
+            # here. The zone that chose the relocation pays for the WHOLE job it
+            # caused -- the relocation leg AND the empty drive to the rider.
+            #
+            # Overwriting meant the sending zone paid only the relocation leg
+            # (2.9 km x beta) while the pickup deadhead was billed to the zone
+            # that happened to use the car. Relocating was therefore close to
+            # free, which is what the measurement shows: 160 relocations x
+            # 2.9 km = 464 km, against 476-481 km observed per episode. Deadhead
+            # is essentially ALL relocation, and it was being charged to whoever
+            # dispatched rather than to whoever moved the car.
+            if did not in self._driver_relocator:
+                self._driver_commander[did] = zone_idx
             self._driver_relocation_target.pop(did, None)
             dispatched_this_turn.append((oid, did, zone_idx))
         self._pending_dispatch = []
