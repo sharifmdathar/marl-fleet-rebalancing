@@ -64,14 +64,39 @@ def build_shift_cfg(args) -> tuple[NYCConfig, int, int]:
     cfg.drift_ramp_start_min = args.switch_min
     cfg.drift_ramp_end_min = args.switch_min + 0.5
     env0 = RideGymAEC(cfg)
-    a, b = pick_far_pair(env0)
+    if args.hubs:
+        a, b = int(args.hubs[0]), int(args.hubs[1])
+        if a == b:
+            raise SystemExit("--hubs must be two DIFFERENT zones")
+        n = env0._num_zones
+        if not (0 <= a < n and 0 <= b < n):
+            raise SystemExit(f"--hubs must lie in [0, {n})")
+        print(f"hubs: EXPLICIT pair zone {a} -> zone {b}")
+    else:
+        a, b = pick_far_pair(env0)
+        print(f"hubs: automatic far pair zone {a} -> zone {b}")
     cfg.drift_source_zone = a
     cfg.drift_dest_zone = b
     cfg.localhub_stage1_zone = a
     cfg.localhub_stage2_zone = b
     cfg.localhub_switch_min = args.switch_min
     cfg.nyc_split = args.split
-    print(f"hubs: A=zone {a}  B=zone {b}")
+    # Report the separation so a run can be checked as genuinely demanding.
+    _d = env0._hops_to_nearest_demand
+    from collections import deque as _deque
+
+    def _hops(s: int) -> dict[int, int]:
+        dist = {s: 0}
+        q = _deque([s])
+        while q:
+            u = q.popleft()
+            for v in env0.env.region_neighbours[u]:
+                if v not in dist:
+                    dist[v] = dist[u] + 1
+                    q.append(v)
+        return dist
+
+    print(f"  hop distance {a} -> {b}: {_hops(a).get(b)}")
     print(f"  A neighbours: {sorted(j for j in env0.env.region_neighbours[a] if j != a)}")
     print(f"  B neighbours: {sorted(j for j in env0.env.region_neighbours[b] if j != b)}")
     return cfg, a, b
@@ -180,6 +205,14 @@ def main() -> None:
     ap.add_argument("--mappo", default=None)
     ap.add_argument("--greedy", action="store_true",
                     help="also export the greedy dispatcher as a reference")
+    ap.add_argument("--hubs", type=int, nargs=2, default=None,
+                    metavar=("A", "B"),
+                    help="explicit zone pair for the two-zone test, e.g. "
+                         "--hubs 10 12. Overrides the automatic far-pair "
+                         "choice so successive runs stay comparable. Default "
+                         "10/12: 3 hops apart, ~6.9 km, so serving B in "
+                         "phase 2 genuinely requires moving fleet across the "
+                         "map rather than to an adjacent zone.")
     ap.add_argument("--outdir", default="results/videos")
     ap.add_argument("--base-seed", type=int, default=7000)
     ap.add_argument("--switch-min", type=float, default=25.0)
