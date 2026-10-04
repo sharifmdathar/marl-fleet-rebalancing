@@ -1248,3 +1248,82 @@ nats across 10 destinations. Softmax over logits that tightly clustered is
 uniform by construction. The lever that fits this evidence is the SCALE of the
 destination logits (a temperature on `dest_logits`), not the entropy bonus --
 and it would not change the argmax, so it is free. Not tried yet.
+
+---
+
+## D63 — RCA: why RL reaches 37% precision when a probe reaches 87%
+
+Two distinct causes, measured. The second is a defect I introduced in D59.
+
+### Cause 1 — the reward flags emptiness but does not rank destinations
+
+`scripts/diag_reward_rank_resolution.py`, D62 checkpoints, 3 episodes, argmax.
+Classifies every relocator payout by aim quality:
+
+**IPPO**
+
+| aim class | aims | paid | paid rate |
+|---|---|---|---|
+| best legal target | 148 | 84 | **56.8%** |
+| other non-empty zone | 91 | 49 | **53.8%** |
+| empty zone | 167 | 55 | **32.9%** |
+
+```
+gap best vs other-nonempty :  +2.9 pp   <- RANKING signal
+gap non-empty vs empty     : +20.9 pp   <- EMPTINESS signal
+```
+
+**The reward is 7x more sensitive to "did you aim at an empty zone" than to
+"did you aim at the best zone".** MAPPO is worse: +0.2pp ranking vs +7.3pp
+emptiness.
+
+So half the decision is rewarded and learnable, and half has almost no
+gradient. That is why precision is 37% rather than 87%: the probe is handed the
+answer, whereas RL must infer it from pay, and pay barely distinguishes the
+candidates it actually has to choose between.
+
+**And the learnable half is not fully learned either: 41.1% of IPPO's aims
+still land on empty zones** despite a 20.9pp penalty for doing so.
+
+### Cause 2 — D59 BROKE the expected-value invariant (defect)
+
+The `AGENTS.md` invariant is that a *perfect* relocation must be profitable:
+`relocator_share * gamma > beta * km`. D59 raised what the relocating zone pays
+without raising what it earns. It now pays for the whole job:
+
+```
+cost = beta * (reloc leg 2.9 km + pickup deadhead 1.46 km) = 0.2616
+```
+
+The invariant's literal arithmetic still holds (0.45 > 0.262). **But the credit
+is conditional** -- it fires only when the relocated car is actually dispatched,
+which happens 56.8% of the time even for a perfect aim:
+
+| aim class | dispatch rate | expected credit | net |
+|---|---|---|---|
+| best | 56.8% | 0.2556 | **-0.0060** |
+| other non-empty | 53.8% | 0.2421 | **-0.0195** |
+| empty | 32.9% | 0.1481 | **-0.1135** |
+
+**Expected value is negative for every class of relocation, including the
+best.** The policy is therefore *correct* to be ambivalent about relocating, and
+the config comment asserting profitability is wrong because it ignores the
+conditionality.
+
+This also explains why raising `beta` never worked (D58): the binding
+constraint was never `beta` alone, it was credit-per-unit-cost where the credit
+only arrives ~57% of the time.
+
+### What follows
+
+The invariant needs restating with the measured conditionality:
+
+    EV = relocator_share * gamma * P(dispatch | relocated) > beta * km_total
+
+At the measured 0.568 that requires `relocator_share * gamma > 0.461`, i.e.
+`relocator_share > 0.46` against a cost of 0.2616 -- the current 0.45 is
+marginally below it. That is a ~2% shortfall, which is why relocation is
+net-neutral at best rather than profitable.
+
+Not changed here: it is a reward edit and the user's call. Recorded with the
+measurement that establishes it.
