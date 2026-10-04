@@ -250,7 +250,7 @@ class RideGymAEC(AECEnv):
         # order_id -> relocator zone already paid at dispatch (D48). Lets
         # section 1 know to reduce the dispatcher's share so the pair pays one
         # gamma between them rather than two.
-        self._order_relocator_paid: dict[int, int] = {}
+        self._order_relocator_paid: dict[int, tuple[int, float]] = {}
         # Dispatches requested this turn but not yet confirmed (D51). Committed
         # to _order_dispatcher / _driver_commander only after RideGym honours
         # the bid, so a refused dispatch leaves no phantom attribution.
@@ -1080,8 +1080,13 @@ class RideGymAEC(AECEnv):
             relocator = self._driver_relocator.get(did)
             if relocator is not None and relocator != zone_idx:
                 if 0 <= relocator < self._num_zones:
-                    local_rewards[relocator] += cfg.relocator_share * cfg.gamma
-                    self._order_relocator_paid[oid] = relocator
+                    paid = cfg.relocator_share * cfg.gamma
+                    ref = float(cfg.relocator_deficit_reference)
+                    if ref > 0.0:
+                        waiting = self._pending_per_zone[zone_idx] * max(self._num_drivers, 1)
+                        paid *= min(float(waiting) / ref, 1.0)
+                    local_rewards[relocator] += paid
+                    self._order_relocator_paid[oid] = (relocator, paid)
             self._driver_relocator.pop(did, None)
             # D59: the relocating zone's liability for this job ends with it.
             # Otherwise the stale commander carries into the driver's next job
@@ -1157,9 +1162,9 @@ class RideGymAEC(AECEnv):
             # relocated cancelled ride paying 0.45 while a plain cancelled ride
             # paid nothing -- a bias toward relocating into zones where orders
             # time out. Reversing the share keeps one gamma per completed ride.
-            paid_to = self._order_relocator_paid.pop(oid, None)
-            if paid_to is not None and 0 <= paid_to < self._num_zones:
-                local_rewards[paid_to] -= cfg.relocator_share * cfg.gamma
+            paid = self._order_relocator_paid.pop(oid, None)
+            if paid is not None and 0 <= paid[0] < self._num_zones:
+                local_rewards[paid[0]] -= paid[1]
         if cancel_penalty > 0.0:
             for oid in newly_cancelled:
                 order = self.env.orders.get(oid)

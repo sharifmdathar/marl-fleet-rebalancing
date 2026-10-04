@@ -1446,3 +1446,21 @@ of breadth.
   not cite numbers across the two configs. The 62-zone build remains in
   `scripts/build_zone_subset.py`'s source directory `data/nyc/` as reference.
 - Revisit if: the advisor requires the full 62-zone scale for the final study.
+
+## D66 — deficit-scaled relocator credit (env 3.1)
+- Date: 2026-10-04, Status: implemented, NOT yet evaluated (no training run)
+- Problem (D63 Cause 1): the relocator was paid a flat 0.65 whatever the
+  destination's demand, so the reward could not rank targets (+2.9pp gap
+  between best and other non-empty zones vs +20.9pp empty vs non-empty).
+- Change: relocator credit = relocator_share * gamma * min(waiting_at_dest /
+  reference, 1). `waiting_at_dest` = pending riders in the zone that dispatched
+  the car (the car's destination when it was relocated). Clawback on cancel
+  reverses the exact amount paid (stored with the payout), not the flat share.
+  NYCConfig reference = 1.7 (mean demand at best legal target, D62). EnvConfig
+  default 0 = off, so Bandra and old configs are unchanged. Config 3.0 -> 3.1.
+- Verified: tests/test_deficit_credit.py (disabled = flat; saturates at the
+  reference). Full suite passes.
+- Not verified: whether this improves precision, empty km or wait. That needs
+  a training run and >=5 seeds, which has not been authorised.
+- Revisit if: policy chases one hotspot and loses breadth (HANDOFF s.2 risk),
+  or empty km rises without a matching service/wait gain.
