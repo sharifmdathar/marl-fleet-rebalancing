@@ -568,3 +568,102 @@ to 2.95 and accepts an override. `diag_reloc_invariant.py`,
 were repointed at live sources. The `config.py` comment also asserted that
 `nyc_window_limit` was an "open decision that MUST be settled before training";
 it was settled (`NYCConfig` sets 130) and the comment was misleading.
+
+---
+
+## D53 — relocation targeting is demand-blind, and it is not the reward
+
+Measured, not hypothesised. Three probes, each ruling out one explanation.
+
+### 1. The earlier precision numbers were confounded
+
+`diag_reloc_leg_outcome.py`: **7 of 7** relocation legs were cut short by an
+opportunistic dispatch (`allow_relocating_dispatch`, D14). The car is handed to a
+rider mid-journey, so the zone it *ends up in* reflects where a rider was, not
+where the policy aimed. Every earlier figure that compared aimed-zone to landed-
+zone -- including D44's 4.1% chance baseline -- was therefore measuring the wrong
+thing.
+
+`diag_targeting_at_decision.py` measures at the instant of the action instead:
+
+| | IPPO | MAPPO |
+|---|---|---|
+| mean legal targets per move | **13.55** | 13.77 |
+| chance (1/legal targets) | **8.40%** | 7.60% |
+| chose best legal target | 6.40% | 6.08% |
+| mean demand at chosen target | **0.30** | 0.31 |
+| mean demand at best available target | **1.69** | 1.77 |
+| misses where the neediest zone WAS offered | **91.9%** | 91.4% |
+
+Two corrections fall out of this. D44's "legal targets average 1.12/turn" is
+**stale** -- it predates D45, which removed the neighbour-only mask; the real
+figure is 13.5 of 15. And D44's conclusion that "the destination is largely
+unexpressible (0.5% reachability)" **no longer holds**: 91.9% of misses had the
+right zone on the menu.
+
+`diag_reloc_opportunity.py` also killed the "cannot" explanations: IPPO relocates
+on **84.7%** of zone-turns where an idle car and a legal target coincide, MAPPO
+on 71.4%. The low relocation *rate* is because a zone holds an idle car on only
+8.8% of zone-turns.
+
+### 2. The reward does reward good targeting
+
+`diag_reward_targeting_sensitivity.py`, MAPPO and IPPO across two seeds:
+
+| aim class | paid |
+|---|---|
+| best legal target | 58.6% / 45.5-66.7% |
+| non-best but non-empty | 58.1% / 53.8-60.9% |
+| empty zone | **37.8% / 37.2-41.4%** |
+
+Aiming at a needy zone is paid ~20pp more often than aiming at an empty one. So
+there is gradient being left on the table, and the policy is not optimising
+correctly.
+
+### 3. The network reads demand magnitude but not direction
+
+`diag_logit_sensitivity.py`, finite differences on the real network:
+
+| input | IPPO L1 | MAPPO L1 |
+|---|---|---|
+| `all_zone_state` col2 (pending) | 3.02 | 2.90 |
+| `all_zone_state` col3 (deficit) | 1.83 | 2.78 |
+| `demand_hist` | 3.80 | **15.26** |
+| `neighbor_mask` | 0.005 | 0.009 |
+
+The logits move substantially -- the signal is read. But placing 100% of demand
+in each of 16 zones in turn, the argmax relocation target **never changed**:
+1/16 correct, chance 6.2%.
+
+The cause is in `ZoneAttentionEncoder.forward`. `zone_pool` is a softmax-weighted
+**sum** of per-zone embeddings, and every action logit is produced from that one
+pooled vector. A weighted sum is permutation-invariant over zones: it can encode
+"there is demand somewhere" but cannot bind that demand to a particular
+destination. **Magnitude is read; direction is discarded.**
+
+### Ruled out as external failures
+
+| check | result |
+|---|---|
+| `obs_to_vector` order vs `obs_dim` | match, 279 = 279 |
+| demand column recoverability from the vector | **608/608 exact** |
+| `demand_hist` live during episodes | 98.3% of agent-steps |
+| demand reaches the logits | yes, L1 2.9-15.3 |
+
+No plumbing bug. The loss is architectural.
+
+### The precondition for fixing it
+
+`diag_target_learnability.py`: a supervised probe on the *existing*
+observation, given the legal-target menu, recovers the best target at:
+
+| seed | top-1 | chance | lift |
+|---|---|---|---|
+| 8000 | 71.6% | 9.4% | **7.6x** |
+| 8100 | 64.6% | 8.6% | **7.5x** |
+| 8200 | 75.3% | 9.1% | **8.3x** |
+| 20000-sample run | 87.5% | 9.1% | **9.6x** |
+
+**The information is present and learnable from the current observation.** The
+architecture, not the features, is what loses it. That is what made D54 worth
+building rather than changing the observation.

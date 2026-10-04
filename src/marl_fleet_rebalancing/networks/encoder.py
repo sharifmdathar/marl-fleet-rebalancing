@@ -168,7 +168,46 @@ class ZoneAttentionEncoder(nn.Module):
             nn.Linear(ctx_dim, hidden_dim), nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
         )
+        # D54: destination-conditioned relocation head.
+        #
+        # Previously ALL action logits came from one pooled vector `h`, and the
+        # relocation portion of that vector was a softmax-weighted SUM of zone
+        # embeddings. A weighted sum is permutation-invariant over zones, so it
+        # can encode "there is a lot of demand somewhere" but cannot bind that
+        # demand to a particular destination. Measured: perturbing the demand
+        # inputs moved the relocation logits substantially (L1 sensitivity
+        # 2.9-15.3) yet the argmax target never changed -- the policy read
+        # demand magnitude without direction, and aimed at a fixed zone
+        # regardless of where demand was.
+        #
+        # This head instead scores each candidate destination against the
+        # agent's own state, so every destination keeps its identity:
+        #
+        #     dest_logits[j] = <W_dest . zone_emb[j], W_self . self_ctx> / sqrt(d)
+        #
+        # plus a per-destination bias from that zone's own raw demand and car
+        # counts, and a learned travel-cost term from the centroid geometry. The
+        # dispatch and no-op logits are unchanged, so the action space, the
+        # rollout buffer and the observation space are all untouched.
+        self.dest_key = nn.Linear(embed_dim, hidden_dim)
+        self.self_query = nn.Linear(self_ctx_dim, hidden_dim)
+        # Raw per-zone scalars, so the head has direct access to demand and
+        # supply per destination without having to reconstruct them from an
+        # embedding that was pooled away.
+        self.dest_bias = nn.Linear(4 + hist_len, 1)
+        # Per-zone identity, so the head can reason about distance-to-each
+        # destination rather than about an anonymous pooled vector.
+        self.zone_idx = nn.Embedding(num_zones, 2)
+        self.zone_centroid = nn.Linear(2, 2, bias=False)
+        self.travel_cost = nn.Linear(2, 1)
+        self._dest_scale = hidden_dim ** 0.5
+
         self.actor = nn.Linear(hidden_dim, action_dim)
+        # Zero the pooled head's relocation columns so the new head owns them
+        # at initialisation, instead of both contributing.
+        with torch.no_grad():
+            self.actor.weight[1 + max_pending:, :].zero_()
+            self.actor.bias[1 + max_pending:].zero_()
         self.critic = nn.Linear(hidden_dim, 1)
 
     def _slice(self, obs: torch.Tensor, name: str) -> torch.Tensor:
@@ -222,6 +261,43 @@ class ZoneAttentionEncoder(nn.Module):
         )
         h = self.trunk(ctx)
         logits = self.actor(h)
+
+        # --- D54: destination-conditioned relocation logits ---
+        # One logit per candidate destination, scored against this agent's own
+        # state, so a destination's identity survives into the decision. The
+        # zone embeddings are NOT pooled here; each one is scored on its own.
+        keys = self.dest_key(zone_emb)                       # (B, Z, H)
+        q = self.self_query(self_ctx).unsqueeze(1)            # (B, 1, H)
+        dest = (keys * q).sum(-1) / self._dest_scale          # (B, Z)
+
+        # Direct per-destination bias from that zone's own raw features: this
+        # is the term that lets "zone 6 has riders, zone 14 does not" reach the
+        # logits without passing through an attention-weighted sum.
+        dest = dest + self.dest_bias(
+            torch.cat([all_zone_state, demand_hist], dim=-1)).squeeze(-1)
+
+        # Travel cost from the acting zone's centroid to each destination's, so
+        # deadhead distance can enter the choice rather than only being billed
+        # afterwards. Each destination is identified by a learned index
+        # embedding, which the attention stack already treats as the zone's
+        # identity; the relative offset to the acting zone is then computed from
+        # those per-zone vectors. This avoids threading zone centroids through
+        # the build API, and keeps the term fully learned.
+        cents = self.zone_centroid(self.zone_idx.weight)        # (Z, 2)
+        geo = torch.stack([
+            cents[:, 0].unsqueeze(0) - zone_location[:, 0:1],
+            cents[:, 1].unsqueeze(0) - zone_location[:, 1:2],
+        ], dim=-1)                                              # (B, Z, 2)
+        dest = dest + self.travel_cost(geo).squeeze(-1)
+
+        # Scatter into the action head. Relocation action for zone j is
+        # 1 + max_pending + j. Self-targeting is already excluded by the env:
+        # `_legal_relocate_targets` skips `j == zone_idx`, and the action mask
+        # enforces it, so no extra masking is needed here.
+        n_reloc = dest.shape[1]
+        base = 1 + self._max_pending
+        logits[:, base:base + n_reloc] = logits[:, base:base + n_reloc] + dest
+
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, float("-inf"))
         return logits, self.critic(h).squeeze(-1)
