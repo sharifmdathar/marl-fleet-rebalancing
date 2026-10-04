@@ -1067,3 +1067,77 @@ target**. That does not invalidate the targeting results, which are ratios again
 measured chance and therefore unaffected by the ceiling. It does mean service
 rate should not be read as "how good the policy is", only as "how much of the
 achievable throughput it captured".
+
+---
+
+## D58 RESULT — alpha rescale did not fix the tradeoff; beta is the binding weight
+
+### What was done
+
+1. **Trip distance logging** (D57 follow-up). Order `origin`/`destination` are
+   in DEGREES, so distance needs haversine; the first version divided by 1000
+   as if metres and silently reported 0.000 km. Now recorded per episode:
+   **mean trip 2.77 km, p90 5.63 km**.
+
+   **Feasibility closed: 0.83x the fleet** (job = 10.0 min, 21.7 cars needed vs
+   26 available). The scenario is feasible with modest headroom -- not the
+   1.09x infeasibility the unbounded range allowed for. Recorded deadhead is
+   1.46 km/ride = **53% of ride time** at the implied 0.42 km/min.
+
+2. **`alpha` 0.2 -> 0.0132.** Waiting was 90% of all reward movement (measured
+   -3991/episode against served +263). New shares: served 37.7%, wait 37.7%,
+   cancel 12.6%, deadhead 11.9%.
+
+### The result: the tradeoff is unchanged
+
+Paired, 6 identical seeds, val split:
+
+| arm | SR% | empty km | avg wait | SR/100km | reloc |
+|---|---|---|---|---|---|
+| greedy | 52.73 ±4.38 | **78.1 ±8.1** | **2.56 ±0.18** | 68.0 | 0 |
+| lp | 67.29 ±3.97 | 154.3 ±9.6 | 2.67 ±0.27 | 43.7 | 64 |
+| **IPPO (D58)** | 72.25 ±4.20 | 475.8 ±13.0 | 3.00 ±0.20 | 15.2 | 160 |
+| **MAPPO (D58)** | 71.70 ±4.43 | 480.8 ±13.3 | 2.92 ±0.16 | 14.9 | 165 |
+
+Against D54 (same seeds): IPPO 74.32 -> 72.25 SR, 470.4 -> 475.8 km. **The
+rescale cost ~2pp of service rate and bought nothing on deadhead.**
+
+### Why: deadhead is the cheap term, and alpha was never the problem
+
+Relative to deadhead, the other terms are enormous:
+
+    served / deadhead  = 263 / 83   = 3.16x
+    wait   / deadhead  = 263 / 83   = 3.16x
+    deadhead           = 11.9% of total movement
+
+**One served ride buys 11 relocations worth of deadhead** (`beta * 2.9 km = 0.174`
+against a served credit of 1.0). Relocating is so cheap that the policy does it
+160 times an episode and pays almost nothing for the privilege. Draining the
+waiting term only removed a term that was *reinforcing* that behaviour, since
+waiting was 90% of the signal and the policy was already minimising it.
+
+### The actual constraint: beta, bounded above by the AGENTS.md invariant
+
+`beta` cannot simply be raised, because `relocator_share > beta * km` is the
+invariant `AGENTS.md` records from env 2.8:
+
+| beta | deadhead per 2.9 km relocation | rides to pay back | invariant (share 0.45) |
+|---|---|---|---|
+| **0.06 (current)** | 0.174 | **5.7** | 2.59x -- satisfied |
+| 0.10 | 0.290 | 3.4 | 1.55x -- satisfied |
+| **0.15** | 0.435 | 2.3 | 1.03x -- marginal |
+| 0.20 | 0.580 | 1.7 | **0.78x -- VIOLATED** |
+
+**`beta` can rise only to ~0.156** before a perfect relocation becomes
+net-negative and the policy learns to churn -- the exact env-2.8 failure.
+
+So the two requirements are in direct conflict:
+- make deadhead expensive enough to discipline relocation -> needs beta >= ~0.15
+- keep a perfect relocation profitable -> needs beta < ~0.156
+
+They meet in an extremely narrow band. **Raising `beta` alone cannot fix this**,
+and neither can `alpha`. The lever that can is `relocator_share`: raising it
+lifts the floor that `beta` is bounded by, opening the range.
+
+This is recorded, not acted on -- it is a reward change with a real design
+tension, and the choice of which term to move is the user's.
