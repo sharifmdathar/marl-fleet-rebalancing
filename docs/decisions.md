@@ -331,3 +331,59 @@ that relayed a car, not just the last hop"). That change was made to stop the
 originating zone earning nothing on multi-hop repositioning. The measurement
 says the originating zone earned nothing because the divisor was dividing, not
 because it went untracked, so the fix was treating a coincidence as a relay.
+
+---
+
+## D48 — the relocating zone is paid when its car is DISPATCHED, not on completion
+
+**Change:** `relocator_share * gamma` moves from the ride's completion
+(section 1) to the dispatch of the relocated car (new section 1c). Section 1
+then pays the dispatcher only `1 - relocator_share` for that ride, so the pair
+still pays exactly one gamma between them. A cancellation reverses the
+relocator share.
+
+**Why:** the relocation decision pays `-beta * km = -0.149` on the turn it is
+commanded. Evidence that it was right should arrive on a comparable timescale.
+Measured over 131 relocation legs that reached their destination
+(`scripts/diag_reloc_time_to_use.py`): **44.3% were ever dispatched, and 98.3%
+of those were dispatched on the arrival turn itself** -- median 0 turns, not the
+21-40 turns a completion credit took. The 21-40 figure is the completion lag,
+not the time until the car finds work, and paying on completion threw away a
+signal that was already available.
+
+At `gae_lambda=0.95` a reward 60 turns back retained 2.5% of its magnitude at
+the originating action (D46), so a completion-gated credit was arriving
+effectively as noise. This removes the delay rather than trying to propagate
+through it.
+
+**Why this is not D28.** D28's arrival bonus paid for the *arrival*, which
+happens whether or not the car is wanted, and was switched off for exactly that
+reason. This pays for the *dispatch*, which requires a waiting rider: the 55.7%
+of arrivals that are never dispatched earn nothing.
+
+**Two accounting bugs found while verifying, both mine:**
+
+1. *Double payment.* Section 1 read `_driver_relocator`, which 1c already pops,
+   so the lookup returned `None` and paid the dispatcher the full gamma **on top
+   of** the relocator share. One ride paid 1.45 gamma. Section 1 now reads
+   `_order_relocator_paid`.
+2. *Clawback sign.* The cancellation reversal first used `+=`, crediting the
+   relocator instead of reversing it, overpaying every relocated cancellation by
+   0.90. It showed up as a suspiciously constant `+0.90` per episode in
+   `scripts/diag_served_credit_total.py`. Now `-=`.
+
+The clawback is also no longer nested inside `if cancel_penalty > 0.0`. It is
+part of the served-credit accounting, not a penalty; gating it on the penalty
+weight silently disabled it whenever that weight was 0.
+
+**Verified.** `scripts/diag_served_credit_total.py`, 3 episodes: emitted 243.10
+against expected 243.10 (235 completed x 1.0 + 18 in-flight-at-cutoff x 0.45),
+difference **+0.00**. A control run with `relocator_share = 0` emits exactly the
+completed-ride count (86.00, 74.00, 75.00 on three seeds), confirming the
+dispatcher term is never overpaid. `scripts/diag_reloc_invariant.py`: the
+relocator margin is a constant 3.01x at every hop count. 33 tests pass.
+
+**Not yet measured.** Whether this makes relocation *learn*. The acceptance test
+is unchanged: relocation precision against the 4.1% chance baseline measured by
+the random control arm in D44. Everything above establishes that the credit is
+correct and prompt, not that a policy exploits it.

@@ -416,9 +416,10 @@ class TestFixesAndDemand(unittest.TestCase):
         # 2. Check that target zone 3 has significant pending demand fraction in column 2
         demand_col = obs["all_zone_state"][:, 2]
         self.assertTrue(np.all(demand_col >= 0.0))
-        # 3. Served-demand credit is paid on COMPLETION, not on dispatch: a
-        # zone that only aims a car at a rider earns nothing, and a zone whose
-        # relocated car actually completes a ride earns its share.
+        # 3. The DISPATCHER's credit is paid on COMPLETION, not on dispatch: a
+        #    zone that only aims a car at a rider earns nothing. The
+        #    RELOCATOR is the exception (D48) -- it is paid when its car is
+        #    dispatched, because that is the moment the relocation is proven.
         from ride_gym.enums import OrderStatus
 
         class _Order:
@@ -429,22 +430,25 @@ class TestFixesAndDemand(unittest.TestCase):
         credit_env.env.orders[100] = _Order(OrderStatus.PENDING, None)
         credit_env._order_dispatcher[100] = 5
         credit_env._driver_relocator[1] = 18  # driver 1 was relocated by zone 18
-        rewards = credit_env._compute_zone_rewards({}, [])
-        self.assertEqual(rewards[5], 0.0, "dispatch alone must not be paid")
-        self.assertEqual(rewards[18], 0.0, "arrival must not be paid")
+
+        # Dispatch: only the relocating zone is paid, the dispatcher is not.
+        at_dispatch = credit_env._compute_zone_rewards({}, [(100, 1, 5)])
+        self.assertEqual(at_dispatch[5], 0.0, "dispatch alone must not be paid")
+        self.assertGreater(at_dispatch[18], 0.0,
+                           "relocating zone is paid on dispatch (D48)")
 
         credit_env.env.orders[100] = _Order(OrderStatus.COMPLETED, 1)
         rewards = credit_env._compute_zone_rewards({}, [])
         credit5, credit18 = rewards[5], rewards[18]
         self.assertGreater(credit5, 0.0, "dispatcher is paid on completion")
-        self.assertGreater(credit18, 0.0, "supplying zone is paid on completion")
+        self.assertEqual(credit18, 0.0, "relocator was already paid at dispatch")
         self.assertAlmostEqual(
-            credit5 + credit18, credit_cfg.gamma, places=5,
+            credit5 + at_dispatch[18], credit_cfg.gamma, places=5,
             msg="exactly one gamma is paid per completed ride",
         )
         self.assertAlmostEqual(
-            credit18 / credit_cfg.gamma, credit_cfg.relocator_share, places=5,
-            msg="supplying zone takes relocator_share",
+            at_dispatch[18] / credit_cfg.gamma, credit_cfg.relocator_share, places=5,
+            msg="relocating zone takes relocator_share",
         )
 
         # Paid exactly once: re-crediting the same completion pays nothing more.
@@ -461,15 +465,18 @@ class TestFixesAndDemand(unittest.TestCase):
 
 
     def test_relocation_credit_is_not_divided_across_hops(self):
-        """D47: relocation credit is paid in full to the zone that moved the car.
+        """D47+D48: the relocating zone is paid the FULL share, undivided, at dispatch.
 
         Replaces the relay-chain test. The chain was a list of every zone that
         had relocated a car since its last completed order, and the credit was
         split by its length. Measured over 504 relocations, that list was not a
         relay: median 20 turns between hops of the same car, 0.4% back-to-back,
-        and 87% of hop pairs had the car serve an order in between. Dividing by
-        it charged zones for having their cars reused, and at 3 hops the payout
-        fell to 0.150 against a 0.149 deadhead cost.
+        and 87% of hop pairs had the car serve an order in between.
+
+        D48 moves the payment from ride completion to the dispatch of the
+        relocated car, because 98.3% of relocated cars that are ever used are
+        dispatched on their arrival turn -- a median of 0 turns, not the 21-40
+        turns the completion credit took.
         """
         credit_cfg = BandraConfig()
         credit_cfg.team_share = 0.0
@@ -486,18 +493,30 @@ class TestFixesAndDemand(unittest.TestCase):
                 self.status = status
                 self.assigned_driver = driver
 
-        # zone 9 dispatches driver 3, which zone 6 relocated to it.
-        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        share = credit_cfg.relocator_share * credit_cfg.gamma
+
+        # Turn 1: zone 9 dispatches driver 3, which zone 6 had relocated.
+        # Only the relocator is paid, and only now.
+        env.env.orders[500] = _Order(OrderStatus.PENDING, None)
         env._order_dispatcher[500] = 9
         env._driver_relocator[3] = 6
+        at_dispatch = env._compute_zone_rewards({}, [(500, 3, 9)])
+        self.assertAlmostEqual(at_dispatch[6], share, places=5,
+                               msg="relocator paid the FULL share on dispatch")
+        self.assertEqual(at_dispatch[9], 0.0, "dispatcher not paid until completion")
 
-        rewards = env._compute_zone_rewards({}, [])
-        share = credit_cfg.relocator_share * credit_cfg.gamma
-        self.assertAlmostEqual(rewards[9] / credit_cfg.gamma, 1.0 - credit_cfg.relocator_share,
-                               places=5, msg="dispatcher keeps 1 - relocator_share")
-        self.assertAlmostEqual(rewards[6], share, places=5,
-                               msg="the relocating zone is paid the FULL share, undivided")
-        self.assertEqual(rewards[4], 0.0, "a zone that did not move this car earns nothing")
+        # Turn 2: the ride completes. The dispatcher takes only its reduced
+        # share, so the pair has paid exactly one gamma between them.
+        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        at_completion = env._compute_zone_rewards({}, [])
+        self.assertAlmostEqual(
+            at_completion[9], (1.0 - credit_cfg.relocator_share) * credit_cfg.gamma,
+            places=5, msg="dispatcher keeps 1 - relocator_share")
+        self.assertAlmostEqual(
+            at_dispatch[6] + at_completion[9], credit_cfg.gamma, places=5,
+            msg="dispatch + completion together pay exactly one gamma")
+        self.assertEqual(at_completion[4], 0.0,
+                         "a zone that did not move this car earns nothing")
 
     def test_relocation_credit_survives_repeated_moves_of_one_car(self):
         """D47: re-moving a car overwrites the relocator; credit is never divided.
@@ -522,19 +541,119 @@ class TestFixesAndDemand(unittest.TestCase):
                 self.assigned_driver = driver
 
         # The same car moved by three different zones in turn; the last mover
-        # is the one that put it where it served.
-        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        # is the one that put it where it serves.
+        env.env.orders[500] = _Order(OrderStatus.PENDING, None)
         env._order_dispatcher[500] = 9
         env._driver_relocator[3] = 5
         env._driver_relocator[3] = 7
         env._driver_relocator[3] = 6
 
-        rewards = env._compute_zone_rewards({}, [])
+        rewards = env._compute_zone_rewards({}, [(500, 3, 9)])
         share = credit_cfg.relocator_share * credit_cfg.gamma
         self.assertAlmostEqual(rewards[6], share, places=5,
                                msg="only the most recent relocating zone is paid")
         self.assertEqual(rewards[5], 0.0, "superseded relocators earn nothing")
         self.assertEqual(rewards[7], 0.0, "superseded relocators earn nothing")
+
+    def test_relocating_car_arriving_with_no_rider_earns_nothing(self):
+        """D48: dispatch pays the relocator, so an unused arrival pays nothing.
+
+        This is the distinction from D28's arrival bonus, which paid for the
+        arrival itself and was switched off because it paid without proof.
+        Measured, 55.7% of relocation legs arrive and are never dispatched.
+        """
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.cancel_penalty = 0.0
+        credit_cfg.beta = 0.0
+        env = RideGymAEC(config=credit_cfg, seed=7)
+        env.reset(seed=7)
+
+        env._driver_relocator[3] = 6
+        # No dispatched_this_turn entry: the car arrived but nobody wanted it.
+        rewards = env._compute_zone_rewards({}, [])
+        self.assertEqual(rewards[6], 0.0,
+                         "an arrival with no dispatch must not be paid")
+
+    def test_cancelled_relocated_ride_claws_back_the_relocator_share(self):
+        """D48: a cancelled ride must not leave the relocator paid.
+
+        The relocator is paid at dispatch, before it is known whether the ride
+        survives. If a cancellation does not reverse it, a relocated cancelled
+        ride pays 0.45 while a plain cancelled ride pays nothing, which biases
+        the agent toward relocating into zones where orders time out.
+
+        The reversal must SUBTRACT. An earlier version of this clawback used
+        `+=`, which credited the relocator instead of reversing it and
+        overpaid every relocated cancellation by 0.90; the invariant script
+        `diag_served_credit_total.py` caught it as a constant +0.90 per episode.
+        """
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.beta = 0.0
+        credit_cfg.cancel_penalty = 0.0  # clawback must not depend on this
+        env = RideGymAEC(config=credit_cfg, seed=7)
+        env.reset(seed=7)
+
+        from ride_gym.enums import OrderStatus
+
+        class _Order:
+            def __init__(self, status, driver):
+                self.status = status
+                self.assigned_driver = driver
+
+        env.env.orders[700] = _Order(OrderStatus.PENDING, None)
+        env._order_dispatcher[700] = 9
+        env._driver_relocator[3] = 6
+
+        at_dispatch = env._compute_zone_rewards({}, [(700, 3, 9)])
+        share = credit_cfg.relocator_share * credit_cfg.gamma
+        self.assertAlmostEqual(at_dispatch[6], share, places=5)
+
+        env.env.orders[700] = _Order(OrderStatus.CANCELLED, 3)
+        at_cancel = env._compute_zone_rewards({}, [])
+        self.assertAlmostEqual(at_cancel[6], -share, places=5,
+                               msg="clawback must SUBTRACT the share, not add it")
+        self.assertAlmostEqual(at_dispatch[6] + at_cancel[6], 0.0, places=5,
+                               msg="a relocated cancelled ride nets to zero")
+
+    def test_relocation_paid_at_dispatch_and_not_again_at_completion(self):
+        """D48: the relocator is paid once. Completion must not re-pay it.
+
+        The regression this pins: paying the relocator at dispatch while
+        section 1 still paid it at completion would pay 1.45 gamma for one ride,
+        making relocation look far more profitable than it is.
+        """
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.cancel_penalty = 0.0
+        credit_cfg.beta = 0.0
+        env = RideGymAEC(config=credit_cfg, seed=7)
+        env.reset(seed=7)
+
+        from ride_gym.enums import OrderStatus
+
+        class _Order:
+            def __init__(self, status, driver):
+                self.status = status
+                self.assigned_driver = driver
+
+        env.env.orders[500] = _Order(OrderStatus.PENDING, None)
+        env._order_dispatcher[500] = 9
+        env._driver_relocator[3] = 6
+        first = env._compute_zone_rewards({}, [(500, 3, 9)])
+
+        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        second = env._compute_zone_rewards({}, [])
+
+        total = sum(first) + sum(second)
+        self.assertAlmostEqual(total, credit_cfg.gamma, places=5,
+                               msg="one ride pays exactly one gamma in total")
+        self.assertAlmostEqual(second[6], 0.0, places=5,
+                               msg="relocator is not re-paid at completion")
 
         # A car that was never relocated pays the dispatcher in full.
         env3 = RideGymAEC(config=credit_cfg, seed=7)

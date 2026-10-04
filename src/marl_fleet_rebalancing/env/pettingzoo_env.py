@@ -229,6 +229,10 @@ class RideGymAEC(AECEnv):
         # the most recent move is paid the full relocator_share if that driver
         # later completes an order; no zone is paid for a car it did not move.
         self._driver_relocator: dict[int, int] = {}
+        # order_id -> relocator zone already paid at dispatch (D48). Lets
+        # section 1 know to reduce the dispatcher's share so the pair pays one
+        # gamma between them rather than two.
+        self._order_relocator_paid: dict[int, int] = {}
         # driver_id -> target_zone_idx (destination of ongoing relocation)
         self._driver_relocation_target: dict[int, int] = {}
 
@@ -719,6 +723,7 @@ class RideGymAEC(AECEnv):
         self._seen_completed_ids.clear()
         self._driver_commander.clear()
         self._driver_relocator.clear()
+        self._order_relocator_paid.clear()
         self._driver_relocation_target.clear()
         self._demand_history.clear()
         self._obs_scales[:] = 0.0
@@ -995,16 +1000,42 @@ class RideGymAEC(AECEnv):
             dispatcher = self._order_dispatcher.get(oid)
             if dispatcher is None or not (0 <= dispatcher < self._num_zones):
                 continue
-            relocator = self._driver_relocator.get(did) if did is not None else None
-            # A zone that dispatched a car it had itself relocated earns the
-            # full served credit: it made the car available and used it.
-            if relocator is not None and relocator != dispatcher:
+            # D48: read the dispatch-time record, NOT _driver_relocator. That dict is
+            # popped when the car is dispatched (section 1c), so looking it up
+            # here would return None and pay the dispatcher the FULL gamma on
+            # top of the relocator share already paid at dispatch.
+            if oid in self._order_relocator_paid:
                 local_rewards[dispatcher] += (1.0 - cfg.relocator_share) * cfg.gamma
-                local_rewards[relocator] += cfg.relocator_share * cfg.gamma
             else:
                 local_rewards[dispatcher] += cfg.gamma
-            if did is not None:
-                self._driver_relocator.pop(did, None)
+            self._order_relocator_paid.pop(oid, None)
+
+        # 1c. D48: the relocating zone is paid when its car is DISPATCHED to a
+        # rider, not when that ride completes.
+        #
+        # Why: the relocation decision pays -beta*km immediately, so evidence
+        # that it was right should arrive on a comparable timescale. Measured
+        # over 131 relocation legs that reached their destination, 98.3% of the
+        # cars that were ever dispatched were dispatched ON the arrival turn --
+        # a median of 0 turns. Waiting for completion meant paying 21-40 turns
+        # later, at which point GAE had attenuated the signal (2.5% survival at
+        # lambda=0.95, see D46).
+        #
+        # Dispatch is verification, not optimism: a car that arrives where
+        # nobody is waiting is never dispatched, so it earns nothing. That is
+        # the line between this and D28's arrival bonus, which paid for the
+        # arrival itself and was switched off precisely because it paid without
+        # proof. Here 55.7% of arrivals produce no dispatch and no credit.
+        #
+        # The dispatcher is reduced at completion (section 1) so the pair still
+        # pays exactly one gamma between them. Timing moves; the total does not.
+        for oid, did, zone_idx in (dispatched_this_turn or ()):
+            relocator = self._driver_relocator.get(did)
+            if relocator is not None and relocator != zone_idx:
+                if 0 <= relocator < self._num_zones:
+                    local_rewards[relocator] += cfg.relocator_share * cfg.gamma
+                    self._order_relocator_paid[oid] = relocator
+            self._driver_relocator.pop(did, None)
 
         # 1b. Relocation arrival bonus: off by default. It paid the sending zone
         # for the arrival itself, which made moving look profitable without the
@@ -1056,15 +1087,29 @@ class RideGymAEC(AECEnv):
 
         # 4. Cancellation penalty (D23: Spatially-shared with neighbor surplus)
         cancel_penalty = float(getattr(cfg, "cancel_penalty", 0.5))
+        # Cancellation is detected regardless of the penalty weight. The D48
+        # clawback below is part of the served-credit accounting, not a
+        # penalty, so it must not be gated on cancel_penalty > 0 -- doing that
+        # silently overpaid every relocated ride that was later cancelled.
+        current_cancelled = {
+            oid for oid, o in self.env.orders.items()
+            if o.status == OrderStatus.CANCELLED
+        }
+        newly_cancelled = current_cancelled - getattr(self, "_seen_cancelled_ids", set())
+        if not hasattr(self, "_seen_cancelled_ids"):
+            self._seen_cancelled_ids = set()
+        self._seen_cancelled_ids.update(newly_cancelled)
+        for oid in newly_cancelled:
+            # D48 clawback: the relocator was paid at dispatch, before it was
+            # known whether the ride would survive. Measured, 40.6% of relocator
+            # payouts went to orders that were later cancelled, which left a
+            # relocated cancelled ride paying 0.45 while a plain cancelled ride
+            # paid nothing -- a bias toward relocating into zones where orders
+            # time out. Reversing the share keeps one gamma per completed ride.
+            paid_to = self._order_relocator_paid.pop(oid, None)
+            if paid_to is not None and 0 <= paid_to < self._num_zones:
+                local_rewards[paid_to] -= cfg.relocator_share * cfg.gamma
         if cancel_penalty > 0.0:
-            current_cancelled = {
-                oid for oid, o in self.env.orders.items()
-                if o.status == OrderStatus.CANCELLED
-            }
-            newly_cancelled = current_cancelled - getattr(self, "_seen_cancelled_ids", set())
-            if not hasattr(self, "_seen_cancelled_ids"):
-                self._seen_cancelled_ids = set()
-            self._seen_cancelled_ids.update(newly_cancelled)
             for oid in newly_cancelled:
                 order = self.env.orders.get(oid)
                 if order is not None:
