@@ -717,3 +717,50 @@ argmax now follows demand is the acceptance test
 
 **Invalidates.** All D51 checkpoints -- the head is new, so their weights do not
 load. Deleted with the runs.
+
+---
+
+## D54 acceptance test — pre-registered before results were seen
+
+Written down before the D54 runs finished, so the outcome cannot be rationalised
+after the fact. Three of today's reported numbers were artefacts (the 3.01x
+margin, the 4.1% chance baseline, "output ignores demand"), each caught only by
+checking. The bar is fixed here in advance.
+
+**Primary test.** `scripts/diag_targeting_at_decision.py`, decision-time
+comparison, >=2 seeds per arm, checkpoint at plateau.
+
+| arm | chance baseline | D51 (pooled head) | pass requires |
+|---|---|---|---|
+| IPPO | 8.40% | 6.40% | > 8.40% |
+| MAPPO | 7.60% | 6.08% | > 7.60% |
+
+Chance is `1 / mean legal targets`, measured on the same run, not assumed.
+
+**Secondary tests**, each independently informative:
+
+| test | what it rules out |
+|---|---|
+| mean demand at chosen target vs best available (D51: 0.30 vs 1.69) | coarse anti-targeting |
+| share of misses where the neediest zone WAS offered (D51: 91.9%) | residual expressibility |
+| `diag_logit_sensitivity.py` argmax across 16 demand placements (D51: 1/16) | whether the head binds direction at all |
+| relocation rate conditional on having a car + target (D51: 84.7% IPPO) | regression to "won't relocate" |
+
+**Interpretation fixed in advance:**
+
+- **Pass** = precision above chance on both arms AND argmax tracks demand. D54
+  is supported.
+- **Fail on precision, argmax tracks** = the head now expresses the choice but
+  PPO did not learn it in 60 iterations. That is a training-budget or
+  optimisation result, NOT evidence against D54, and I will report it as such.
+- **Fail on argmax too** = the head is still effectively permutation-invariant,
+  or the travel-cost / raw-bias terms dominate. D54 did not work; revert it.
+- **Precision falls below D51** = the new head actively hurt; revert and treat
+  the pooled head as the better prior.
+
+I will also report the IPPO-vs-MAPPO ordering, but neither arm beating the other
+is evidence about D54 -- they differ only in the critic.
+
+**Not claimed in advance:** that D54 improves service rate. It is a targeting
+fix; if targeting improves and service rate does not, that is a real and
+interesting result about the two being separable, not a failure.
