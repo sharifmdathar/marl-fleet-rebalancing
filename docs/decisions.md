@@ -989,3 +989,81 @@ Option 3 is defensible but changes what the headline metric means, so it is a
 reporting decision as much as a technical one. This is the user's call: it is a
 reward change, it would bump the env version, and it invalidates every D54
 checkpoint.
+
+---
+
+## D57 — feasibility check: the fleet is at or slightly over capacity
+
+Asked as a physical question, separate from the reward weighting in D56: are the
+number of cars, the number of orders, the distance to cover and the car speed in
+proportion such that the goals are actually achievable?
+
+`scripts/diag_feasibility.py`, 3 episodes, val split:
+
+| quantity | value |
+|---|---|
+| zones | 16 |
+| drivers (fleet) | **26** (1.62 per zone) |
+| orders per episode | 130.0 |
+| orders per hour | 130.0 |
+| completed per episode | 59.0 |
+| cancelled per episode | 55.0 |
+| still open at cutoff | 16.0 |
+| mean ride duration | **6.55 min** (median 5.50, p90 12.00) |
+| empty km per completed ride | **1.46 km** |
+
+Little's Law, `cars_required = arrival_rate x time_per_job`:
+
+| time per job | cars needed | vs fleet of 26 | verdict |
+|---|---|---|---|
+| ride time only (6.6 min) | 14.2 | **0.55x** | feasible |
+| ride + 1x ride of deadhead (13.1 min) | 28.4 | **1.09x** | **infeasible** |
+| ride + 2x ride of deadhead (19.7 min) | 42.6 | **1.64x** | infeasible |
+
+### The answer: marginal, and it tips on deadhead
+
+**The scenario is feasible only if deadhead is cheap.** Deadhead is 1.46 km per
+completed ride against a mean ride of 6.55 min. Converting at the ride's own
+speed:
+
+| if the mean trip is | implied speed | deadhead time | as % of ride |
+|---|---|---|---|
+| 2.0 km | 0.32 km/min | 4.59 min | **73%** |
+| 3.0 km | 0.48 km/min | 3.06 min | **49%** |
+| 4.0 km | 0.64 km/min | 2.29 min | **37%** |
+
+At a 2 km mean trip the fleet is **9% short** and the task is physically
+impossible. At 4 km it has comfortable headroom. The scenario sits right on the
+boundary, and **which side depends on a parameter never recorded.**
+
+This is consistent with everything observed today and previously unexplained:
+
+- **55 cancelled vs 59 completed per episode.** Cancellations are not a policy
+  failure at 5-minute patience; they are queue overflow.
+- **16 orders still open at cutoff**, in a 60-minute episode, on a fleet with
+  26 cars.
+- **Service rate stuck near 77%** regardless of reward or architecture. A
+  throughput ceiling does not move when you improve decisions.
+- **The competence test scoring 0.8-8%** under 100% single-zone demand. That
+  concentrates all 130 orders into one of 16 zones, making the effective arrival
+  rate at that zone ~16x, and the scenario categorically infeasible. It was never
+  a fair benchmark.
+
+### What is missing, and it is a config gap not a result
+
+The trip distance distribution and the vehicle speed are **not in the config and
+not logged**. `empty_km` and ride duration are recorded, which is why the deadhead
+burden can be bounded but not resolved. Until mean trip distance is recorded, the
+feasibility of the scenario is a range (0.55x to 1.09x fleet), not a fact.
+
+Recording mean trip distance per episode is a small, non-behavioural logging
+addition and would settle this permanently.
+
+### Consequence for results reported so far
+
+Every service-rate number this session -- 77% on natural demand, 43.6% on the
+single-zone stress test -- is a **policy measured against a throughput-capped
+target**. That does not invalidate the targeting results, which are ratios against
+measured chance and therefore unaffected by the ceiling. It does mean service
+rate should not be read as "how good the policy is", only as "how much of the
+achievable throughput it captured".
