@@ -428,7 +428,7 @@ class TestFixesAndDemand(unittest.TestCase):
 
         credit_env.env.orders[100] = _Order(OrderStatus.PENDING, None)
         credit_env._order_dispatcher[100] = 5
-        credit_env._driver_relocator[1] = [18]  # driver 1 was relocated by zone 18
+        credit_env._driver_relocator[1] = 18  # driver 1 was relocated by zone 18
         rewards = credit_env._compute_zone_rewards({}, [])
         self.assertEqual(rewards[5], 0.0, "dispatch alone must not be paid")
         self.assertEqual(rewards[18], 0.0, "arrival must not be paid")
@@ -460,13 +460,16 @@ class TestFixesAndDemand(unittest.TestCase):
         self.assertAlmostEqual(solo[7], credit_cfg.gamma, places=5)
 
 
-    def test_relay_chain_credits_every_contributing_zone(self):
-        """A car relayed A->B->C must pay A, B and C, not only C.
+    def test_relocation_credit_is_not_divided_across_hops(self):
+        """D47: relocation credit is paid in full to the zone that moved the car.
 
-        Relocation is neighbour-only, so reaching a distant hotspot needs
-        several hops. Overwriting the relocator on each hop made multi-hop
-        repositioning unprofitable: the zone that started the journey and
-        every intermediate zone earned nothing.
+        Replaces the relay-chain test. The chain was a list of every zone that
+        had relocated a car since its last completed order, and the credit was
+        split by its length. Measured over 504 relocations, that list was not a
+        relay: median 20 turns between hops of the same car, 0.4% back-to-back,
+        and 87% of hop pairs had the car serve an order in between. Dividing by
+        it charged zones for having their cars reused, and at 3 hops the payout
+        fell to 0.150 against a 0.149 deadhead cost.
         """
         credit_cfg = BandraConfig()
         credit_cfg.team_share = 0.0
@@ -483,29 +486,55 @@ class TestFixesAndDemand(unittest.TestCase):
                 self.status = status
                 self.assigned_driver = driver
 
-        # zone 9 dispatches driver 3, which was relayed through 4 and then 6.
+        # zone 9 dispatches driver 3, which zone 6 relocated to it.
         env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
         env._order_dispatcher[500] = 9
-        env._driver_relocator[3] = [4, 6]
+        env._driver_relocator[3] = 6
 
         rewards = env._compute_zone_rewards({}, [])
         share = credit_cfg.relocator_share * credit_cfg.gamma
         self.assertAlmostEqual(rewards[9] / credit_cfg.gamma, 1.0 - credit_cfg.relocator_share,
                                places=5, msg="dispatcher keeps 1 - relocator_share")
-        for z in (4, 6):
-            self.assertAlmostEqual(rewards[z], share / 2, places=5,
-                                   msg="each relaying zone splits the share equally")
-        self.assertEqual(rewards[5], 0.0, "unrelated zones earn nothing")
+        self.assertAlmostEqual(rewards[6], share, places=5,
+                               msg="the relocating zone is paid the FULL share, undivided")
+        self.assertEqual(rewards[4], 0.0, "a zone that did not move this car earns nothing")
 
-        # A zone that handled the car twice is paid once.
-        env2 = RideGymAEC(config=credit_cfg, seed=7)
-        env2.reset(seed=7)
-        env2.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
-        env2._order_dispatcher[500] = 9
-        env2._driver_relocator[3] = [4, 6, 4]
-        r2 = env2._compute_zone_rewards({}, [])
-        self.assertAlmostEqual(r2[4], share / 2, places=5,
-                               msg="a revisited zone is not paid twice")
+    def test_relocation_credit_survives_repeated_moves_of_one_car(self):
+        """D47: re-moving a car overwrites the relocator; credit is never divided.
+
+        The failure this guards against is arithmetic, not bookkeeping: under
+        the old divisor, a car relocated three times earned 0.45/3 = 0.150
+        against a deadhead cost of beta*km = 0.149, a 1.004x margin.
+        """
+        credit_cfg = BandraConfig()
+        credit_cfg.team_share = 0.0
+        credit_cfg.alpha = 0.0
+        credit_cfg.cancel_penalty = 0.0
+        credit_cfg.beta = 0.0
+        env = RideGymAEC(config=credit_cfg, seed=7)
+        env.reset(seed=7)
+
+        from ride_gym.enums import OrderStatus
+
+        class _Order:
+            def __init__(self, status, driver):
+                self.status = status
+                self.assigned_driver = driver
+
+        # The same car moved by three different zones in turn; the last mover
+        # is the one that put it where it served.
+        env.env.orders[500] = _Order(OrderStatus.COMPLETED, 3)
+        env._order_dispatcher[500] = 9
+        env._driver_relocator[3] = 5
+        env._driver_relocator[3] = 7
+        env._driver_relocator[3] = 6
+
+        rewards = env._compute_zone_rewards({}, [])
+        share = credit_cfg.relocator_share * credit_cfg.gamma
+        self.assertAlmostEqual(rewards[6], share, places=5,
+                               msg="only the most recent relocating zone is paid")
+        self.assertEqual(rewards[5], 0.0, "superseded relocators earn nothing")
+        self.assertEqual(rewards[7], 0.0, "superseded relocators earn nothing")
 
         # A car that was never relocated pays the dispatcher in full.
         env3 = RideGymAEC(config=credit_cfg, seed=7)

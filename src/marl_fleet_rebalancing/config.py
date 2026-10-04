@@ -34,7 +34,24 @@ class EnvConfig:
     max_dispatch_radius_km: float | None = 2.0
     # When True, relocation actions are restricted to adjacent zone neighbours (D15, D26).
     # Creates smooth local spatial diffusion without long-distance highway locks.
-    neighbor_relocation_only: bool = True
+    # D45: was True. Relocation was restricted to KNN neighbours, which was
+    # NOT a fairness-neutral modelling choice: the LP baseline was bound by the
+    # same mask (lp_baseline.py "valid neighboring zone j (respecting
+    # action_mask)"), so neither method could send a car across the map in one
+    # hop. Measured on NYC16, the two-phase competence probe (demand 100% at A,
+    # moving to B 2 hops away): under neighbour-only, B was a legal target on
+    # 0.5% of turns and only 28.3% of legal targets moved a car CLOSER to B.
+    # The action space was always 1 + max_pending + num_zones, so this only
+    # filtered the mask -- no obs/action-space change.
+    #
+    # The -beta*km term already prices distance (0.06/km, so a 2.5 km hop costs
+    # 0.149 vs 0.03 for 0.5 km), which is the gradient that should make a
+    # policy prefer near moves once long ones are permitted.
+    #
+    # NOT a fix for payoff timing: 61.9% of legs still never pay back and the
+    # median payback is 21-40 turns. This makes the destination reachable; it
+    # does not make relocating early rewarding. See D44.
+    neighbor_relocation_only: bool = False
 
     # --- Parameterized Zone Demand (D15) ---
     # Specific zone ID (0 .. num_zones - 1) to receive a dedicated share of demand.
@@ -186,14 +203,19 @@ class EnvConfig:
     gamma: float = 1.0   # weight for served demand (payoff per COMPLETED order)
     cancel_penalty: float = 1.0  # penalty per cancelled order in zone (D25)
     team_share: float = 0.2  # 80% local credit + 20% team
-    # Share of gamma paid to the zone that SUPPLIED a relocated driver when
-    # that driver's ride completes.
+    # Share of gamma paid to the zone that RELOCATED the driver which completed
+    # this ride. Paid in full to that one zone, undivided (D47).
     #
     # Must exceed beta * km_per_relocation, or a relocation is net-negative even
     # when it works perfectly and the zone learns never to send. Measured at
     # 2.49 km per relocation and beta=0.15 that floor is 0.374; 0.35 sat just
     # under it, which is why the trained policy relocated constantly at ~25%
     # hit rate and still scored worse than doing almost nothing.
+    #
+    # At beta=0.06 the floor is 0.149, so 0.45 clears it 3.0x. Until D47 this
+    # share was DIVIDED by the length of a "relay chain", which made the
+    # effective share fall to 0.150 at 3 hops -- a 1.004x margin over cost, and
+    # net-negative from 4 hops on. scripts/diag_reloc_invariant.py asserts it.
     relocator_share: float = 0.45
 
     # --- Relocation arrival bonus ---

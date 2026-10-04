@@ -212,8 +212,23 @@ class RideGymAEC(AECEnv):
         self._seen_completed_ids: set[int] = set()
         # driver_id -> zone_idx (which zone controller commanded this driver)
         self._driver_commander: dict[int, int] = {}
-        # driver_id -> zone_idx (which zone initiated relocation)
-        self._driver_relocator: dict[int, list[int]] = {}
+        # driver_id -> zone_idx (which zone initiated the relocation that put
+        # this driver where it is). D47: a single int, not a list.
+        #
+        # This was a list of every zone that had relocated the car since its
+        # last completed order, and the relocator credit was divided by its
+        # length. Measured, that list is not a relay: over 504 relocations the
+        # median gap between two hops of the same car was 20 turns, only 0.4%
+        # of hop pairs were back-to-back, and 87% of pairs had the car complete
+        # an order in between. It counted how often a car had been reused since
+        # it last earned, not how many zones staged a journey, so dividing by
+        # it charged zones for coincidence. At 3 hops the payout fell to 0.150
+        # against a 0.149 deadhead cost -- a 1.004x margin.
+        #
+        # Relocations are now independent A->B events. The zone that commanded
+        # the most recent move is paid the full relocator_share if that driver
+        # later completes an order; no zone is paid for a car it did not move.
+        self._driver_relocator: dict[int, int] = {}
         # driver_id -> target_zone_idx (destination of ongoing relocation)
         self._driver_relocation_target: dict[int, int] = {}
 
@@ -961,9 +976,19 @@ class RideGymAEC(AECEnv):
         # agent drifts toward freezing. Completion is the only moment that
         # distinguishes a useful relocation from a wasted one.
         #
-        # When the serving driver was supplied by a different zone (it was
-        # relocated there earlier), the supplying zone keeps a share: that is
-        # the only place a rebalancing decision earns anything.
+        # When the serving driver was moved here by another zone's relocation
+        # decision, that zone keeps a share: this is the only place a
+        # rebalancing decision earns anything.
+        #
+        # D47: the share is NOT divided. `_driver_relocator` is a single zone
+        # -- the one that commanded the most recent relocation of this driver.
+        # An earlier version accumulated every zone that had moved the car
+        # since its last completed order and split the share across them, on
+        # the theory that a relay should pay each hop. Measured, that list was
+        # not a relay: median 20 turns between hops of the same car, 0.4%
+        # back-to-back, and 87% of hop pairs had the car serve an order in
+        # between. Dividing by it charged zones for having their cars reused.
+        # Each relocation is now an independent A->B event paid in full to A.
         for oid in self._newly_completed_ids():
             order = self.env.orders[oid]
             did = getattr(order, "assigned_driver", None)
@@ -971,19 +996,11 @@ class RideGymAEC(AECEnv):
             if dispatcher is None or not (0 <= dispatcher < self._num_zones):
                 continue
             relocator = self._driver_relocator.get(did) if did is not None else None
-            # A relocated car may be relayed through several zones before it
-            # serves anyone, because relocation is neighbour-only. Crediting
-            # only the final hop made multi-hop repositioning unprofitable: the
-            # zone that started the journey earned nothing and the intermediate
-            # zones earned nothing. Split the relocator share across every
-            # distinct zone that contributed.
-            chain = [z for z in dict.fromkeys(relocator or ()) if z != dispatcher]
-            if chain:
-                share = cfg.relocator_share * cfg.gamma / len(chain)
+            # A zone that dispatched a car it had itself relocated earns the
+            # full served credit: it made the car available and used it.
+            if relocator is not None and relocator != dispatcher:
                 local_rewards[dispatcher] += (1.0 - cfg.relocator_share) * cfg.gamma
-                for z in chain:
-                    if 0 <= z < self._num_zones:
-                        local_rewards[z] += share
+                local_rewards[relocator] += cfg.relocator_share * cfg.gamma
             else:
                 local_rewards[dispatcher] += cfg.gamma
             if did is not None:
@@ -996,12 +1013,12 @@ class RideGymAEC(AECEnv):
         if prospective_bonus > 0.0:
             for did in getattr(self, "_relocator_arrivals", []):
                 relocator = self._driver_relocator.get(did)
-                if relocator and 0 <= relocator[-1] < self._num_zones:
+                if relocator is not None and 0 <= relocator < self._num_zones:
                     d = self._last_obs[did]["self"]
                     dest_zone = int(d.get("current_region", 0))
                     dest_zone = max(0, min(dest_zone, self._num_zones - 1))
                     pending_at_dest = float(self._pending_per_zone[dest_zone])
-                    local_rewards[relocator[-1]] += prospective_bonus * pending_at_dest
+                    local_rewards[relocator] += prospective_bonus * pending_at_dest
 
         # 2. Empty deadhead distance penalty (-beta) charged to commanding zone
         for did, event in events.items():
@@ -1149,13 +1166,11 @@ class RideGymAEC(AECEnv):
                 driver_id = zone_idle_queues[zone_idx].popleft()
                 target_zone = decoded["relocate"]
                 self._driver_commander[driver_id] = zone_idx
-                # Accumulate the relay chain rather than overwriting: a car
-                # travelling A->B->C->D must credit every zone that handled it,
-                # not just C. Distinct zones only, so a car that loops back is
-                # not paid twice for the same zone.
-                chain = self._driver_relocator.setdefault(driver_id, [])
-                if zone_idx not in chain:
-                    chain.append(zone_idx)
+                # D47: each relocation is an independent A->B event. Overwrite
+                # rather than accumulate -- see the note on the declaration.
+                # Only the most recent move is credited, and only if that car
+                # later completes an order.
+                self._driver_relocator[driver_id] = zone_idx
                 self._driver_relocation_target[driver_id] = target_zone
                 ridegym_actions[driver_id] = decoded
 

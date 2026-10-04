@@ -43,7 +43,9 @@ class MAPPOConfig:
 
     # --- Advantage estimation ---
     gamma: float = 0.99
-    gae_lambda: float = 0.95
+    # D46: see the D46 note in ippo.py. Identical in both arms by design --
+    # the IPPO-vs-MAPPO comparison must differ ONLY in the critic.
+    gae_lambda: float = 0.99
 
     # --- Optimizer ---
     learning_rate: float = 3e-4

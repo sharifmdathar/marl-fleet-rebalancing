@@ -266,3 +266,68 @@ be expected to fix targeting.
 
 **Left open:** whether widening the legal-target set, paying relocation credit on
 arrival rather than completion, or both are the right move. Not decided here.
+
+---
+
+## D47 — relocation credit is paid to one zone, undivided (no relay chains)
+
+**Change:** `_driver_relocator` goes from `dict[int, list[int]]` to
+`dict[int, int]`, and the completion credit becomes
+`relocator_share * gamma` paid in full to that single zone. The previous form
+was `relocator_share * gamma / len(chain)`.
+
+**Why it was made:** the "relay chain" was not a relay. An entry was appended
+every time ANY zone relocated a car that already had one, and the list was
+cleared only when that car completed an order. So `len(chain)` counted *how
+often a car had been reused since it last earned*, not how many zones staged a
+journey.
+
+Measured directly (`scripts/diag_chain_semantics.py`, 504 relocations, 26
+cars, 4 episodes, dispatch-first greedy):
+
+| gap between two hops of the same car | share of hop pairs |
+|---|---|
+| <=2 turns (a real relay) | **0.4%** |
+| 3-10 | 14.9% |
+| 11-30 | 56.9% |
+| >30 | 27.8% |
+
+median gap **20 turns**; the same zone commanded both hops only **6%** of the
+time; and **87%** of hop pairs had the car complete an order *in between*.
+A relay means the car is in transit through zones. Here the car was working and
+was moved again later by an unrelated decision.
+
+Consequence in the arithmetic. Cost per leg is `beta * 2.49km = 0.149`:
+
+| hops | old effective share | net |
+|---|---|---|
+| 1 | 0.450 | +0.301 |
+| 2 | 0.225 | +0.076 |
+| 3 | 0.150 | **+0.0006** |
+| 4 | 0.1125 | **-0.037** |
+| 5 | 0.090 | **-0.059** |
+
+23.8% of legs paid at or below 1.5x cost and 2.8% paid below cost outright, so
+the `AGENTS.md` invariant (`relocator_share > beta * km / gamma`) was being
+violed by the divisor itself. `scripts/diag_reloc_invariant.py` now asserts it
+from the live config at every hop count: margin is a constant **3.01x**.
+
+**What this is NOT.** This does not make relocation pay *sooner*. The credit is
+still paid on ride completion, 21-40 turns after the decision, against an
+immediate cost. The relocation asymmetry is untouched; only the divisor is gone.
+
+Measured alongside it, for the next decision: of 131 relocation legs that
+arrived, 44.3% were ever dispatched to a rider, and **98.3% of those were
+dispatched on the arrival turn itself** (`scripts/diag_reloc_time_to_use.py`).
+So the evidence that a relocation worked is available almost immediately, and
+55.7% of arrivals produce no evidence at all.
+
+*Caveat:* both measurements are under a dispatch-first greedy policy, so the
+distributions are policy-dependent. The chain mechanism is not -- it is in the
+env, and the reward reads it identically whatever the policy does.
+
+**Supersedes:** the relay-chain split introduced in `303c7a5` ("pay every zone
+that relayed a car, not just the last hop"). That change was made to stop the
+originating zone earning nothing on multi-hop repositioning. The measurement
+says the originating zone earned nothing because the divisor was dividing, not
+because it went untracked, so the fix was treating a coincidence as a relay.

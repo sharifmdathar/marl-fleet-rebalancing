@@ -230,7 +230,8 @@ class ObservedEnv(RideGymAEC):
         for oid in sorted(new):
             order = self.env.orders[oid]
             did = getattr(order, "assigned_driver", None)
-            chain = list(self._driver_relocator.get(did, [])) if did is not None else []
+            reloc = self._driver_relocator.get(did) if did is not None else None
+            chain = [reloc] if reloc is not None else []  # D47: single zone
             dispatcher = self._order_dispatcher.get(oid)
             asg = self.assignments.get(oid)
             asg_t = asg[0] if asg else None

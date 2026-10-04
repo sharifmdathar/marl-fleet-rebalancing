@@ -37,7 +37,18 @@ class IPPOConfig:
 
     # --- Advantage estimation ---
     gamma: float = 0.99
-    gae_lambda: float = 0.95
+    # D46: was 0.95. GAE effective horizon is 1/(1-gamma*lambda):
+    #   lambda=0.95 -> 16.8 turns;  lambda=0.99 -> 50.3 turns.
+    # Measured relocation payback (docs/decisions.md D44): 0% of legs pay back
+    # within 5 turns, 60% land in 21-40, mean 39.1. So at lambda=0.95, 60% of
+    # paybacks arrived BEYOND the estimator's horizon and were attenuated to
+    # near-noise before reaching the action that earned them.
+    #
+    # This is why injecting a perfect demand forecast changed nothing: the
+    # reward signal for relocation was already too short-horizon to carry, not
+    # unobserved. An advantage estimator change, NOT a reward change, so no env
+    # version bump and no invalidation of existing measurements.
+    gae_lambda: float = 0.99
 
     # --- Optimizer ---
     learning_rate: float = 3e-4
