@@ -297,7 +297,11 @@ time; and **87%** of hop pairs had the car complete an order *in between*.
 A relay means the car is in transit through zones. Here the car was working and
 was moved again later by an unrelated decision.
 
-Consequence in the arithmetic. Cost per leg is `beta * 2.49km = 0.149`:
+Consequence in the arithmetic. Cost per leg is `beta * km`. Using the 2.49 km figure that was current when D47
+was written, that is `0.149`; re-measured on the current env the mean leg is
+**2.95 km**, so the cost is `0.177`. The arithmetic below is shown at 2.49 km
+because that is what the decision was made against -- the margin is 2.54x, not
+3.01x. See the D50 entry.
 
 | hops | old effective share | net |
 |---|---|---|
@@ -412,8 +416,8 @@ both are paid. A ride served by a rebalanced car is now worth 1.45 rather than
 1.0, and that is the honest price of the two actions.
 
 **Economics, unchanged where it matters.** The relocator's own decision is
-still `+0.45` against `beta * 2.49km = 0.149`, a **3.01x** margin at every hop
-count (`scripts/diag_reloc_invariant.py`). D49 does not make relocation more
+still `+0.45` against `beta * km = 0.177` at the re-measured 2.95 km mean leg, a
+**2.54x** margin at every hop count (`scripts/diag_reloc_invariant.py`). D49 does not make relocation more
 profitable to the zone that decides it; it stops the *receiving* zone being
 punished for the decision.
 
@@ -421,3 +425,60 @@ punished for the decision.
 against expected `235 x 1.0 + 148 x 0.45 = 301.60`, difference **+0.00**. 34
 tests pass, including a direct regression that a zone earns the same whether it
 uses a rebalanced car or its own.
+
+---
+
+## D50 — audit of the reward path: three findings, none of them fixed here
+
+Run before training rather than after. Every number is from
+`scripts/diag_reward_audit.py`, 3 episodes, seeds 3000-3002, dispatch-first
+greedy, plus an independent line-by-line audit of `_compute_zone_rewards`,
+`_flush_turn` and `reset`.
+
+**1. The wrapper credits dispatches RideGym refuses.** `_flush_turn` records
+`_order_dispatcher[oid]`, sets `_driver_commander[did] = zone_idx` to the
+*dispatching* zone, and appends to `dispatched_this_turn` -- all before
+`env.step()`. RideGym drops bids on non-pending orders silently, and
+`_cancel_timed_out()` runs at the top of its `step()`, so an order in the last
+`dt` of patience is advertised in the candidate menu, masked legal, and already
+expired when picked. Measured void rate **1.1-2.5%** of recorded dispatches.
+Consequences: the in-flight empty km of the abandoned leg is charged to the
+dispatching zone, and `_driver_relocator.pop(did)` destroys the sending zone's
+credit for a relocation that was never cancelled. Cross-zone attribution damage
+measured **0** under a greedy policy, because the voided bids mostly hit
+drivers already at their destination; the phantom records and lost credits are
+still real.
+
+**2. The break-even invariant was checked against a stale distance.**
+`scripts/diag_reloc_invariant.py` hardcoded 2.49 km per relocation, carried from
+an older run, and `config.py` quoted it as an environment property. Re-measured
+per leg by `scripts/diag_reloc_leg_distance.py` over 367 legs: mean **2.95 km**,
+median 3.21, p90 5.25. The asserted 3.01x margin is really **2.54x** at the mean
+and 1.43x at p90. The invariant still HOLDS, so no price change is implied, but
+every "3.0x" in D47-D49 was optimistic. The script now measures instead of
+hardcoding and accepts a distance on argv; `config.py` records both numbers.
+
+**3. Partial legs are paid in full.** `beta * km` is charged per turn for
+distance actually flown, but `relocator_share * gamma` is paid in full at
+dispatch. With `allow_relocating_dispatch=True`, dispatching a car mid-flight is
+normal rather than exceptional. Measured: **98-100% of relocation credits exceed
+the deadhead actually charged for the leg flown**. So the effective margin on
+most relocations is larger than the config arithmetic implies, and the
+documented invariant does not bind on those events.
+
+**Deliberately not fixed here.** Each of these is a judgement call about what
+the reward *should* say, and all three change the economics:
+
+- (1) is a bug and should be fixed, but the fix is to verify dispatch against
+  RideGym's outcome, which touches the dispatch path rather than the reward.
+- (3) is arguably correct as-is -- a relocation that gets a car working sooner
+  *should* pay, since the car did earn. Making credit proportional to distance
+  flown would penalise opportunistic dispatch, which is good behaviour.
+- (2) needs no code change; the numbers are now measured.
+
+**Also ruled out**, so these are not open: no order is counted twice in the
+waiting term; the waiting zone attribution matches the acting zone; team
+blending is applied to the final reward and no baseline reads an unblended
+value; `reset()` clears all seven tracking structures; `_newly_completed_ids`
+cannot return an id twice; the `events` dict cannot survive a turn, so no
+distance is charged twice; `_prev_served` is dead code (written, never read).

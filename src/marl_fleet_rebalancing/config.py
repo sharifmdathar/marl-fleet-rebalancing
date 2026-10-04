@@ -212,10 +212,15 @@ class EnvConfig:
     # under it, which is why the trained policy relocated constantly at ~25%
     # hit rate and still scored worse than doing almost nothing.
     #
-    # At beta=0.06 the floor is 0.149, so 0.45 clears it 3.0x. Until D47 this
-    # share was DIVIDED by the length of a "relay chain", which made the
-    # effective share fall to 0.150 at 3 hops -- a 1.004x margin over cost, and
-    # net-negative from 4 hops on. scripts/diag_reloc_invariant.py asserts it.
+    # At beta=0.06 and a RE-MEASURED mean leg of 2.95 km (367 legs, 3 episodes;
+    # scripts/diag_reloc_leg_distance.py) the floor is 0.177, so 0.45 clears it
+    # 2.54x. The 2.49 km figure quoted above is from an older run and is stale;
+    # it made this margin read 3.0x. scripts/diag_reloc_invariant.py re-measures
+    # rather than hardcoding, and accepts a distance on argv.
+    #
+    # Until D47 this share was DIVIDED by the length of a "relay chain", which
+    # made the effective share fall to 0.150 at 3 hops -- a 1.004x margin over
+    # cost, and net-negative from 4 hops on.
     relocator_share: float = 0.45
 
     # --- Relocation arrival bonus ---

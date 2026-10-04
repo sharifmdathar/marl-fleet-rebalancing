@@ -25,16 +25,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from marl_fleet_rebalancing.config import NYCConfig
 
+# Measured on this env by scripts/diag_reloc_leg_distance.py (367 legs,
+# 3 episodes, seeds 3000-3002). Pass a distance on argv to override.
+MEASURED_MEAN_LEG_KM = 2.95
+
 
 def main() -> None:
     cfg = NYCConfig()
-    cost = cfg.beta * 2.49 / max(cfg.gamma, 1e-9)  # 2.49 km = measured mean leg
     share = cfg.relocator_share * cfg.gamma
+
+    # Measure the leg distance rather than hardcoding it. An earlier version of
+    # this script asserted 2.49 km, carried over from an older run, which made
+    # the margin read 3.01x. Re-measured on the current env the mean is 2.95 km
+    # and the real margin is 2.54x. A hardcoded distance makes the assertion
+    # drift away from the thing it is supposed to check.
+    km = float(sys.argv[1]) if len(sys.argv) > 1 else MEASURED_MEAN_LEG_KM
+    cost = cfg.beta * km / max(cfg.gamma, 1e-9)
+    origin = "measured" if len(sys.argv) > 1 else "default"
 
     print("relocator_share            : %.3f" % cfg.relocator_share)
     print("gamma                      : %.3f" % cfg.gamma)
     print("beta (per empty km)        : %.3f" % cfg.beta)
-    print("measured mean relocation leg: 2.49 km")
+    print(f"relocation leg distance    : {km:.2f} km ({origin})")
+    print("  run scripts/diag_reloc_leg_distance.py to re-measure")
     print()
     print("cost of one relocation     : %.4f" % cost)
     print("credit if it works         : %.4f" % share)
