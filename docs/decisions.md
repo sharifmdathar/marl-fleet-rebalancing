@@ -910,3 +910,82 @@ wrong thing (3.01x margin, 4.1% chance, "output ignores demand", and now
 sampling-vs-argmax). Every one was caught by testing a premise rather than
 accepting a conclusion. The MLP change was cancelled *because* the premise was
 checked first.
+
+---
+
+## D56 — the waiting penalty is ~90% of the reward and dwarfs the rest
+
+Asked directly: are the number of cars, the distance cost and the waiting time in
+good proportion? **No.** Measured per episode under each trained policy
+(`scripts/diag_reward_balance.py`, 3 episodes, seeds 9000+):
+
+| arm | served | empty km | deadhead | cancel | wait | NET |
+|---|---|---|---|---|---|---|
+| greedy | 177.0 | 259.2 | −15.6 | −180.0 | **−3991.4** | −4009.9 |
+| IPPO | 263.0 | 1386.4 | −83.2 | −88.0 | **−3991.4** | −3899.6 |
+| MAPPO | 279.0 | 1382.6 | −83.0 | −77.0 | **−3991.4** | −3872.3 |
+
+Share of total absolute reward movement:
+
+| arm | served | deadhead | cancel | **wait** |
+|---|---|---|---|---|
+| greedy | 4.1% | 0.4% | 4.1% | **91.5%** |
+| IPPO | 5.9% | 1.9% | 2.0% | **90.2%** |
+| MAPPO | 6.3% | 1.9% | 1.7% | **90.1%** |
+
+**The waiting penalty is ~15x the served credit and ~45x the deadhead cost.**
+Serving a rider -- the thing the project is about -- is **6% of the signal.**
+Deciding *where* to send a car moves a term worth 1.9%.
+
+### Why: it is an integral, not a weight
+
+```python
+local_rewards[zi] -= cfg.alpha * sum(waiting_times_in_zone) / order_timeout
+```
+
+Charged **every turn** a rider waits, and summed over all pending riders in all
+zones. Served credit is charged **once**, at completion. So waiting is a running
+integral and service is a one-shot reward; their ratio is set by *how many
+riders are pending on average*, not by `alpha` vs `gamma`.
+
+Per-rider the constants look sane (`alpha/gamma = 0.2`), which is why this was
+never caught. But one rider left unserved accumulates `alpha * sum(t)/timeout`
+over 10 turns to **0.90**, against **1.00** for serving them -- and there are
+pending riders in most zones on most turns.
+
+### This is not the env-2.7 failure, and the difference matters
+
+`relocation-quality.md` recorded served and deadhead cancelling almost exactly,
+which made the good-move/wasted-move signal vanish. That no longer holds:
+served + deadhead is **+180 to +196**, comfortably positive. **Deadhead is not
+cancelling service.** The problem is the opposite one -- everything else is
+being drowned out.
+
+### Consequence
+
+The policy is overwhelmingly optimising "reduce accumulated rider-minutes",
+not "serve riders" or "don't drive empty". That is a defensible objective in
+spirit, but it means:
+
+- the served credit, and therefore the relocation credit derived from it, is a
+  **6% perturbation** on the objective;
+- the deadhead discipline the `AGENTS.md` invariant depends on is a **1.9%
+  perturbation**;
+- a policy can improve its reward substantially by reducing time-to-assignment
+  without relocating better, which is consistent with the modest aggregate
+  service-rate response to D54.
+
+### Options, not decided here
+
+1. **Cap or discount the waiting term** so it stops integrating without bound --
+   e.g. charge per-rider once at timeout rather than every turn, or clip
+   `sum(waiting)` per zone per turn.
+2. **Rescale `alpha`** so the four terms sit in comparable proportion. Crude, and
+   fleet-size dependent, which is what D37 was written to avoid elsewhere.
+3. **Leave it**, and report every result as a statement about
+   minimise-waiting rather than maximise-service.
+
+Option 3 is defensible but changes what the headline metric means, so it is a
+reporting decision as much as a technical one. This is the user's call: it is a
+reward change, it would bump the env version, and it invalidates every D54
+checkpoint.
