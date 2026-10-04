@@ -528,3 +528,43 @@ change (the numbers are now measured). Finding 3 -- full credit for a partial le
 -- is arguably correct: a relocation that puts a car to work sooner did earn, and
 making credit proportional to distance flown would penalise opportunistic
 dispatch, which is desirable behaviour. Not changed without a decision.
+
+---
+
+## D52 — purge two documents that carried withdrawn claims
+
+Deleted `docs/relocation-quality.md` and `docs/HANDOFF.md`. Neither was a live
+result; both were still quotable, which is the failure mode `AGENTS.md` warns
+about ("a stale number is worse than a missing one, because it gets cited").
+
+**`relocation-quality.md`** was the more dangerous of the two:
+
+- It taught the break-even invariant using `relocator_share = 0.35` and a 2.49 km
+  leg. Both are superseded -- the share is 0.45 (D47) and the measured leg is
+  2.95 km (D50 finding 2). Following that document's own advice would have led
+  to a beta that breaches the invariant.
+- It asserted relocation targets at "12.5% chance over 8 neighbours" and that
+  argmax is **below** chance at 6.6%. D44 formally withdrew both: the legal
+  target set averages ~1.12 per turn, the true chance rate measured by a random
+  control arm is **4.1%**, and RL is therefore **at** chance, not below it. The
+  document was the canonical source for a claim the decision log had already
+  retracted.
+- Its scenario table is env 2.7-era.
+
+**`HANDOFF.md`** described env 2.3 and decisions D28-D34, roughly fifteen
+entries behind, and closed with tuning instructions ("re-tune LP on env 2.3")
+premised on invalidated measurements.
+
+**Kept.** `decisions.md` deliberately retains the withdrawn numbers. D44's
+correction is only meaningful next to the claim it corrects, and `AGENTS.md`
+requires a correction to be recorded where the original was made rather than
+quietly superseded.
+
+**Dangling references fixed.** `scripts/beta_sweep.py` computed its safe/breach
+thresholds from the stale 2.49 km, and so reported `beta=0.15` as safe; at the
+measured 2.95 km it is a 1.02x margin, effectively break-even. It now defaults
+to 2.95 and accepts an override. `diag_reloc_invariant.py`,
+`competence_two_zone.py` and a `config.py` comment pointing at the deleted files
+were repointed at live sources. The `config.py` comment also asserted that
+`nyc_window_limit` was an "open decision that MUST be settled before training";
+it was settled (`NYCConfig` sets 130) and the comment was misleading.

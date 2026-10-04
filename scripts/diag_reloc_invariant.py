@@ -66,7 +66,8 @@ def main() -> None:
           % ("HOLDS" if ok else "VIOLATED"))
     if not ok:
         print("  A relocation that works perfectly is net-negative. The agent will")
-        print("  learn to churn rather than rebalance. See docs/relocation-quality.md.")
+        print("  learn to churn rather than rebalance.")
+        print("  Re-measure with scripts/diag_reloc_leg_distance.py.")
     raise SystemExit(0 if ok else 1)
 
 

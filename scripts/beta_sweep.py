@@ -10,14 +10,17 @@ RL wins service rate by ~+10pp and loses efficiency by ~2.5x. beta is the deadhe
 weight; the reward already charges it, so raising it is the direct way to make
 pointless relocation expensive.
 
-The break-even invariant from docs/relocation-quality.md is asserted before any
-run: a CORRECT relocation must still net positive, or the agent learns to churn
-instead of to serve.
+The break-even invariant is asserted before any run: a CORRECT relocation
+must still net positive, or the agent learns to churn instead of to serve.
 
     break-even:  beta * km_per_relocation  <  relocator_share * gamma
-                 0.06 * 2.49 = 0.149   vs  0.45 * 1.0 = 0.45   (safe)
-                 0.15 * 2.49 = 0.374   vs  0.45 * 1.0 = 0.45   (safe)
-                 0.19 * 2.49 = 0.473   vs  0.45 * 1.0 = 0.45   (BREACH)
+    at the measured 2.95 km leg:
+                 0.06 * 2.95 = 0.177   vs  0.45 * 1.0 = 0.45   (safe, 2.54x)
+                 0.15 * 2.95 = 0.443   vs  0.45 * 1.0 = 0.45   (THIN, 1.02x)
+                 0.19 * 2.95 = 0.561   vs  0.45 * 1.0 = 0.45   (BREACH)
+
+Note 0.15 was previously reported "safe" using the stale 2.49 km figure. It is
+in fact at a 1.02x margin, effectively break-even.
 
 Runs short training runs per beta and evaluates the frozen policy paired on
 identical windows. This is a reward sweep: it changes environment dynamics, so
@@ -36,7 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from marl_fleet_rebalancing.config import NYCConfig
 
-KM_PER_RELOCATION = 2.49  # measured mean relocation leg, docs/relocation-quality.md
+# Measured mean relocation leg, re-measured on the current env by
+# scripts/diag_reloc_leg_distance.py (367 legs, 3 episodes): 2.95 km. The
+# previous value of 2.49 km was carried from an older run and made the sweep
+# report beta=0.15 as "safe" by a margin it did not have. Override with argv.
+KM_PER_RELOCATION = float(sys.argv[1]) if len(sys.argv) > 1 else 2.95
 
 
 def check_invariant(beta: float, cfg: NYCConfig) -> tuple[bool, float, float]:

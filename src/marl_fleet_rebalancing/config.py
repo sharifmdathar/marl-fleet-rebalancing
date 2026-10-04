@@ -173,8 +173,9 @@ class EnvConfig:
     nyc_splits_dir: str = "data/nyc/splits"
     nyc_zone_centroids_path: str = "data/nyc/zone_centroids.csv"
     # Per-window cap on orders (sample-rate lever; None = full historical rate).
-    # Open experiment-design decision (HANDOFF): full-rate peaks (~15k trips/hr)
-    # are unservable by a 50-driver fleet. MUST be settled before training.
+    # NYCConfig overrides this to 130: full-rate peaks (~15k trips/hr) are
+    # unservable by a 50-driver fleet, which made unservable windows look like
+    # policy failure.
     nyc_window_limit: int | None = None
     nyc_random_party_size: bool = False  # FHVHV carries no real party size
     nyc_max_party_size: int = 3

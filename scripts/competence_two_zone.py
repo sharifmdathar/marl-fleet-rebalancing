@@ -1,7 +1,7 @@
 """Relocation competence test: can each policy follow demand across the map?
 
 Motivation. Service rate cannot tell us whether a policy rebalances *well* --
-it can be bought with deadhead (docs/relocation-quality.md). And it cannot rank
+it can be bought with deadhead, so SR must be paired with empty km. And it cannot rank
 LP as "better", because LP is a fixed-rule heuristic that never had to learn when
 or where to move; comparing its service rate to a learned policy's answers a
 different question than the one we care about.
