@@ -193,27 +193,28 @@ class EnvConfig:
     # R = -alpha * waiting_time - beta * empty_distance + gamma * served_demand - cancel_penalty
     # Scaled cleanly so serving (+1.0) balances cancellation (-1.0) and empty distance (-0.06/km, D25).
     #
-    # D58: 0.2 -> 0.0132. The waiting term is charged EVERY turn a rider waits
-    # and summed over all pending riders, while served credit is charged ONCE at
-    # completion. So waiting is a running integral and service is a one-shot, and
-    # their ratio is set by the average pending count rather than by alpha/gamma.
-    # Measured per episode on NYC16 (3 episodes, val): wait -3991, served +263,
-    # deadhead -83, cancel -88 -- waiting was 90% of all reward movement, 15x
-    # the served credit and 45x the deadhead cost. Serving a rider, the thing
-    # this project is about, was a 6% perturbation, and choosing WHERE to send a
-    # car moved 1.9%.
+    # D62: restored to 0.2. D58 lowered this to 0.0132 on the measured
+    # MAGNITUDES of the four reward terms -- waiting was 90% of all reward
+    # movement -- and targeting collapsed from 55.06% to 20.95%. The mistake was
+    # measuring how LARGE each term is without asking what it TEACHES.
     #
-    # 0.0132 is the value that makes |wait| == |served| at the measured
-    # operating point, putting the shares at served 37.7%, wait 37.7%, cancel
-    # 12.6%, deadhead 11.9%. Serving becomes the single largest term and every
-    # other term is a real counterweight.
+    # The waiting penalty is charged to the zone CONTAINING the waiting rider,
+    # so it is the only term that distinguishes WHICH zone needs a car. Served
+    # credit pays for any completion regardless of where the car came from, so
+    # it cannot teach targeting at all. Cutting the waiting weight therefore
+    # removed most of the pressure to aim at needy zones.
     #
-    # CAVEAT, deliberately not fixed here: alpha is a single number fitted at one
-    # operating point, so the balance will drift as load changes -- at higher
-    # demand the integral grows and waiting will dominate again. The structural
-    # fix is to charge waiting once per rider (at cancellation) instead of every
-    # turn; that changes reward semantics and is not done implicitly.
-    alpha: float = 0.0132   # weight for passenger waiting time (D25; rescaled D58)
+    # Measured on NYC16 val, 3 paired seeds, argmax actions:
+    #
+    #     alpha    precision   chance    lift    SR%    empty km
+    #     0.0132     18.73%    7.28%    2.57x   76.49      444.8
+    #     0.10       28.53%    8.38%    3.41x   79.45      454.2
+    #     0.20       31.36%    7.78%    4.03x   80.85      439.2
+    #
+    # Higher alpha improves targeting, service rate AND empty km together; only
+    # average wait is slightly worse (2.89 vs 2.63 min). Restoring 0.2 is a
+    # reversal of D58, recorded here rather than silently applied.
+    alpha: float = 0.2   # weight for passenger waiting time (D25; D58 lowered it, D62 restored it)
     # Cost per empty repositioning km. At 0.15 with ~2.5 km per relocation a
     # single move cost 0.374 against a completion worth gamma=1.0, so distance
     # was heavy enough to cancel the entire served-demand credit: the trained
@@ -306,7 +307,7 @@ class NYCConfig(EnvConfig):
     # slot of headroom. Sizing this to the data keeps the action space tight
     # (1 + 16 + 16 = 33) instead of wasting masked slots on empty entries.
     max_pending: int = 16
-    alpha: float = 0.0132   # D58; see EnvConfig for the rescale rationale
+    alpha: float = 0.2   # D62; see EnvConfig for the restore rationale
     beta: float = 0.06
     gamma: float = 1.0
     cancel_penalty: float = 1.0

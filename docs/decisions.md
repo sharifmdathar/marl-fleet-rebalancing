@@ -1184,3 +1184,67 @@ policies churn less.
 **Still not the project's bar.** Against greedy the tradeoff persists (argmax
 MAPPO: +20.97pp SR, +372.7km empty, +0.22min wait). This improves the *policy*
 on all three; it does not move the *frontier*. See D61.
+
+---
+
+## D62 — alpha restored to 0.2; D58 reversed
+
+**Change:** `alpha` 0.0132 -> 0.2. A direct reversal of D58.
+
+**Why D58 was wrong.** D58 measured the MAGNITUDES of the four reward terms and
+found waiting was 90% of all reward movement, then lowered it. It never asked
+what each term TEACHES. Magnitude is not importance.
+
+The waiting penalty is charged to the zone **containing the waiting rider**, so
+it is the only term that distinguishes *which* zone needs a car. Served credit
+pays for any completion regardless of where the car came from, so it cannot
+teach targeting at all. D58 therefore deleted most of the targeting signal while
+"fixing" a proportional imbalance.
+
+**Measured**, NYC16 val, 3 paired seeds, argmax actions, precision PRIMARY:
+
+| alpha | precision | chance | lift | SR% | empty km | wait |
+|---|---|---|---|---|---|---|
+| 0.0132 (D58) | 18.73% | 7.28% | 2.57x | 76.49 | 444.8 | **2.63** |
+| 0.10 | 28.53% | 8.38% | 3.41x | 79.45 | 454.2 | 2.92 |
+| **0.20** | **31.36%** | 7.78% | **4.03x** | **80.85** | **439.2** | 2.89 |
+
+Higher alpha improves **targeting, service rate and empty km together**. Only
+average wait is slightly worse. Against the D58 setting: precision +12.6pp,
+service rate +4.36pp, empty km -5.6km.
+
+The earlier 55.06% figure was D54 (alpha 0.2, before D59's deadhead
+attribution), so the two effects are not fully separated; both moves are on the
+same side and D62 is the configuration actually measured above.
+
+**Also recorded: the entropy sweep failed and is not adopted.** `entropy_coef`
+0.01 -> 0.003 -> 0.001, argmax eval on 6 paired seeds:
+
+| coef | SR% | empty km | wait | precision |
+|---|---|---|---|---|
+| 0.01 | 73.70 | **450.8** | 2.78 | 20.95% |
+| 0.003 | 73.69 | 476.7 | 2.67 | -- |
+| 0.001 | **75.04** | 475.4 | **2.51** | **11.65%** |
+
+ec0.001 has the best service rate and waiting of the sweep and the **worst
+targeting measured anywhere** -- it serves riders by relocating
+indiscriminately. Adopting it would have traded away the thing D54 fixed.
+
+**Why the entropy lever does nothing here**
+(`scripts/diag_entropy_by_block.py`, 200 relocation decisions per checkpoint):
+
+| coef | relocate top-1 | relocate entropy | % of max | dispatch top-1 |
+|---|---|---|---|---|
+| 0.01 | 14.2% | 2.30 | 94.1% | 98.5% |
+| 0.003 | 17.0% | 2.30 | 92.7% | 99.5% |
+| 0.001 | 14.8% | 2.31 | 93.0% | 99.5% |
+
+The relocation block sits at **93-94% of maximum entropy** (uniform over ~10.9
+legal targets) while dispatch is near-deterministic. A 10x cut in the
+coefficient moves top-1 by 0.6pp. At coef 0.01 the entropy term is 0.0026
+against a policy loss of 0.00058 -- the bonus DOMINATES and still cannot
+concentrate the distribution, because the destination logits span only ~0.4
+nats across 10 destinations. Softmax over logits that tightly clustered is
+uniform by construction. The lever that fits this evidence is the SCALE of the
+destination logits (a temperature on `dest_logits`), not the entropy bonus --
+and it would not change the argmax, so it is free. Not tried yet.

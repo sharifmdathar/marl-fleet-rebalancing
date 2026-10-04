@@ -101,6 +101,8 @@ def main() -> None:
     ap.add_argument("--lp", action="store_true")
     ap.add_argument("--ippo", default=None)
     ap.add_argument("--mappo", default=None)
+    ap.add_argument("--arm", action="append", default=[],
+                    metavar="NAME=PATH", help="extra labelled arm")
     ap.add_argument("--deterministic", action="store_true",
                     help="evaluate each arm with argmax actions instead of "
                          "sampling. The head's argmax is 51-55%% correct "
@@ -121,6 +123,10 @@ def main() -> None:
     if args.ippo:
         l, _m, _ = load_trained_policy(Path(args.ippo))
         arms.append(("ippo", l))
+    for spec in args.arm:
+        nm, _, pth = spec.partition("=")
+        l, _m, _ = load_trained_policy(Path(pth))
+        arms.append((nm, l))
     if args.mappo:
         l, _m, _ = load_trained_policy(Path(args.mappo))
         arms.append(("mappo", l))
@@ -182,7 +188,15 @@ def main() -> None:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json_out).write_text(json.dumps(
             {"seeds": seeds, "split": args.split,
-             "alpha": cfg.alpha, "results": res}, indent=2))
+             "alpha": cfg.alpha,
+             # D61: record the action-selection mode IN the artifact. Two
+             # numbers from the same checkpoint differ by ~3pp service rate
+             # purely by this flag, and nothing in the output previously said
+             # which was measured -- the same failure as the aimed-vs-landed
+             # precision figures and the 100x empty-km display bug.
+             "deterministic": bool(args.deterministic),
+             "action_selection": "argmax" if args.deterministic else "sampled",
+             "results": res}, indent=2))
         print(f"\nwrote {args.json_out}")
 
 
