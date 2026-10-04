@@ -142,12 +142,19 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=2)
     ap.add_argument("--base-seed", type=int, default=9000)
     ap.add_argument("--switch-min", type=float, default=25.0)
+    ap.add_argument("--hubs", type=int, nargs=2, default=None,
+                    metavar=("A", "B"),
+                    help="explicit zone pair, matching the video test "
+                         "(default 10 12: 3 hops / ~6.9 km apart)")
     ap.add_argument("--ippo", default=None)
     ap.add_argument("--mappo", default=None)
     args = ap.parse_args()
 
     probe = RideGymAEC(NYCConfig(nyc_split="val"))
-    a, b = pick_far_pair(probe)
+    if args.hubs:
+        a, b = int(args.hubs[0]), int(args.hubs[1])
+    else:
+        a, b = pick_far_pair(probe)
     other = next(j for j in range(probe._num_zones) if j != a)
     print(f"hubs: single-zone A={a}, two-zone A={a} -> B={b}")
     print(f"  A neighbours: {sorted(j for j in probe.env.region_neighbours[a] if j != a)}")

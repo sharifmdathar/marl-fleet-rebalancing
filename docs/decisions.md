@@ -1141,3 +1141,46 @@ lifts the floor that `beta` is bounded by, opening the range.
 
 This is recorded, not acted on -- it is a reward change with a real design
 tension, and the choice of which term to move is the user's.
+
+---
+
+## D60 — evaluate with argmax, not sampled actions
+
+**Change:** none to the env or the algorithm. `eval_tradeoff.py` and the
+targeting probes gained `--deterministic`, and every decision-quality
+measurement now defaults to argmax.
+
+**Why.** D54's correction established that the destination-conditioned head's
+argmax is **51-55% correct** against ~8% chance, while its *sampled* actions are
+only 13-20%. The policy knows which zone it wants and discards roughly two thirds
+of that at sampling time. Sampling is correct for training -- it is what
+explores -- but wrong for measuring a policy, because it reports what the policy
+occasionally does rather than what it prefers.
+
+**Result**, same D59 checkpoints, same 6 paired seeds, sampled -> argmax:
+
+| arm | | SR% | empty km | avg wait | reloc |
+|---|---|---|---|---|---|
+| IPPO | sampled | 70.98 | 482.0 | 3.02 | 162 |
+| IPPO | **argmax** | **74.87** | **468.8** | **2.83** | **131** |
+| MAPPO | sampled | 73.98 | 467.1 | 3.00 | 161 |
+| MAPPO | **argmax** | 73.70 | **450.8** | **2.78** | **130** |
+
+| arm | d SR | d empty km | d wait |
+|---|---|---|---|
+| IPPO | **+3.89pp** | **-13.2km** | **-0.19min** |
+| MAPPO | -0.28pp | **-16.3km** | **-0.22min** |
+
+**This is the only intervention today that moves all three in the right
+direction.** Empty km and waiting fall for both arms, and IPPO gains 3.89pp of
+service rate as well. It costs nothing: no retraining, no reward change, no
+hyperparameter. The policy was always capable of this; the evaluation was
+sampling away the evidence.
+
+Relocation count drops 162 -> 131 and 161 -> 130, so part of the deadhead saving
+is simply relocating less. That is the entropy bonus doing its job: confident
+policies churn less.
+
+**Still not the project's bar.** Against greedy the tradeoff persists (argmax
+MAPPO: +20.97pp SR, +372.7km empty, +0.22min wait). This improves the *policy*
+on all three; it does not move the *frontier*. See D61.

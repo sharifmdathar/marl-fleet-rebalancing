@@ -35,7 +35,7 @@ from marl_fleet_rebalancing.experiments.evaluate import load_trained_policy
 from marl_fleet_rebalancing.networks.encoder import obs_to_vector
 
 
-def run_episode(policy, cfg, seed: int) -> dict:
+def run_episode(policy, cfg, seed: int, deterministic: bool = False) -> dict:
     env = RideGymAEC(cfg)
     mp = env._max_pending
     if hasattr(policy, "reset") and not hasattr(policy, "act"):
@@ -53,7 +53,7 @@ def run_episode(policy, cfg, seed: int) -> dict:
                 with torch.no_grad():
                     a, _, _ = policy.act(
                         obs_to_vector(env.observe(ag))[None, :], m[None, :],
-                        deterministic=False)
+                        deterministic=deterministic)
                 a = int(a[0])
             else:
                 a = int(policy.select_action(ag, env, env.observe(ag)))
@@ -101,6 +101,11 @@ def main() -> None:
     ap.add_argument("--lp", action="store_true")
     ap.add_argument("--ippo", default=None)
     ap.add_argument("--mappo", default=None)
+    ap.add_argument("--deterministic", action="store_true",
+                    help="evaluate each arm with argmax actions instead of "
+                         "sampling. The head's argmax is 51-55%% correct "
+                         "against ~8%% chance, while its samples are 13-20%%, "
+                         "so sampling discards most of what the policy knows.")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
@@ -125,6 +130,7 @@ def main() -> None:
 
     print(f"paired over {args.episodes} identical seeds "
           f"({seeds[0]}..{seeds[-1]}), split={args.split}")
+    print(f"action selection: {'argmax (deterministic)' if args.deterministic else 'sampled'}")
     print(f"alpha={cfg.alpha} beta={cfg.beta} gamma={cfg.gamma} "
           f"cancel={cfg.cancel_penalty}\n")
 
@@ -133,7 +139,8 @@ def main() -> None:
     print("-" * 84)
     res = {}
     for name, policy in arms:
-        rows = [run_episode(policy, cfg, s) for s in seeds]
+        rows = [run_episode(policy, cfg, s, args.deterministic)
+                for s in seeds]
         res[name] = summarise(rows)
         r = res[name]
         print(f"{name:<8} "
