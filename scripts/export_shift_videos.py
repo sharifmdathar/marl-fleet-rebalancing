@@ -1,22 +1,29 @@
 """Export MP4 videos of the two-zone demand-shift competence test.
 
-The competence test moves 100% of demand from zone A to a far zone B partway
-through an episode. Service rate says whether a policy coped; a video shows
-whether cars physically moved, which is the thing the reward fixes (D47-D51)
-were supposed to change.
+The test concentrates 100% of demand in zone A, then moves it to a far zone B
+partway through the episode. A video shows whether cars physically crossed the
+map to follow it, which is the thing D54's destination-conditioned head is meant
+to change and which no scalar metric makes obvious.
 
-Reuses the same env, policy loading and shift construction as
-`competence_two_zone.py` so the video and the numbers describe one scenario.
-The env has no `render()`, so frames come from `ride_gym.visualize`'s
-`TrajectoryRecorder` and are drawn by
-`marl_fleet_rebalancing.visualization.render_animation`.
+Design notes, each from a mistake this script already made once:
+
+  * `localhub` is the demand mechanism that works. `drift` only moves orders
+    that ALREADY originate in the source zone, so an early version produced
+    almost no shift and every arm scored the same.
+  * Hubs come from `competence_two_zone.pick_far_pair`. A local copy got the BFS
+    wrong and returned ADJACENT zones, making the scenario trivial.
+  * The shift is verified before rendering. A video of a scenario that never
+    happened is worse than no video.
+  * A fleet-share-at-B trace is printed per phase next to each video, so the
+    claim "the cars moved" has a number attached rather than resting on
+    squinting at an animation.
 
 Videos are git-ignored (`*.mp4`); they are debugging artifacts, not results.
 
     uv run python scripts/export_shift_videos.py \
-        --ippo runs/d51-ippo-s0/checkpoint_best.pt \
-        --mappo runs/d51-mappo-s0/checkpoint_best.pt \
-        --outdir results/videos
+        --ippo runs/d54-ippo-s0/checkpoint_best.pt \
+        --mappo runs/d54-mappo-s0/checkpoint_best.pt \
+        --greedy --outdir results/videos
 """
 from __future__ import annotations
 
@@ -38,9 +45,6 @@ from marl_fleet_rebalancing.networks.encoder import obs_to_vector
 from marl_fleet_rebalancing.visualization import render_animation
 
 # Reuse the hub selection and shift guard from the competence test verbatim.
-# A local copy of pick_far_pair got the BFS wrong and returned ADJACENT zones
-# (A=0, B=1), which would make the scenario trivially easy and the video
-# meaningless.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from competence_two_zone import pick_far_pair, verify_shift as _verify_shift
 
@@ -87,6 +91,10 @@ def run_and_record(cfg, policy, args, a, b, out_path: Path) -> dict:
 
     reloc = [0, 0]
     disp = [0, 0]
+    # Fleet share at B, averaged within each phase. This is the direct readout
+    # of "did capacity physically move to where the demand went", and it is
+    # what makes the video a measurement rather than an animation.
+    share_b = [[], []]
     last_time = float(env.env.time)
     n_frames = 0
 
@@ -112,13 +120,25 @@ def run_and_record(cfg, policy, args, a, b, out_path: Path) -> dict:
 
         env.step(a_val)
 
+        tot = float(env._zone_total_counts.sum())
+        if tot > 0:
+            share_b[phase].append(float(env._zone_total_counts[b]) / tot)
+
         if float(env.env.time) > last_time:
             rec.snapshot(env.env)
             last_time = float(env.env.time)
             n_frames += 1
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    render_animation(rec, out_path=str(out_path), fps=args.fps)
+    render_animation(
+        rec, out_path=str(out_path), fps=args.fps,
+        description=(
+            f"100% of demand at zone {a} until minute {args.switch_min:g}, "
+            f"then 100% at zone {b}. Fleet share at B is the number to watch "
+            f"after the switch."
+        ),
+        show_heatmap=True,
+    )
 
     k = env.kpi_summary()
     served = sum(1 for o in env.env.orders.values()
@@ -131,6 +151,8 @@ def run_and_record(cfg, policy, args, a, b, out_path: Path) -> dict:
         "reloc_phase2": reloc[1],
         "disp_phase1": disp[0],
         "disp_phase2": disp[1],
+        "share_b_p1": 100.0 * float(np.mean(share_b[0])) if share_b[0] else 0.0,
+        "share_b_p2": 100.0 * float(np.mean(share_b[1])) if share_b[1] else 0.0,
         "served": served,
         "terminal_orders": total,
         "service_rate": served / max(total, 1),
@@ -191,19 +213,22 @@ def main() -> None:
         print("*** show a scenario that never happened. Refusing to render.")
         return
 
-    print(f"\n{'arm':<8} {'SR':>7} {'empty km':>10} {'reloc p1':>10} "
-          f"{'reloc p2':>10} {'frames':>7}  path")
+    print(f"\n{'arm':<8} {'SR':>7} {'empty km':>10} {'reloc p1':>9} "
+          f"{'reloc p2':>9} {'fleet@B p1':>11} {'fleet@B p2':>11}  path")
     for name, policy in arms:
         out = outdir / f"shift_{name}.mp4"
         stats = run_and_record(cfg, policy, args, a, b, out)
         print(f"{name:<8} {100*stats['service_rate']:6.1f}% "
-              f"{stats['empty_km']:10.1f} {stats['reloc_phase1']:10d} "
-              f"{stats['reloc_phase2']:10d} {stats['frames']:7d}  {out}")
+              f"{stats['empty_km']:10.1f} {stats['reloc_phase1']:9d} "
+              f"{stats['reloc_phase2']:9d} {stats['share_b_p1']:10.1f}% "
+              f"{stats['share_b_p2']:10.1f}%  {out}")
 
     print(f"\ndemand: 100% at zone {a} until minute {args.switch_min:g}, "
           f"then 100% at zone {b}")
-    print("phase 1 = before the switch, phase 2 = after. "
-          "reloc counts are relocation ACTIONS taken in each phase.")
+    print("phase 1 = before the switch, phase 2 = after.")
+    print("fleet@B is the share of the fleet sitting in zone B, averaged over "
+          "the phase.")
+    print("A policy that follows the shift shows fleet@B RISING from p1 to p2.")
 
 
 if __name__ == "__main__":

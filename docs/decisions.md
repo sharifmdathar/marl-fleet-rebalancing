@@ -764,3 +764,70 @@ is evidence about D54 -- they differ only in the critic.
 **Not claimed in advance:** that D54 improves service rate. It is a targeting
 fix; if targeting improves and service rate does not, that is a real and
 interesting result about the two being separable, not a failure.
+
+---
+
+## D54 RESULT — targeting fixed; passes the pre-registered test on 3 seeds
+
+Run at 60/60. Best val SR: IPPO 73.7% @ it15, MAPPO 74.6% @ it30.
+
+**Primary criterion, `checkpoint_best.pt`, 3 seeds:**
+
+| arm | chance | D51 | D54 seed 8000 | 8100 | 8200 | verdict |
+|---|---|---|---|---|---|---|
+| IPPO | 7.96-8.72% | 6.40% | **13.04%** | **18.22%** | **15.40%** | **PASS** |
+| MAPPO | 7.88-8.16% | 6.08% | **15.22%** | **17.67%** | **20.61%** | **PASS** |
+
+Both arms above measured chance on every seed, where both were below it before.
+Chance is recomputed per seed rather than assumed.
+
+**Secondary criterion, argmax tracks demand over 16 controlled placements:**
+D51 1/16 (chance 6.2%) -> D54 **8/16 IPPO, 5/16 MAPPO**.
+
+**Corroborating:** mean demand at chosen vs best target 0.18/0.17 -> **0.31-0.39**.
+
+**Controlled stress test** (`scripts/diag_targeting_stress.py`), because a
+1920-turn average cannot resolve a change confined to ~8% of turns:
+
+| scenario | greedy | IPPO | MAPPO |
+|---|---|---|---|
+| 1 zone, 100% demand there | 0.8% | **28.8%** | **43.6%** |
+| 2 zones, hard switch at 25min | 4.1% | **17.2%** | **29.3%** |
+
+(service rate; greedy never relocates and is the floor)
+
+**Why aggregate service rate did not move.** Arithmetic, not a null result:
+relocation is ~8% of zone-turns, so ~154 relocations per episode; a +10pp
+targeting gain is ~15 better aims; at the measured 44% dispatch conversion that
+is ~7 extra dispatches, ~+3 reward on a base of ~235. **~1.3% of total reward**,
+below the noise floor of a service-rate mean. The stress test removes the
+attenuation by concentrating the problem.
+
+**Caveat, recorded:** greedy scoring 0.8% under 100% single-zone demand shows
+that scenario is near-degenerate in absolute terms. It is a *targeting*
+benchmark, not a performance claim.
+
+**Caveat, recorded:** IPPO's selected checkpoint is iteration 15 of a run that
+then degraded to 63.7% by iteration 60. IPPO's numbers therefore come from a
+barely-trained policy and are not a fair IPPO-vs-MAPPO comparison.
+
+### Why the ratio is still 0.33 and not 1.0
+
+`scripts/diag_dest_head_decomposition.py`, over 61 real relocation-opportunity
+observations:
+
+| term | share of logit variation | argmax agreement with full head |
+|---|---|---|
+| key/query | **61.4% IPPO / 48.5% MAPPO** | **100%** |
+| raw bias | 5.8% / 5.9% | 86.9% |
+| travel | 13.5% / 14.7% | 3.3% |
+
+**The key/query path decides the destination on its own.** The raw-feature term
+-- the one the learnability probe showed is *sufficient* on its own (87.5% top-1,
+9.6x chance) -- contributes under 6% of the variation, because it is a single
+`Linear(8, 1)` while the probe used an MLP.
+
+So the head is no longer representation-limited: it routes demand through the
+Tanh zone embedding, which is why it works at all. But the direct path the probe
+proved sufficient is starved. `travel` burns 14% of the variation and agrees
+with the full head only 3.3% of the time, so it is close to inert.
