@@ -1327,3 +1327,102 @@ net-neutral at best rather than profitable.
 
 Not changed here: it is a reward edit and the user's call. Recorded with the
 measurement that establishes it.
+
+---
+
+## D64 — `relocator_share` 0.45 -> 0.65, restoring the expected-value invariant
+
+**Change:** `relocator_share` 0.45 -> 0.65 in `EnvConfig` and `NYCConfig`.
+
+**Why.** D63 established that D59 had broken the expected-value invariant.
+D59 made the relocating zone pay for the WHOLE job it caused
+(`beta * (2.9 km leg + 1.46 km pickup) = 0.2616`) without raising what it earns,
+while the credit only fires when the relocated car is actually dispatched --
+measured at **56.8% even for a perfect aim**. So every relocation was
+net-negative in expectation:
+
+| share | expected credit | cost | net |
+|---|---|---|---|
+| 0.45 (old) | 0.2556 | 0.2616 | **-0.0060** |
+| **0.65 (new)** | **0.3692** | 0.2616 | **+0.1076 (1.41x)** |
+
+The `AGENTS.md` invariant `share > beta * km` still passed at 0.45 (0.45 >
+0.262), because that form ignores the conditionality. It is a step-function
+reward, not an expected-value one.
+
+**`scripts/diag_reloc_invariant.py` rewritten** to assert the conditional form
+`share * gamma * P(dispatch) > beta * km`, with the measured 0.568 as an
+explicit input rather than a hidden constant. Verified it correctly reports
+0.45 as VIOLATED and 0.65 as HOLDS at 1.41x. Reward accounting re-verified
+exact: emitted 222.40 vs expected 222.40, difference -0.00. 41 tests pass.
+
+## D64 RESULT — works for MAPPO, regresses IPPO
+
+3 episodes, argmax, `alpha=0.2`, `share=0.65`:
+
+| run | precision | chance | lift | SR% | empty km | wait |
+|---|---|---|---|---|---|---|
+| **d64 MAPPO** | **49.15%** | 9.03% | **5.44x** | 79.39 | 453.3 | 2.63 |
+| d64 IPPO | 10.24% | 8.18% | 1.25x | 70.39 | 487.8 | 2.59 |
+| d62 IPPO (prev) | 37.19% | 7.33% | 5.07x | 78.68 | 447.9 | 2.79 |
+
+Targeting by iteration, so this is not one lucky checkpoint:
+
+| checkpoint | MAPPO | IPPO |
+|---|---|---|
+| it10 | 44.37% | 16.84% |
+| it30 | 38.98% | 9.19% |
+| it35 | **49.08%** | 14.07% |
+
+MAPPO is robust at ~44% mean and reaches 49.08% (6.14x chance) -- the best
+targeting measured in this project. **IPPO regressed from 37.19% to ~13%,
+consistently across iterations**, so it is a real regression rather than
+selection noise.
+
+Most likely cause is arm-specific: a higher relocator credit rewards relocating
+more, and MAPPO's centralized critic can evaluate whether a relocation will pay,
+so it learns to aim. IPPO's weaker critic cannot, so the extra credit buys
+indiscriminate relocating instead -- consistent with IPPO performing 136.7
+relocations against MAPPO's 133.2 at worse targeting.
+
+**One seed each.** "share 0.65 helps" is supported for MAPPO and unproven in
+general. `AGENTS.md` requires >=5 seeds for a reported result; this is debugging
+output.
+
+---
+
+## STATUS: no proper model yet -- do not start the shift study
+
+**LP dominates both RL arms on the frontier** (`scripts/eval_tradeoff.py`,
+6 paired seeds, argmax, D64):
+
+| arm | SR% | empty km | SR/100km |
+|---|---|---|---|
+| greedy | 52.73 | 78.1 | **68.0** |
+| **LP** | **67.29** | **154.3** | **43.7** |
+| IPPO | 70.95 | 483.9 | 14.7 |
+| MAPPO | 74.99 | 468.8 | 16.0 |
+
+LP reaches 67.29% at 154km; RL reaches 74.99% at 469km -- 3.0x the deadhead for
++7.7pp. On the efficiency `AGENTS.md` requires alongside service rate, RL is
+**2.7x worse than LP**. Measuring demand-shift degradation with this would be
+measuring a policy the baseline already dominates.
+
+**The binding defect is still Cause 1 of D63, and it is NOT fixed.** The
+relocator receives a flat 0.65 whether it sends a car to a zone with 1 rider or
+10, so the reward cannot separate good targeting from mediocre targeting:
+
+```
+gap best vs other-nonempty :  +2.9 pp   <- RANKING signal (missing)
+gap non-empty vs empty     : +20.9 pp   <- EMPTINESS signal (learned)
+```
+
+We are paying cars to move without saying **where**. That is why MAPPO reaches
+49% while the supervised probe reaches 87% on identical features.
+
+**The next step, not yet done:** scale the relocator credit by the deficit it
+relieved, `credit = relocator_share * min(pending_at_target / reference, 1)`,
+with `reference` measured (~1.7 riders, the mean demand at the best available
+target). Same dispatch proof-gating as now, so it is not D28's arrival bonus
+which paid without proof. Risk to watch: chasing a single hotspot at the expense
+of breadth.

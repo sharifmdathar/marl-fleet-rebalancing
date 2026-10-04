@@ -244,7 +244,30 @@ class EnvConfig:
     # Until D47 this share was DIVIDED by the length of a "relay chain", which
     # made the effective share fall to 0.150 at 3 hops -- a 1.004x margin over
     # cost, and net-negative from 4 hops on.
-    relocator_share: float = 0.45
+    relocator_share: float = 0.65
+
+    # D64: 0.45 -> 0.65. D59 made the relocating zone pay for the WHOLE job it
+    # caused, but did not raise what it earns, which broke the expected-value
+    # invariant this comment asserts. Measured cost per relocation is
+    # beta * (2.9 km leg + 1.46 km pickup deadhead) = 0.2616, and the credit is
+    # CONDITIONAL -- it fires only when the relocated car is dispatched, which
+    # happens 56.8% of the time even for a PERFECT aim. So:
+    #
+    #     EV = relocator_share * gamma * P(dispatch | relocated) > beta * km
+    #
+    # The old form compared share to cost directly (0.45 > 0.262, which held)
+    # and so missed that only ~57% of relocations ever pay. Expected net was
+    # NEGATIVE for every class of aim, including the best, so the policy was
+    # correctly ambivalent about relocating.
+    #
+    #     share    credit    expected    net
+    #     0.45     0.450      0.2556   -0.0060
+    #     0.55     0.550      0.3124   +0.0508
+    #     0.65     0.650      0.3692   +0.1076   <- 1.41x cost
+    #     0.80     0.800      0.4544   +0.1928
+    #
+    # scripts/diag_reloc_invariant.py asserts the conditional form, not the
+    # literal one.
 
     # --- Relocation arrival bonus ---
     # Paid to the sending zone when its relocated driver arrives, scaled by the
@@ -312,7 +335,30 @@ class NYCConfig(EnvConfig):
     gamma: float = 1.0
     cancel_penalty: float = 1.0
     team_share: float = 0.2
-    relocator_share: float = 0.45
+    relocator_share: float = 0.65
+
+    # D64: 0.45 -> 0.65. D59 made the relocating zone pay for the WHOLE job it
+    # caused, but did not raise what it earns, which broke the expected-value
+    # invariant this comment asserts. Measured cost per relocation is
+    # beta * (2.9 km leg + 1.46 km pickup deadhead) = 0.2616, and the credit is
+    # CONDITIONAL -- it fires only when the relocated car is dispatched, which
+    # happens 56.8% of the time even for a PERFECT aim. So:
+    #
+    #     EV = relocator_share * gamma * P(dispatch | relocated) > beta * km
+    #
+    # The old form compared share to cost directly (0.45 > 0.262, which held)
+    # and so missed that only ~57% of relocations ever pay. Expected net was
+    # NEGATIVE for every class of aim, including the best, so the policy was
+    # correctly ambivalent about relocating.
+    #
+    #     share    credit    expected    net
+    #     0.45     0.450      0.2556   -0.0060
+    #     0.55     0.550      0.3124   +0.0508
+    #     0.65     0.650      0.3692   +0.1076   <- 1.41x cost
+    #     0.80     0.800      0.4544   +0.1928
+    #
+    # scripts/diag_reloc_invariant.py asserts the conditional form, not the
+    # literal one.
     prospective_bonus_scale: float = 0.0
 
 # ---------------------------------------------------------------------------

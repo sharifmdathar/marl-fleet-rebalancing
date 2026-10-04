@@ -1,23 +1,33 @@
-"""D47: is the relocator credit still above its own deadhead cost?
+"""Assert relocation is profitable in EXPECTED value, not just nominally.
 
-The repo rule (AGENTS.md, from env 2.8) is that `relocator_share` must exceed
-`beta * km_per_relocation / gamma`, or a perfect relocation is net-negative and
-the agent learns to churn.
+`AGENTS.md` records the invariant from env 2.8: a CORRECT relocation must still
+net positive, or the agent learns to churn instead of to serve. The check that
+was written for it compares `relocator_share` to `beta * km` directly, and that
+form is WRONG: the relocator credit is CONDITIONAL -- it fires only when the
+relocated car is actually dispatched.
 
-Under the old relay-chain divisor that invariant was only checked at 1 hop. The
-divisor made the EFFECTIVE share fall with chain length: at 3 hops a relocation
-paid 0.45/3 = 0.150 against a cost of 0.149, a 1.004x margin, and at 4 hops it
-was net-negative.
+Measured (D63, D62 checkpoints, NYC16 val): the credit lands 56.8% of the time
+even for a PERFECT aim. So with the old constants:
 
-D47 removes the divisor, so the effective share is now constant at
-`relocator_share * gamma` for every relocation regardless of how many times the
-car has moved. This asserts that directly, from the live config, rather than
-restating numbers that a later config change could invalidate.
+    0.45 * 0.568 = 0.2556  against  cost 0.2616   ->  NET NEGATIVE
+
+The literal check (0.45 > 0.2616) passed the whole time while every relocation
+was a losing move in expectation, and the policy was correctly ambivalent about
+relocating.
+
+So this asserts the conditional form:
+
+    relocator_share * gamma * P(dispatch | relocated)  >  beta * km_total
+
+`km_total` is the whole job the relocating zone is charged for under D59: the
+relocation leg plus the pickup deadhead. `P(dispatch)` is measured, not assumed.
 
     uv run python scripts/diag_reloc_invariant.py
+    uv run python scripts/diag_reloc_invariant.py --p-dispatch 0.568 --km 4.36
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,49 +35,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from marl_fleet_rebalancing.config import NYCConfig
 
-# Measured on this env by scripts/diag_reloc_leg_distance.py (367 legs,
-# 3 episodes, seeds 3000-3002). Pass a distance on argv to override.
-MEASURED_MEAN_LEG_KM = 2.95
+# Measured, not assumed:
+#   km_relocation_leg : mean distance of a relocation leg (D50/D57)
+#   km_pickup_deadhead: empty km per completed ride (D57)
+#   p_dispatch        : fraction of relocation credits that actually fire,
+#                       measured for a PERFECT aim (D63)
+KM_LEG = 2.9
+KM_PICKUP = 1.46
+P_DISPATCH_PERFECT = 0.568
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--km-leg", type=float, default=KM_LEG)
+    ap.add_argument("--km-pickup", type=float, default=KM_PICKUP)
+    ap.add_argument("--km", type=float, default=None,
+                    help="total km charged per relocation (defaults to leg+pickup)")
+    ap.add_argument("--p-dispatch", type=float, default=P_DISPATCH_PERFECT,
+                    help="P(credit fires | best aim); re-measure with "
+                         "scripts/diag_reward_rank_resolution.py")
+    args = ap.parse_args()
+
     cfg = NYCConfig()
-    share = cfg.relocator_share * cfg.gamma
+    km = args.km if args.km is not None else args.km_leg + args.km_pickup
+    cost = cfg.beta * km
+    credit = cfg.relocator_share * cfg.gamma
+    ev = credit * args.p_dispatch
 
-    # Measure the leg distance rather than hardcoding it. An earlier version of
-    # this script asserted 2.49 km, carried over from an older run, which made
-    # the margin read 3.01x. Re-measured on the current env the mean is 2.95 km
-    # and the real margin is 2.54x. A hardcoded distance makes the assertion
-    # drift away from the thing it is supposed to check.
-    km = float(sys.argv[1]) if len(sys.argv) > 1 else MEASURED_MEAN_LEG_KM
-    cost = cfg.beta * km / max(cfg.gamma, 1e-9)
-    origin = "measured" if len(sys.argv) > 1 else "default"
-
-    print("relocator_share            : %.3f" % cfg.relocator_share)
-    print("gamma                      : %.3f" % cfg.gamma)
-    print("beta (per empty km)        : %.3f" % cfg.beta)
-    print(f"relocation leg distance    : {km:.2f} km ({origin})")
-    print("  run scripts/diag_reloc_leg_distance.py to re-measure")
+    print("relocator_share              : %.3f" % cfg.relocator_share)
+    print("gamma                        : %.3f" % cfg.gamma)
+    print("beta (per empty km)          : %.3f" % cfg.beta)
+    print("km charged per relocation    : %.2f  (leg %.2f + pickup %.2f)"
+          % (km, args.km_leg, args.km_pickup))
+    print("P(credit fires | best aim)   : %.3f  (measured)" % args.p_dispatch)
     print()
-    print("cost of one relocation     : %.4f" % cost)
-    print("credit if it works         : %.4f" % share)
-    print("margin                     : %+.4f  (%.2fx cost)"
-          % (share - cost, share / cost))
+    print("cost of one relocation       : %.4f" % cost)
+    print("credit if it fires           : %.4f" % credit)
+    print("EXPECTED credit             : %.4f  (= credit x %.3f)"
+          % (ev, args.p_dispatch))
     print()
-    print("effective share by hop count (D47: no divisor, so all rows identical):")
-    for hops in (1, 2, 3, 4, 5):
-        eff = share  # was: cfg.relocator_share * cfg.gamma / hops
-        flag = "OK" if eff > cost * 1.5 else ("THIN" if eff > cost else "NEGATIVE")
-        print("   %d hop(s): %.4f  net %+.4f  %s" % (hops, eff, eff - cost, flag))
-
-    ok = share > cost * 1.5
+    print("  EV(net)                    : %+.4f   (%.2fx cost)"
+          % (ev - cost, ev / cost))
     print()
-    print("INVARIANT relocator_share > beta*km/gamma : %s"
-          % ("HOLDS" if ok else "VIOLATED"))
+    literal = credit > cost
+    print("literal check  share > cost  : %s   <- NOT sufficient; the credit"
+          % ("pass" if literal else "fail"))
+    print("                              is conditional, so this passes while")
+    print("                              every relocation loses money.")
+    print()
+    ok = ev > cost
+    print("EXPECTED-VALUE INVARIANT")
+    print("  share * gamma * P(dispatch) > beta * km")
+    print("  %.4f > %.4f  ->  %s"
+          % (ev, cost, "HOLDS" if ok else "VIOLATED"))
     if not ok:
-        print("  A relocation that works perfectly is net-negative. The agent will")
-        print("  learn to churn rather than rebalance.")
-        print("  Re-measure with scripts/diag_reloc_leg_distance.py.")
+        print()
+        print("  A relocation that works PERFECTLY is net-negative in")
+        print("  expectation, so the policy is right to avoid relocating and no")
+        print("  amount of training will make it aim well. Required share for")
+        print("  EV = 0 at these constants: %.4f"
+              % (cost / (cfg.gamma * args.p_dispatch)))
+        print("  For a 1.5x expected margin: %.4f"
+              % (1.5 * cost / (cfg.gamma * args.p_dispatch)))
     raise SystemExit(0 if ok else 1)
 
 
