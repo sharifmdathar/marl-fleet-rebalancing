@@ -1000,14 +1000,20 @@ class RideGymAEC(AECEnv):
             dispatcher = self._order_dispatcher.get(oid)
             if dispatcher is None or not (0 <= dispatcher < self._num_zones):
                 continue
-            # D48: read the dispatch-time record, NOT _driver_relocator. That dict is
-            # popped when the car is dispatched (section 1c), so looking it up
-            # here would return None and pay the dispatcher the FULL gamma on
-            # top of the relocator share already paid at dispatch.
-            if oid in self._order_relocator_paid:
-                local_rewards[dispatcher] += (1.0 - cfg.relocator_share) * cfg.gamma
-            else:
-                local_rewards[dispatcher] += cfg.gamma
+            # D49: the dispatcher is paid the FULL served credit, always.
+            #
+            # D48 paid it (1 - relocator_share) whenever the car had been
+            # relocated. That was wrong: the zone did identical work either way
+            # -- it dispatched a car to a rider and the ride completed -- so it
+            # earned 45% less for using the car another zone had pre-positioned
+            # for it. That penalised the outcome rebalancing exists to produce,
+            # and under team_share=0.2 the local term carries 80% of the weight,
+            # so the penalty was real rather than diluted.
+            #
+            # The relocator's share is a BONUS for a separate action, not a
+            # slice carved out of the dispatcher's credit. Both agents did
+            # distinct work, so both are paid for it.
+            local_rewards[dispatcher] += cfg.gamma
             self._order_relocator_paid.pop(oid, None)
 
         # 1c. D48: the relocating zone is paid when its car is DISPATCHED to a
@@ -1027,8 +1033,11 @@ class RideGymAEC(AECEnv):
         # arrival itself and was switched off precisely because it paid without
         # proof. Here 55.7% of arrivals produce no dispatch and no credit.
         #
-        # The dispatcher is reduced at completion (section 1) so the pair still
-        # pays exactly one gamma between them. Timing moves; the total does not.
+        # The relocator's share is a BONUS on top of the dispatcher's full served
+        # credit (D49), not a slice of it. A ride served by a rebalanced car is
+        # therefore worth 1.45 gamma rather than 1.0. That is intentional: two
+        # distinct value-creating actions occurred -- zone A moved a car to
+        # where it was needed, zone B put it to work.
         for oid, did, zone_idx in (dispatched_this_turn or ()):
             relocator = self._driver_relocator.get(did)
             if relocator is not None and relocator != zone_idx:

@@ -105,20 +105,18 @@ def main() -> None:
         unpaid_payouts += len(live_at_cutoff)
         inflight_detail[ep] = len(live_at_cutoff)
 
-    # Expected total, computed from what the env actually did on THIS run.
+    # Expected total. Since D49 the dispatcher always receives the full gamma and
+    # the relocator's share is a BONUS on top, so a ride served by a rebalanced
+    # car is worth gamma + share*gamma. Therefore:
     #
-    # A control run with relocator_share = 0 is NOT a valid baseline here:
-    # changing the share changes zone rewards, which changes the policy, so the
-    # two runs follow different trajectories and complete different numbers of
-    # rides. Measured: 8/7/9 relocator payments on the control's trajectories
-    # against 6/5/7 still-running here.
+    #   every completed ride            -> gamma
+    #   every relocator payout at dispatch -> share * gamma
     #
-    # Instead count directly from this run. Every completed ride pays exactly
-    # gamma between its dispatcher and its relocator, and a relocator payout
-    # still standing at cutoff has paid share*gamma and nothing more. Both
-    # numbers are observed, not inferred from config.
+    # and the relocator payout is paid at dispatch while the dispatcher's gamma
+    # is paid at completion, so both must be counted. A payout whose ride was
+    # still running at cutoff has paid its share and not yet the gamma.
     baseline = float(completed)
-    expected = baseline + unpaid_payouts * share * gamma
+    expected = baseline + payouts * share * gamma
     over = emitted - expected
 
     print(f"episodes                     : {args.episodes}")
@@ -130,8 +128,8 @@ def main() -> None:
     print(f"baseline (completed x gamma) : {baseline:.2f}")
     print(f"served credit emitted        : {emitted:.2f}")
     print(f"expected                      = {baseline:.2f} + "
-          f"{unpaid_payouts} x {share * gamma:.2f} = {expected:.2f}")
-    print(f"overpayment                   = {over:+.2f}")
+          f"{payouts} x {share * gamma:.2f} = {expected:.2f}")
+    print(f"difference                    = {over:+.2f}")
     print()
     ok = over < 0.5
     print(f"INVARIANT no ride is paid twice: {'HOLDS' if ok else 'VIOLATED'}")

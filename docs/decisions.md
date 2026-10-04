@@ -387,3 +387,37 @@ relocator margin is a constant 3.01x at every hop count. 33 tests pass.
 is unchanged: relocation precision against the 4.1% chance baseline measured by
 the random control arm in D44. Everything above establishes that the credit is
 correct and prompt, not that a policy exploits it.
+
+---
+
+## D49 — the dispatcher is paid the full gamma; the relocator share is a bonus
+
+**Change:** section 1 pays the dispatcher `gamma` unconditionally. Previously
+(D48) it paid `1 - relocator_share` whenever the car had been relocated.
+
+**Why:** D48's split was a mistake in attribution, not just arithmetic. The
+dispatching zone did identical work either way -- it sent a car to a rider and
+the ride completed -- so it earned 45% less for using the car another zone had
+pre-positioned for it. That penalised precisely the outcome rebalancing exists
+to produce: zone B was better off ignoring the car zone A thoughtfully sent it
+and using one it already had.
+
+The penalty was not diluted by cooperation either. At `team_share=0.2` the local
+term carries 80% of the weight, so the 0.45 shortfall was nearly all real.
+
+The split existed to stop one ride paying two gamma. But the relocator's share
+is not a slice of the served credit -- it pays for a *different action*. Zone A
+moved a car to where it was needed; zone B put it to work. Both happened, so
+both are paid. A ride served by a rebalanced car is now worth 1.45 rather than
+1.0, and that is the honest price of the two actions.
+
+**Economics, unchanged where it matters.** The relocator's own decision is
+still `+0.45` against `beta * 2.49km = 0.149`, a **3.01x** margin at every hop
+count (`scripts/diag_reloc_invariant.py`). D49 does not make relocation more
+profitable to the zone that decides it; it stops the *receiving* zone being
+punished for the decision.
+
+**Verified.** `scripts/diag_served_credit_total.py`, 3 episodes: emitted 301.60
+against expected `235 x 1.0 + 148 x 0.45 = 301.60`, difference **+0.00**. 34
+tests pass, including a direct regression that a zone earns the same whether it
+uses a rebalanced car or its own.
