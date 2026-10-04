@@ -233,6 +233,10 @@ class RideGymAEC(AECEnv):
         # section 1 know to reduce the dispatcher's share so the pair pays one
         # gamma between them rather than two.
         self._order_relocator_paid: dict[int, int] = {}
+        # Dispatches requested this turn but not yet confirmed (D51). Committed
+        # to _order_dispatcher / _driver_commander only after RideGym honours
+        # the bid, so a refused dispatch leaves no phantom attribution.
+        self._pending_dispatch: list[tuple[int, int, int]] = []
         # driver_id -> target_zone_idx (destination of ongoing relocation)
         self._driver_relocation_target: dict[int, int] = {}
 
@@ -724,6 +728,7 @@ class RideGymAEC(AECEnv):
         self._driver_commander.clear()
         self._driver_relocator.clear()
         self._order_relocator_paid.clear()
+        self._pending_dispatch.clear()
         self._driver_relocation_target.clear()
         self._demand_history.clear()
         self._obs_scales[:] = 0.0
@@ -1207,11 +1212,26 @@ class RideGymAEC(AECEnv):
                     continue
 
                 claimed_orders.add(oid)
-                self._order_dispatcher[oid] = zone_idx
-                self._driver_commander[driver_id] = zone_idx
-                self._driver_relocation_target.pop(driver_id, None)
+                # D51: record the intent but do NOT commit it yet. RideGym
+                # silently drops bids on orders that are no longer PENDING, and
+                # its `_cancel_timed_out()` runs before the assignment step, so
+                # an order in the last dt of patience is advertised in the
+                # menu, masked legal, and already expired when picked.
+                #
+                # Committing here unconditionally left three phantom records per
+                # such void (D50, measured 1.1-2.5% of dispatches): a dispatcher
+                # that never dispatched, a commander overwritten to the
+                # dispatching zone so the abandoned leg's remaining deadhead was
+                # billed to the wrong zone, and `_driver_relocator.pop(did)`
+                # destroying the sending zone's credit for a relocation that was
+                # never cancelled.
+                #
+                # The provisional entries are committed after `env.step` below,
+                # once RideGym's outcome is known.
+                self._pending_dispatch = getattr(
+                    self, "_pending_dispatch", [])
+                self._pending_dispatch.append((oid, driver_id, zone_idx))
                 ridegym_actions[driver_id] = decoded
-                dispatched_this_turn.append((oid, driver_id, zone_idx))
 
             elif "relocate" in decoded:
                 # Relocation actions only consume purely idle drivers
@@ -1244,6 +1264,27 @@ class RideGymAEC(AECEnv):
             self._zone_inbound_reloc = inbound / self._inbound_reloc_scale
 
         obs, _rewards, dones, info = self.env.step(ridegym_actions)
+
+        # D51: commit only the dispatches RideGym actually honoured. An order
+        # that is still PENDING or has become CANCELLED was never assigned, so
+        # the wrapper must not claim credit for it, bill its deadhead to the
+        # dispatching zone, or discard the relocating zone's credit.
+        from ride_gym.enums import OrderStatus
+
+        dispatched_this_turn = []
+        for oid, did, zone_idx in getattr(self, "_pending_dispatch", ()):
+            order = self.env.orders.get(oid)
+            status = getattr(order, "status", None)
+            if status not in (OrderStatus.ASSIGNED, OrderStatus.ONBOARD,
+                              OrderStatus.COMPLETED):
+                continue
+            if getattr(order, "assigned_driver", None) != did:
+                continue
+            self._order_dispatcher[oid] = zone_idx
+            self._driver_commander[did] = zone_idx
+            self._driver_relocation_target.pop(did, None)
+            dispatched_this_turn.append((oid, did, zone_idx))
+        self._pending_dispatch = []
 
         # Detect relocation arrivals BEFORE updating _last_obs (D28):
         # Drivers that were "relocating" in the old obs but are no longer

@@ -482,3 +482,49 @@ blending is applied to the final reward and no baseline reads an unblended
 value; `reset()` clears all seven tracking structures; `_newly_completed_ids`
 cannot return an id twice; the `events` dict cannot survive a turn, so no
 distance is charged twice; `_prev_served` is dead code (written, never read).
+
+---
+
+## D51 — a dispatch is credited only if RideGym honours it
+
+**Change:** `_flush_turn` records dispatch intent in `_pending_dispatch` and
+commits `_order_dispatcher`, `_driver_commander` and the
+`_driver_relocation_target` pop only after `env.step` returns, and only for
+orders whose status is ASSIGNED/ONBOARD/COMPLETED **and** whose
+`assigned_driver` matches the requested driver. `dispatched_this_turn` is built
+from the confirmed set, not the requested set.
+
+**Why:** fixes D50 finding 1. RideGym's `_cancel_timed_out()` runs at the top of
+its `step()`, so an order in the last `dt` of patience is advertised in the
+candidate menu, masked legal, and already expired when the agent picks it. Its
+assignment step then drops the bid silently. The wrapper was recording the
+dispatch regardless, which produced three phantom attributions per refusal:
+
+1. `_order_dispatcher[oid]` named a zone that never dispatched;
+2. `_driver_commander[did]` was overwritten to the *dispatching* zone, so the
+   abandoned relocation leg's remaining deadhead was billed to the wrong zone --
+   and it persisted, since nobody re-commands a driver already in flight;
+3. `_driver_relocator.pop(did)` destroyed the sending zone's credit for a
+   relocation that was never cancelled.
+
+**Measured.** Void rate **1.1-2.5% of recorded dispatches -> 0.0%** over 3
+episodes (`scripts/diag_reward_audit.py`). Cross-zone misattribution was already
+0 under a greedy policy because most voided bids hit cars already at their
+destination; the phantom records and the lost credits were the real damage, and
+both are gone.
+
+**Regression test.** `scripts/diag_dispatch_void.py` rewinds a completed order to
+CANCELLED -- the state a timed-out order is in when the wrapper offers it -- and
+asserts `_order_dispatcher`, `_driver_commander` and `_driver_relocator` are all
+untouched.
+
+**Unchanged and re-verified.** `scripts/diag_served_credit_total.py`: emitted
+302.50 vs expected `235 x 1.0 + 150 x 0.45 = 302.50`, difference **+0.00**.
+`scripts/diag_reloc_invariant.py`: margin 2.54x at the measured 2.95 km mean leg.
+34 tests pass.
+
+**Still open, deliberately.** D50 findings 2 and 3. Finding 2 needs no code
+change (the numbers are now measured). Finding 3 -- full credit for a partial leg
+-- is arguably correct: a relocation that puts a car to work sooner did earn, and
+making credit proportional to distance flown would penalise opportunistic
+dispatch, which is desirable behaviour. Not changed without a decision.
