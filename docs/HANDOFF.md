@@ -1,134 +1,168 @@
 # HANDOFF — MARL fleet rebalancing
 
-**Read `docs/decisions.md` for the full decision record (D35–D64). This file is
-the map: where things stand, what was tried, what broke, and what to do next.**
+**Read `docs/decisions.md` for the full record (D35–D82). This file is the map:
+where things stand, what was tried, what broke, what to do next.**
 
-Everything below was measured in this repo. Numbers are labelled
-`MEASURED` / `INFERRED` / `TODO`. If a claim here has no measurement attached,
-treat it as a hypothesis.
+Everything is labelled `MEASURED` / `INFERRED` / `TODO`. A claim here with no
+measurement attached is a hypothesis.
+
+**Rewrite note (D83).** The previous version of this file was measured on a
+single validation window and on an LP that had never been tuned. Both defects
+were found later (D70) and invalidated every table in it, so the stale tables
+were **deleted rather than annotated** — per `AGENTS.md`, a stale number is
+worse than a missing one because it gets cited. The withdrawn figures live in
+`docs/decisions.md`, which keeps corrections in place.
 
 ---
 
 ## 1. Bottom line
 
-**There is no usable model yet. Do not start the demand-shift study.**
+**Do not start the demand-shift study yet.** Two things must be true first, and
+neither is yet.
 
-The two RL arms are **dominated by the LP baseline** on the efficiency metric
-that `AGENTS.md` requires alongside service rate.
+MEASURED, 12 val windows (one episode per window), paired, argmax actions,
+service rate = completed / total (`scripts/diag_objective_gap.py`, seeds
+12000–12011):
 
-| arm | SR% | empty km | SR/100km |
-|---|---|---|---|
-| greedy | 52.73 | 78.1 | **68.0** |
-| **LP** | **67.29** | **154.3** | **43.7** |
-| IPPO | 70.95 | 483.9 | 14.7 |
-| MAPPO | 74.99 | 468.8 | 16.0 |
+| arm | SR % | empty km | wait min | objective R | SR/100km |
+|---|---|---|---|---|---|
+| greedy, relocation masked off | 41.6 ± 7.9 | 64.9 | 2.47 | −93.0 | 64.1 |
+| LP, old defaults | 53.9 ± 7.6 | 141.2 | 2.58 | −48.5 | 38.2 |
+| **LP, re-tuned** | **70.1 ± 3.3** | 339.9 | 2.68 | **+4.4** | 20.6 |
+| RL untrained (1 PPO update) | 66.9 ± 3.7 | 352.5 | 2.78 | −8.7 | 19.0 |
+| RL flat bonus (pre-D71) | 67.2 ± 4.5 | 472.3 | 2.67 | −13.0 | 14.2 |
+| RL split credit (D71) | 69.4 ± 3.3 | 468.1 | 2.71 | −3.5 | 14.8 |
 
-`scripts/eval_tradeoff.py`, 6 paired seeds (12000–12005), val split, argmax
-actions. LP gets 67.29% at 154 km; MAPPO gets 74.99% at 469 km — **3.0× the
-deadhead for +7.7pp. RL is 2.7× worse than LP per empty km.**
+Two readings that replace everything previously believed:
 
-Measuring degradation with this would measure a policy the baseline already
-beats. That is the user's explicit stop condition.
+1. **RL with relocation masked off is identical to greedy** (41.6%, 64.9 km).
+   Everything RL adds comes from relocation, and *almost any* relocation helps:
+   the **untrained** policy gains 25 points of service over greedy. So "can RL
+   learn to relocate" was never the open question — it already answers yes.
+2. **40 iterations of training bought nothing.** Paired against untrained:
+   +0.3 ± 1.0 points of service for +120 ± 13 km.
 
----
+### What must be true before the study
 
-## 2. The one defect that blocks everything
-
-**D63 Cause 1, unfixed.** The relocating zone is paid a **flat 0.65 regardless
-of whether it sends a car to a zone with 1 rider or 10.**
-
-MEASURED, D62 IPPO, dispatch rate by aim class:
-
-| aim class | aims | paid | rate |
-|---|---|---|---|
-| best legal target | 148 | 84 | **56.8%** |
-| other non-empty zone | 91 | 49 | **53.8%** |
-| empty zone | 167 | 55 | **32.9%** |
-
-```
-gap best vs other-nonempty :  +2.9 pp   <- RANKING signal: missing
-gap non-empty vs empty     : +20.9 pp   <- EMPTINESS signal: learned
-```
-
-The reward is **7× more sensitive to "did you aim somewhere empty" than to "did
-you aim at the best one".** MAPPO is worse (+0.2 pp ranking).
-
-So RL learns half the decision and cannot learn the other half. That is why
-MAPPO reaches **49%** precision while a supervised probe on **identical
-features** reaches **87.5%** (MEASURED, `scripts/diag_target_learnability.py`,
-7.5–9.6× chance across 4 seeds).
-
-**The policy is being paid to move cars without being told where.**
-
-### Proposed fix, not yet implemented
-
-Scale the relocator credit by the deficit it relieved:
-
-```
-credit = relocator_share * min(pending_at_target / reference, 1)
-```
-
-- Keep the existing **dispatch proof-gating** — the credit still fires only when
-  the relocated car is actually dispatched. This is *not* D28's arrival bonus,
-  which paid for the arrival itself and was switched off for paying without
-  proof.
-- `reference` should be **measured**, not guessed: mean demand at the best
-  available target is **1.69–1.77 riders** (MEASURED, D62).
-- **Risk to watch:** over-aggressive scaling makes the policy chase one hotspot
-  and neglect breadth. Test against the current 49% and the 87% ceiling.
+| precondition | status |
+|---|---|
+| A valid **IPPO** arm on current code | **MISSING.** Every IPPO checkpoint predates the split-credit, chain-share, real-rows and window-coverage fixes. There is no valid IPPO result. |
+| **≥5 seeds** on the reported config | **MISSING.** All of D65–D82 is 1 seed, labelled debugging output in the log itself. |
+| Frozen-policy definition settled (argmax vs sampled) | **OPEN.** D72 found the two behave very differently at high beta. |
+| RL competitive with LP on the frontier | **PARTIAL.** Ties LP on service (69.4 vs 70.1), 128 km worse on distance. |
 
 ---
 
-## 3. What actually works
+## 2. The two open defects
 
-**Targeting went from broken to good.** MEASURED, argmax, decision-time
-(`scripts/diag_targeting_at_decision.py`):
+### 2a. The frontier gap is not closed by beta
 
-| stage | precision | chance | lift |
-|---|---|---|---|
-| D51 (pooled encoder) | 6.40% | 8.40% | 0.76× — *below chance* |
-| **D64 MAPPO** | **49.15%** | 9.03% | **5.44×** |
-| D64 MAPPO it35 | 49.08% | 8.00% | **6.14×** |
-| D64 IPPO | 10.24% | 8.18% | 1.25× — **regressed** |
+MEASURED, seed 1, split credit + targeting bonus 0.1 + distance term +
+real-rows update, 12 val windows, argmax (D79 → D80 → D81):
 
-D64 MAPPO is robust across iterations (it10 44.37%, it30 38.98%, it35 49.08%),
-so it is not one lucky checkpoint. **One seed each** — `AGENTS.md` requires ≥5
-seeds for a *reported* result, so this is debugging output.
+| iteration | SR % | empty km | wait | effective distance weight |
+|---|---|---|---|---|
+| 40 | 68.0 | 461 | 2.77 | −0.17 |
+| 80 | 67.1 | 416 | 2.84 | |
+| 120 | 65.8 | 332 | 2.80 | −0.80 |
+| 160 | 61.2 | 218 | 2.90 | |
+| 200 | 60.5 | 234 | 3.02 | |
+| 240 | 59.9 | 204 | 2.91 | −1.61 |
+| 120 (+ inbound, D81) | 64.4 | 281 | 2.84 | |
 
-**IPPO regressed** 37.19% → ~13% consistently. Most likely arm-specific: the
-higher relocator credit rewards relocating more, MAPPO's centralized critic can
-evaluate whether a relocation will pay so it learns to aim, IPPO's weaker critic
-cannot so the credit buys indiscriminate relocating. **Unproven — needs seeds.**
+**This is the central negative result.** With distance priced, the policy *does*
+learn to drive less — the learned weight goes −0.006 → −0.80 → −1.61. But it
+never settles near LP. It keeps trading service away, and its points sit
+**below LP's own trade-off curve** (LP 67.6% at 259 km, 58.9% at 151 km; RL
+65.8% at 332 km, 59.9% at 204 km — indicative, different seeds and split).
 
----
+**Beta moves *where on the curve* RL sits. It does not move the curve.** No value
+of it closes the gap: 0.06, 0.12 and 0.2 all measured (D72, D76, D79–D81).
 
-## 4. Measurement discipline — read before trusting any number
+Where the extra empty km comes from, MEASURED (D75):
 
-**Four of my own reported numbers were wrong**, each caught by testing a
-premise rather than accepting a conclusion. Do not repeat them.
-
-| wrong number | correct value | why |
+| | RL | LP |
 |---|---|---|
-| relocator margin 3.01× | **2.54×** | hardcoded 2.49 km leg; re-measured 2.95 km |
-| relocation chance 4.1% | **8.4%** (13.5 legal targets, not 1.12) | confounded by mid-journey dispatch; D44 predated the D45 mask change |
-| "network ignores demand" | demand reaches logits, L1 2.9–15.3 | my probe wrote an unreachable observation state |
-| targeting 13–20% | **51–55%** at argmax | `deterministic=False` in the test — sampling discarded most of the policy |
+| relocations / episode | 141 | 112 |
+| mean km per relocation | 3.17 | 2.13 |
+| moves ≥4 km / <2 km | 26% / 22% | 6.7% / 54% |
+| idle car with nothing to dispatch: relocate | **100%** | 26% |
+| driver-minutes relocating | 722 | 479 |
 
-**Rules that follow:**
-- Always pass `--deterministic` for decision-quality measurements. It is
-  recorded in the JSON artifact (`action_selection`).
-- **Legal targets are ~13.5, not 1.12.** Chance is `1 / mean legal targets`,
-  recomputed per run.
-- Evaluate **paired** on identical seeds (`docs/eval-noise.md`).
-- Use `scripts/watch_plateau.py` to detect plateau rather than running to the
-  nominal iteration count.
-- The competence test (`scripts/competence_two_zone.py`) concentrates all demand
-  in one zone and is **near-degenerate** — greedy scores 0.8%. It is a targeting
-  probe, not a performance benchmark.
+~70% is longer hops, ~30% is never holding a car.
+
+### 2b. Aim: solvable, and solved, but it does not buy service
+
+The reward could not rank destinations (D63): best-vs-other-nonempty **+2.9 pp**
+against nonempty-vs-empty **+20.9 pp** — 7× more sensitive to "did you aim
+somewhere empty". A supervised probe on identical features reached 87.5%, so
+the features were sufficient.
+
+**Three fixes, all measured:**
+
+- **D66 deficit-scaled credit** (what HANDOFF previously proposed): implemented,
+  **did not help**. Kept behind a flag.
+- **D67/D73 centred targeting bonus** (`--targeting-bonus`): works as designed.
+  Aim 34% → 74% at bonus 0.2; two-zone fleet-at-B 5% → 27% where LP gets
+  8% → 30%. On ordinary demand it costs service and wait, and ties LP at 0.1.
+
+  | bonus | SR vs LP | empty km vs LP | wait vs LP | aim | two-zone ph2 | fleet@B |
+  |---|---|---|---|---|---|---|
+  | 0 | −0.6 ± 1.1 | +128 ± 11 | +0.03 | 34% | 13.7% | 5% → 7% |
+  | 0.05 | −1.2 ± 0.6 | +115 ± 12 | +0.22 | 44% | 20.9% | 6% → 22% |
+  | **0.1** | **−0.4 ± 1.4** | +118 ± 12 | +0.14 | 52% | 31.3% | 5% → 23% |
+  | 0.2 | −3.1 ± 0.9 | +103 ± 12 | +0.37 | 74% | 24.3% | 5% → 27% |
+
+  **No value touches the empty-km gap.**
+- **D75 distance term**: the old head's distance was a linear layer on
+  (target − own), and own position is constant across targets so it cancelled —
+  the policy *could not* prefer a nearer zone. Fixed to a real centroid
+  distance, zero-init, old checkpoints load unchanged.
+
+**Caveat that survives all of it (D69):** aim ≠ service. 70% of dispatches of a
+relocated car happen outside the zone it was sent to, because mid-flight
+dispatch serves nearby demand on the way. Forbidding it collapses service
+(SR 32.8% vs 64.6%). Never report aim as a service result.
 
 ---
 
-## 5. Reward function as it stands
+## 3. Measurement discipline
+
+**Six numbers this project reported were wrong**, each caught by testing a
+premise rather than accepting a conclusion. They cost days; don't repeat them.
+
+| wrong | correct | why |
+|---|---|---|
+| relocator margin 3.01× | 2.54× | hardcoded 2.49 km leg; re-measured 2.95 km |
+| relocation chance 4.1% | 8.4% | confounded by mid-flight dispatch; D44 predated the D45 mask change |
+| "network ignores demand" | demand reaches logits, L1 2.9–15.3 | probe wrote an unreachable observation state |
+| targeting 13–20% | 51–55% at argmax | `deterministic=False` — sampling discarded the policy |
+| **every validation number D47–D69** | re-measured on 12 windows | seeded reset rewound the held-out cursor; **one** window, not twelve |
+| **LP "dominates RL"** | RL ties LP on service | LP was never tuned on this env; untuned it scored 53.9% |
+
+Rules that follow:
+- `--deterministic` for any decision-quality measurement; recorded in the JSON.
+- **One episode per held-out window, all 12.** Print the window index before
+  trusting a held-out number.
+- Service rate = **completed / total**.
+- Evaluate paired on identical seeds (`docs/eval-noise.md`); per-window demand
+  varies 36–69%.
+- **Sum the zone rewards and compare with the objective.** D49's on-top relocator
+  bonus made the shared policy optimise R + 0.65 per moved car (~+40/episode);
+  training raised that and lowered R.
+- **Check convergence before diagnosing.** An iteration-30 policy was analysed
+  for hours before anyone checked it had converged.
+- `scripts/watch_plateau.py` rather than running to the nominal iteration count.
+- Order coords are **degrees**; use haversine. Dividing by 1000 as if metres
+  reports 0.000 km.
+
+---
+
+## 4. The environment as it stands
+
+`NYCConfig`: 16 zones, 26 drivers, `nyc_window_limit` 130, `max_pending` 16,
+action space **Discrete(33)**, observation length **9**, 84 train / 12 val /
+12 test windows.
 
 ```
 R_zone = 0.8 * R_local + 0.2 * mean(all zones' R_local)
@@ -136,105 +170,92 @@ R_zone = 0.8 * R_local + 0.2 * mean(all zones' R_local)
 
 | term | value | charged to | when |
 |---|---|---|---|
-| served | **+1.0** | dispatching zone | on ride completion |
-| relocator credit | **+0.65** | zone that relocated the car | on **dispatch** (D48) |
-| empty km | **−0.06/km** | zone that commanded the move | per turn as flown |
-| waiting | **−0.2** × Σwait/timeout | zone containing the waiting rider | every turn |
-| cancellation | **−1.0** | origin zone + idle-holding neighbours | on timeout |
+| served | +1.0 | dispatching zone | on ride completion |
+| relocator credit | **split out of gamma**, not on top (D71) | zones that moved the car, shared along the chain (D82) | on **dispatch** (D48) |
+| empty km | −`beta`/km | zone that commanded the move | per turn as flown |
+| waiting | −`alpha` × Σwait/timeout | zone containing the waiting rider | every turn |
+| cancellation | −1.0 | origin zone + idle-holding neighbours | on timeout |
+| targeting bonus | 0 by default (D67) | zone that commanded the move | at execution |
 
-`NYCConfig`: 16 zones, 26 drivers, `max_pending` 16, action_dim 33.
+Weights: `alpha` 0.2, `beta` 0.06, `gamma` 1.0, `cancel` 1.0, `share` 0.65,
+`team_share` 0.2, `order_timeout` 5.0.
 
-**Two invariants that must be asserted, not assumed:**
+**The reward must sum to the objective.** `tests/test_reward_sums_to_objective.py`
+asserts it, covering split + chain sharing. D71 exists because it didn't.
 
-```
-# scripts/diag_reloc_invariant.py — CONDITIONAL, the one that matters
-share * gamma * P(dispatch | relocated) > beta * km_total
-# 0.65 * 1.0 * 0.568 = 0.3692 > 0.06 * 4.36 = 0.2616   -> HOLDS at 1.41x
-```
-
-`AGENTS.md`'s literal form (`share > beta * km`) **passed while every relocation
-was net-negative** — it ignores that the credit only fires ~57% of the time.
-D64 raised `share` 0.45 → 0.65 to restore it.
-
----
-
-## 6. Feasibility — the scenario is solvable
-
-MEASURED inputs (`scripts/diag_feasibility.py`), INFERRED verdict. The 0.83×
-figure assumes a 10.0 min job (ride 6.55 min + deadhead 1.46 km at an implied
-0.42 km/min ≈ 3.5 min). The same inputs give 0.55× to 1.09× depending on how
-much deadhead is charged, so the verdict is a range, not a single measured
-number. Treat "feasible with headroom" as a hypothesis until deadhead is
-measured directly.
-
-| quantity | value |
-|---|---|
-| fleet / demand | 26 cars, 130 orders/hour, 16 zones |
-| mean trip distance | **2.77 km** (p90 5.63) |
-| mean ride duration | 6.55 min |
-| deadhead per completed ride | 1.46 km (53% of ride time) |
-| implied speed | 0.42 km/min (25.3 km/h) |
-| **feasibility** | **0.83× fleet — feasible with headroom** |
-
-Trip distance is logged per episode (D57 follow-up). Order `origin`/
-`destination` are in **degrees**, so distance needs haversine — dividing by 1000
-as if metres silently reports `0.000 km`.
-
-Per-episode outcome: 59 completed, 55 cancelled, 16 still open at cutoff.
+**D78 audited the plumbing and it is sound.** Every observation field matched
+simulator truth to float precision over 1920 decisions; 278/278 relocations and
+196/199 dispatches executed as chosen; buffer contents matched what was acted
+on. An imitation-trained copy of the net reaches 100% on stay-vs-move and 92%
+on target. **The failure is the learning signal, not the implementation** —
+per-decision advantage sd ~1.15 against a hold-vs-move difference of ~0.1,
+split-half gradient cosine 0.16, and 85% of PPO rows were forced (zero gradient
+but still in the batch mean and advantage normalisation — fixed by D78's
+real-rows update, which also un-scaled the distance input ×10).
 
 ---
 
-## 7. Map of the repo
+## 5. Repo map
 
 | path | what it is |
 |---|---|
-| `docs/decisions.md` | **the record** — D35–D64, every change with its measurement |
-| `src/.../config.py` | all experiment parameters; reward weights + rationale |
-| `src/.../env/pettingzoo_env.py` | reward computation, obs, action mask |
-| `src/.../networks/encoder.py` | D54 destination-conditioned relocation head |
-| `tests/` | 41 tests, incl. D54 head and D59 cost attribution |
-| `scripts/eval_tradeoff.py` | **the three-metric check** (SR / empty km / wait) |
-| `scripts/diag_targeting_at_decision.py` | **precision at argmax — primary metric** |
-| `scripts/diag_reward_rank_resolution.py` | proves whether reward can rank destinations |
+| `docs/decisions.md` | **the record** — D35–D82, every change with its measurement |
+| `docs/demand-shift.md` | shift taxonomy S0–S7, protocol, preconditions |
+| `docs/eval-noise.md` | why paired evaluation is mandatory |
+| `docs/spaces-freeze.md` | current 33/9 spaces + the superseded 62-zone freeze |
+| `docs/nyc-pipeline.md` | data stages; `data/nyc16` is the study build |
+| `src/.../config.py` | every parameter, with rationale |
+| `src/.../env/pettingzoo_env.py` | reward, observation, action mask |
+| `src/.../networks/encoder.py` | `ZoneAttentionEncoder`, D54 head, D75 distance |
+| `src/.../baselines/lp_baseline.py` | LP rebalancer (tuned: lookahead 3.0, penalty 4.0) |
+| `tests/` | **65 tests**, incl. reward-sums-to-objective, chain credit, real rows |
+| `scripts/eval_tradeoff.py` | three-metric check (SR / empty km / wait) |
+| `scripts/diag_objective_gap.py` | **all 12 windows, paired, vs the objective** |
+| `scripts/diag_targeting_at_decision.py` | decision-time aim precision |
+| `scripts/diag_reloc_outcomes.py` | do relocated cars serve their target zone? |
 | `scripts/diag_reloc_invariant.py` | conditional expected-value invariant |
 | `scripts/diag_feasibility.py` | Little's Law feasibility |
+| `scripts/tune_lp_objective.py` | LP sweep on **train** windows by R |
 | `scripts/watch_plateau.py` | plateau detection |
-| `scripts/diag_demand_sensitivity.py` | causal demand intervention |
-| `scripts/export_shift_videos.py` | 2-zone video, `--hubs 10 12` |
-| `results/videos/` | `shift_{greedy,ippo,mappo}.mp4`, zones 10→12 |
-| `results/tradeoff/*.json` | recorded SR/empty/wait per arm |
+| `scripts/export_shift_videos.py` | videos, `--hubs 10 12` |
+| `scripts/competence_two_zone.py` | two-zone diagnostic (**not** a benchmark) |
 
-**Videos** (zones 10→12, 3 hops, ~6.9 km, shift verified 1.00→1.00):
-`fleet@B` is the share of fleet in zone B per phase — a policy that follows the
-shift shows it **rising** after minute 25. Greedy's falls (15.4% → 4.8%).
+**The two-zone test is near-degenerate and caps phase-2 service near 53%** for
+every policy: ~47% of zone B's road nodes lie beyond the 2 km dispatch radius.
+Use it as a targeting probe, never as a performance number.
 
 ---
 
-## 8. Suggested order of work
+## 6. Order of work
 
-1. **Implement deficit-scaled relocator credit** (§2). This is the binding
-   defect. Test against 49% precision and the 87% ceiling.
-2. **Empty km** is the separate, unmoved wall. Everything so far improves *where*
-   cars go; nothing reduces *how many* move 2.9 km. `beta` is capped at ~0.156
-   by the conditional invariant — raising it alone breaks profitability. Likely
-   needs a fleet-size change or an explicit invariant break. **User's call.**
-3. **≥5 seeds** on whatever config wins, then ≥2 more for the IPPO/MAPPO
-   divergence.
-4. **Only then** the demand-shift study.
+1. **Train IPPO on current code.** Biggest single gap — there is no valid IPPO
+   arm, and IPPO-vs-MAPPO is the actual research question. Everything so far is
+   MAPPO only.
+2. **D82 (chain sharing) has never been trained on.** Implemented and tested,
+   zero training runs. Cheap, and 36% of relocations are overwritten before
+   dispatch (D78), so it should matter.
+3. **Settle argmax vs sampled as the frozen policy** (D72). Everything inherits
+   it.
+4. **≥5 seeds** on whatever config wins. Nothing before this is reportable.
+5. **Then the shift study**, against the preconditions in
+   `docs/demand-shift.md`.
 
----
+**Open, user's call:**
+- **The value of `beta`.** It sets where on the frontier RL sits, and the
+  study's degradation conclusion depends on that choice. 0.06 / 0.12 / 0.2 all
+  measured; none closes the frontier gap (§2a).
+- **Empty km needs a bigger fleet or a deliberate break of the relocation
+  invariant.** Nothing in the reward has moved it in 15 decisions.
+- **Whether to return to 62 zones.** The only reason to leave was compute
+  (D65). It is also the only build where S4 (cold-zone concentration) is
+  meaningful — see `docs/demand-shift.md`.
 
-## 9. Open questions I could not settle
-
-- **Why did IPPO regress under D64?** Arm-specific critic quality is a
-  hypothesis, not measured.
-- **Is 49% precision enough?** Unknown. No reference point for "good" —
-  LP's precision was never measured under the same protocol.
-- **Should the reward rank by deficit, or should the observation change?** Both
-  are plausible; I only tested the reward side.
-- **Logit scale.** The relocation block sits at **93–94% of maximum entropy**
-  (uniform over ~10.9 legal targets) while dispatch is near-deterministic, and
-  `entropy_coef` has no leverage on it (MEASURED,
-  `scripts/diag_entropy_by_block.py`). The destination logits span only ~0.4
-  nats. A temperature on `dest_logits` would sharpen them **without changing the
-  argmax**, so it is free. **Untested.**
+**Open questions I could not settle:**
+- Why the two arms diverge under identical reward changes (D64: MAPPO 49% aim,
+  IPPO regressed 37% → 13%). Arm-specific critic quality is a hypothesis.
+- Is 49% aim precision *enough*? LP's precision was never measured under the
+  same protocol, so there is no reference point.
+- `entropy_coef` is a dead lever: the relocate block sits at 93–94% of maximum
+  entropy (D-diagnostic), so the term already dominates the policy loss.
+- Destination logits span only ~0.4 nats. A temperature would sharpen them
+  without changing the argmax — free, and untested.

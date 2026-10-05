@@ -9,11 +9,23 @@ val / 12 test windows, 62 in-region zones, manifest saved) all reproduced
 the file structure below with no deviations. Stage 2 (single-window
 `orders.parquet`) was skipped — `build_splits` calls it internally per
 window and nothing else in the codebase reads the single-window file.
-Verified `NYCConfig` + `RideGymAEC` construct and reset on the real data
-(62 zones, action_dim 93, matching `docs/spaces-freeze.md`). `data/nyc/`
-and `dataset/` stay git-ignored (large/regeneratable); anyone else on this
-repo reproduces them by re-running the stages below against their own copy
-of the two manual downloads.
+`data/nyc/` and `dataset/` stay git-ignored (large/regeneratable); anyone else
+on this repo reproduces them by re-running the stages below against their own
+copy of the two manual downloads.
+
+**Superseded for the current study (D65).** The 62-zone build described below
+is reference material. The study runs on a **16-zone subset** at
+`data/nyc16/splits` — the 16 busiest zones by train-window volume, 26 drivers,
+`nyc_window_limit=130`, `max_pending` 16, action space 33:
+
+```
+uv run python scripts/build_zone_subset.py --num-zones 16
+```
+
+Read `data/nyc16/splits/manifest.json` for `zone_ids` and the window lists.
+**62-zone artifacts are not comparable to 16-zone results** — do not cite
+numbers across the two. `docs/spaces-freeze.md` describes the 62-zone action
+space (93) and does not match the current build.
 
 ## Prerequisites
 
@@ -117,8 +129,24 @@ env = RideGymAEC(config=cfg, seed=42)
 
 ## Notes
 
-- Zone count is 62 (taxi zones whose centroids fall in Region A bbox)
-- `max_pending` in NYCConfig is 650, measured 2026-09-07 (worst case 604
-  concurrent 2-min arrivals across all 108 split windows, plus headroom).
-  Re-measure if the bbox, timeout, or sample rate changes.
+- **Zone count is 16 in the current study** (the 16 busiest taxi zones whose
+  centroids fall in the Region A bbox; D65). The pipeline still *builds* 62
+  in-region zones into `data/nyc/` — that is the source pool the subset is cut
+  from, not the environment the study uses.
+- **`max_pending` is 16** in the current `NYCConfig`, derived from the 16-zone
+  build the way the old 650 was (measured worst-case concurrent 2-min
+  arrivals across all 108 windows, plus headroom). The 650 figure below is the
+  62-zone measurement and does not apply.
+- **Order coordinates are degrees.** `origin_x` / `origin_y` in the window
+  parquet files are longitude/latitude. Convert with haversine; dividing by
+  1000 as if they were metres silently reports 0.000 km (D57).
+- Order **zone ids are not stored** in the window parquet files — only
+  `origin_x`, `origin_y`, `dest_x`, `dest_y`, `request_time`,
+  `num_passengers`. Zone membership is assigned by nearest centroid at load
+  time (`_node_to_zone_map` in `demand/generators.py`). Any per-zone demand
+  count must be reproduced the same way; `results/zone_demand_train16.json` was
+  produced this way.
 - RideGym uses zone centroids as relocation points. KNN adjacency (k=8) defines neighboring zones.
+- Held-out splits have 12 windows each. Evaluate **one episode per window**
+  (D70): a seeded reset used to rewind the window cursor, so single-seed
+  evaluation silently covered window 0 only.
