@@ -54,7 +54,7 @@ class TrainConfig:
     # the training env: seeded val resets used to rewrite the training RNG
     # stream, see tests/test_training_validation.py).
     eval_interval: int = 0
-    eval_episodes: int = 3
+    eval_episodes: int = 12  # one per held-out window, so validation covers the split (D70)
     eval_seed: int = 9000  # disjoint from the training seed stream
     eval_split: str = "val"  # held-out split used for selection (never "train")
     eval_window_limit: int | None = 500  # matches the training window budget
@@ -102,7 +102,7 @@ def evaluate_deterministic(
     The caller owns both envs; this function never resets anything after the
     val episodes.
     """
-    served = cancelled = 0
+    served = cancelled = total = 0
     empty_km = 0.0
     wait_sum = 0.0
     for i in range(episodes):
@@ -128,12 +128,14 @@ def evaluate_deterministic(
         kpi = env.kpi_summary()
         served += int(kpi["served"])
         cancelled += int(kpi["cancelled"])
+        total += int(kpi["total"])
         empty_km += float(kpi["empty_km"])
         wait_sum += float(kpi["avg_wait"])
     n = max(episodes, 1)
     return {
         "episodes": episodes,
-        "service_rate": served / max(served + cancelled, 1),
+        "service_rate": served / max(total, 1),
+        "cancel_rate": cancelled / max(total, 1),
         "served_per_ep": served / n,
         "empty_km_per_ep": empty_km / n,
         "avg_wait_min": wait_sum / n,
@@ -245,6 +247,7 @@ def collect_rollout(
     episodes = 0
     served_total = 0
     cancelled_total = 0
+    total_orders = 0
     empty_km_total = 0.0
     wait_times_all: list[float] = []
     acts_idle = 0
@@ -259,6 +262,7 @@ def collect_rollout(
                 kpi = env.kpi_summary()
                 served_total += int(kpi["served"])
                 cancelled_total += int(kpi["cancelled"])
+                total_orders += int(kpi["total"])
                 empty_km_total += float(kpi["empty_km"])
                 if kpi["avg_wait"] > 0:
                     wait_times_all.append(kpi["avg_wait"])
@@ -284,6 +288,7 @@ def collect_rollout(
                 kpi = env.kpi_summary()
                 served_total += int(kpi["served"])
                 cancelled_total += int(kpi["cancelled"])
+                total_orders += int(kpi["total"])
                 empty_km_total += float(kpi["empty_km"])
                 if kpi["avg_wait"] > 0:
                     wait_times_all.append(kpi["avg_wait"])
@@ -293,7 +298,7 @@ def collect_rollout(
                     s_slot, s_turn = pending.pop(agent)
                     buffer.close(
                         s_slot, s_turn,
-                        float(env.rewards.get(agent, 0.0)),
+                        float(env._cumulative_rewards.get(agent, 0.0)),
                         done=bool(
                             env.terminations.get(agent, False)
                             or env.truncations.get(agent, False)
@@ -308,11 +313,15 @@ def collect_rollout(
         g_state = env.state() if use_state else None
         for slot in sel_order:
             agent = f"zone_{slot}"
+            if agent not in env.agents:
+                if env.agents:
+                    env.step(None)
+                continue
             if agent in pending:
                 s_slot, s_turn = pending.pop(agent)
                 buffer.close(
                     s_slot, s_turn,
-                    float(env.rewards.get(agent, 0.0)),
+                    float(env._cumulative_rewards.get(agent, 0.0)),
                     done=bool(
                         env.terminations.get(agent, False)
                         or env.truncations.get(agent, False)
@@ -325,6 +334,14 @@ def collect_rollout(
             ):
                 if env.terminations.get(agent, False) or env.truncations.get(agent, False):
                     episode_ended = True
+                    for live in list(env.agents):
+                        if live in pending:
+                            l_slot, l_turn = pending.pop(live)
+                            buffer.close(
+                                l_slot, l_turn,
+                                float(env._cumulative_rewards.get(live, 0.0)),
+                                done=True,
+                            )
                 env.step(None)
                 continue
 
@@ -379,6 +396,7 @@ def collect_rollout(
         kpi = env.kpi_summary()
         served_total += int(kpi["served"])
         cancelled_total += int(kpi["cancelled"])
+        total_orders += int(kpi["total"])
         empty_km_total += float(kpi["empty_km"])
         if kpi["avg_wait"] > 0:
             wait_times_all.append(kpi["avg_wait"])
@@ -391,6 +409,7 @@ def collect_rollout(
         "episodes": episodes,
         "served_total": served_total,
         "cancelled_total": cancelled_total,
+        "total_orders": total_orders,
         "empty_km_total": empty_km_total,
         "avg_wait": avg_wait,
         "pct_dispatch": float(100.0 * acts_dispatch / total_acts),
@@ -516,12 +535,39 @@ def _split_episodes(n_episodes: int, n_workers: int) -> list[int]:
     return [base + (1 if w < rem else 0) for w in range(n_workers)]
 
 
+def _provenance(env_cfg: EnvConfig) -> dict:
+    """Code, package and data versions, so a run can be traced back exactly."""
+    import hashlib
+    import importlib.metadata as md
+    import subprocess
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return "unknown"
+
+    splits = Path(getattr(env_cfg, "nyc_splits_dir", "")) / "manifest.json"
+    split_hash = (hashlib.sha256(splits.read_bytes()).hexdigest()
+                  if splits.exists() else "n/a")
+    return {
+        "git_commit": git("rev-parse", "HEAD"),
+        "git_dirty": git("status", "--porcelain") != "",
+        "ride_gym_version": md.version("ride-gym"),
+        "torch_version": torch.__version__,
+        "numpy_version": np.__version__,
+        "splits_manifest_sha256": split_hash,
+    }
+
+
 def _merge_kpis(shard_kpis: list[dict]) -> dict:
     """Combine per-worker KPI dicts, weighting averages by episode count."""
     episodes = sum(k["episodes"] for k in shard_kpis)
     ep = max(episodes, 1)
     served = sum(k["served_total"] for k in shard_kpis)
     cancelled = sum(k["cancelled_total"] for k in shard_kpis)
+    total_orders = sum(k["total_orders"] for k in shard_kpis)
     empty = sum(k["empty_km_total"] for k in shard_kpis)
     avg_wait = sum(k["avg_wait"] * k["episodes"] for k in shard_kpis) / ep
     pct = lambda key: sum(k[key] * k["episodes"] for k in shard_kpis) / ep
@@ -529,6 +575,7 @@ def _merge_kpis(shard_kpis: list[dict]) -> dict:
         "episodes": episodes,
         "served_total": served,
         "cancelled_total": cancelled,
+        "total_orders": total_orders,
         "empty_km_total": empty,
         "avg_wait": avg_wait,
         "pct_dispatch": pct("pct_dispatch"),
@@ -612,6 +659,7 @@ def train(
         "num_drivers": env._num_drivers,
         "episode_turns": _episode_turns(env_cfg),
         "num_workers": train_cfg.num_workers,
+        **_provenance(env_cfg),
     }
     if resume_from is not None:
         ckpt_path = Path(resume_from)
@@ -628,6 +676,11 @@ def train(
         json.dump(manifest, f, indent=2, default=str)
     with open(run_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2, default=str)
+
+    actor = learner.actor if hasattr(learner, "actor") else learner.policy
+    if hasattr(actor, "zone_xy"):
+        with torch.no_grad():
+            actor.zone_xy.copy_(torch.as_tensor(env._zone_centroids_norm))
 
     metrics_path = run_dir / "metrics.jsonl"
     total_turns = train_cfg.algo_config.rollout_episodes * _episode_turns(env_cfg)
@@ -706,7 +759,7 @@ def train(
             losses = learner.update(buffer)
             t_upd1 = time.perf_counter()
             ep = max(kpis["episodes"], 1)
-            sr = kpis["served_total"] / max(kpis["served_total"] + kpis["cancelled_total"], 1)
+            sr = kpis["served_total"] / max(kpis["total_orders"], 1)
             reward_per_ep = float(buffer.rewards[buffer.filled].sum() / ep)
             record = {
                 "iteration": it,
@@ -782,6 +835,7 @@ def train(
                 metrics_lines[-1] = json.dumps(record)
                 metrics_path.write_text("\n".join(metrics_lines) + "\n")
 
+                final_val = {"iteration": it, "val_service_rate": val_sr, **val}
                 if val_sr > best_val_sr:
                     best_val_sr = val_sr
                     best_val_it = it
@@ -819,9 +873,16 @@ def train(
 
     if train_cfg.eval_interval > 0 and best_val_it > 0:
         print(
-            f"[train] best validation SR {best_val_sr*100:.1f}% at iteration "
-            f"{best_val_it} -> {run_dir / 'checkpoint_best.pt'}"
+            f"[train] REPORT (validation, final iteration {final_val['iteration']}): "
+            f"SR {final_val['val_service_rate']*100:.1f}% | empty {final_val['empty_km_per_ep']:.1f} km | "
+            f"wait {final_val['avg_wait_min']:.2f} min"
         )
+        print(
+            f"[train] selected-on-validation best (optimistic, not a result): "
+            f"SR {best_val_sr*100:.1f}% at iteration {best_val_it} -> {run_dir / 'checkpoint_best.pt'}"
+        )
+        with open(run_dir / "final_validation.json", "w") as f:
+            json.dump(final_val, f, indent=2, default=float)
     print(f"[train] done -> {run_dir}")
     return run_dir
 
@@ -839,8 +900,8 @@ def main() -> None:
     parser.add_argument("--eval-interval", type=int, default=0,
                         help="Deterministic validation eval + best-checkpoint "
                              "tracking every N iterations (0 = disabled)")
-    parser.add_argument("--eval-episodes", type=int, default=3,
-                        help="Validation episodes per eval point (default: 3)")
+    parser.add_argument("--eval-episodes", type=int, default=12,
+                        help="Validation episodes per eval point (default: 12, one per val window)")
     parser.add_argument("--eval-split", type=str, default="val",
                         choices=["val", "test"],
                         help="Held-out split used for checkpoint selection "
@@ -863,6 +924,18 @@ def main() -> None:
                         help="Penalty per cancelled order in zone (default: 2.0)")
     parser.add_argument("--entropy-coef", type=float, default=None,
                         help="PPO entropy bonus coefficient (default: 0.01)")
+    parser.add_argument("--obs-inbound", action="store_true",
+                        help="D81: observe cars already heading to each zone")
+    parser.add_argument("--nearest-k", type=int, default=None,
+                        help="D77: relocate only to the k nearest legal zones (0 = any)")
+    parser.add_argument("--relocator-split", action="store_true",
+                        help="D71: relocator share is split out of gamma, not a bonus")
+    parser.add_argument("--no-relocating-dispatch", action="store_true",
+                        help="Do not dispatch cars that are still relocating (env allow_relocating_dispatch=False)")
+    parser.add_argument("--targeting-bonus", type=float, default=None,
+                        help="D67 decision-time targeting bonus scale (0 = off)")
+    parser.add_argument("--minibatches", type=int, default=None,
+                        help="PPO minibatches per epoch (default: algo config, 4)")
     parser.add_argument("--arch", choices=["mlp", "attention"], default=None,
                         help="Policy trunk (default: mlp; attention = D33 "
                              "masked-attention pooling over orders/zones)")
@@ -890,6 +963,8 @@ def main() -> None:
                              "Parallelism is across episodes; zones within a "
                              "turn stay sequential. Use ~n_cores-1.")
     args = parser.parse_args()
+    if args.eval_split == "test":
+        parser.error("--eval-split test is not allowed: test is for final evaluation only (AGENTS.md)")
 
     algo_cfg: IPPOConfig | MAPPOConfig = (
         MAPPOConfig() if args.algo == "mappo" else IPPOConfig()
@@ -900,10 +975,22 @@ def main() -> None:
         algo_cfg.entropy_coef = args.entropy_coef
     if args.arch is not None:
         algo_cfg.arch = args.arch
+    if args.minibatches is not None:
+        algo_cfg.minibatches = args.minibatches
 
     env_cfg = BandraConfig() if args.env == "bandra" else NYCConfig()
     if args.alpha is not None:
         env_cfg.alpha = args.alpha
+    if args.targeting_bonus is not None:
+        env_cfg.targeting_bonus = args.targeting_bonus
+    if args.no_relocating_dispatch:
+        env_cfg.allow_relocating_dispatch = False
+    if args.relocator_split:
+        env_cfg.relocator_share_is_split = True
+    if args.nearest_k is not None:
+        env_cfg.relocation_nearest_k = args.nearest_k
+    if args.obs_inbound:
+        env_cfg.obs_inbound = True
     if args.beta is not None:
         env_cfg.beta = args.beta
     if args.gamma is not None:
@@ -924,9 +1011,7 @@ def main() -> None:
         env_cfg.target_zone = args.target_zone
     if args.target_zone_demand_pct is not None:
         pct = args.target_zone_demand_pct
-        if pct > 1.0:
-            pct = pct / 100.0
-        env_cfg.target_zone_demand_pct = pct
+        env_cfg.target_zone_demand_pct = pct * 100.0 if pct <= 1.0 else pct
 
     train_cfg = TrainConfig(
         env_config=env_cfg,

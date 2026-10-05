@@ -85,5 +85,65 @@ class TestAttentionArch(unittest.TestCase):
             self.assertTrue(np.isfinite(metrics[key]), f"{key} is not finite: {metrics[key]}")
 
 
+class TestDistanceTerm(unittest.TestCase):
+    def test_nearer_target_can_be_preferred(self):
+        net = build_zone_policy("attention", 0, 1 + 4 + 3, hidden_dim=16,
+                                num_zones=3, max_pending=4, hist_len=2)
+        net.zone_xy.copy_(torch.tensor([[0.0, 0.0], [0.1, 0.0], [0.9, 0.0]]))
+        with torch.no_grad():
+            net.dist_cost.weight.fill_(-5.0)
+        obs = torch.zeros(1, sum(hi - lo for lo, hi in net._offsets.values()))
+        base, _ = net.forward(obs)
+        with torch.no_grad():
+            net.dist_cost.weight.zero_()
+        flat, _ = net.forward(obs)
+        delta = (base - flat)[0, 5:]            # relocate block; acting zone sits at (0, 0)
+        self.assertGreater(delta[1].item(), delta[2].item())
+
+    def _net(self):
+        net = build_zone_policy("attention", 0, 1 + 4 + 3, hidden_dim=16,
+                                num_zones=3, max_pending=4, hist_len=2)
+        net.zone_xy.copy_(torch.tensor([[0.0, 0.0], [0.1, 0.0], [0.9, 0.0]]))
+        return net
+
+    def _obs(self, net):
+        return torch.zeros(1, sum(hi - lo for lo, hi in net._offsets.values()))
+
+    def test_scale_default_and_zero_weight_unchanged(self):
+        net = self._net()
+        self.assertEqual(float(net.dist_input_scale), 10.0)
+        obs = self._obs(net)
+        a, _ = net.forward(obs)
+        net.dist_input_scale.fill_(1.0)
+        b, _ = net.forward(obs)
+        self.assertTrue(torch.equal(a, b))
+
+    def test_load_state_dict_scale(self):
+        net = self._net()
+        sd = net.state_dict()
+        old = {k: v for k, v in sd.items() if k != "dist_input_scale"}
+        other = self._net()
+        other.load_state_dict(old)
+        self.assertEqual(float(other.dist_input_scale), 1.0)
+        other = self._net()
+        other.load_state_dict(sd)
+        self.assertEqual(float(other.dist_input_scale), 10.0)
+
+    def test_scale_multiplies_distance_effect(self):
+        net = self._net()
+        obs = self._obs(net)
+        gap = []
+        for scale in (1.0, 10.0):
+            with torch.no_grad():
+                net.dist_cost.weight.zero_()
+                net.dist_input_scale.fill_(scale)
+                flat, _ = net.forward(obs)
+                net.dist_cost.weight.fill_(-0.3)
+                d, _ = net.forward(obs)
+            delta = (d - flat)[0, 5:]
+            gap.append((delta[1] - delta[2]).item())
+        self.assertAlmostEqual(gap[1], 10 * gap[0], places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

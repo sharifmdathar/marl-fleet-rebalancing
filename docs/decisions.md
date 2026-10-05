@@ -1464,3 +1464,349 @@ of breadth.
   a training run and >=5 seeds, which has not been authorised.
 - Revisit if: policy chases one hotspot and loses breadth (HANDOFF s.2 risk),
   or empty km rises without a matching service/wait gain.
+
+## D67 — decision-time targeting bonus (flag, default off)
+- Date: 2026-10-05, Status: implemented, evaluated only on 2 seeds (pending)
+- Problem: the decision-time targeting check (scripts/diag_targeting_at_decision.py)
+  puts relocation choice at chance: 7.6% vs 7.7% random; the chosen zone carries
+  0.42 unmet demand vs 1.76 for the best legal zone. The only destination signal is
+  the flat relocator credit, paid late (about 39 turns, D44), sparsely (about a
+  quarter of relocations earn usable credit), and never tied to destination demand.
+- Change: when a relocation is executed, the sender receives
+  targeting_bonus * unmet(target) / max over legal targets of unmet, where
+  unmet = pending riders per zone. Paid in the same reward step. Default 0 (off);
+  the flag is --targeting-bonus on train.py.
+- Why this value: a relocation costs about beta * 2.95 km = 0.18. With bonus 0.2 a
+  move to the best zone roughly breaks even, a move to a zone with half the best
+  demand loses about 0.08, and a move to an empty zone loses 0.18. So the bonus
+  only pays for well-aimed relocations.
+- Known risks (research report, not verified in this repo):
+  - It is not potential-based: it depends on the chosen action, so it does not
+    preserve the optimal policy. Expect a bias toward the largest hotspot.
+  - It ignores the distance term at the moment it pays. The cost is still charged
+    during the drive, so a long move to a hotspot can still net negative.
+  - It is a shaping term, so any gain must be checked against service rate, empty
+    km and wait together, and against the LP baseline.
+- Revisit if: targeting precision does not rise above chance on 2 seeds, or
+  empty km rises without a service-rate or wait gain.
+
+## D68 — relocation outcome counters (measurement, no reward change)
+- Date: 2026-10-05, Status: measured, debugging output (1 seed, 2 val episodes)
+- Added counters: relocations executed, relocated cars later dispatched, and
+  dispatches in the zone the car was sent to (env._reloc_out, _reloc_to).
+  Script: scripts/diag_reloc_outcomes.py.
+- Result, argmax, val episodes 8000-8001:
+
+  | arm | relocations | later dispatched | dispatched in target | destination top-1 | HHI |
+  |---|---|---|---|---|---|
+  | no bonus (study2 s1) | 277 | 52% | 25% of dispatched | 38.5% | 0.30 |
+  | targeting bonus 0.2 (D67 s0) | 284 | 67% | 30% of dispatched | 22.4% | 0.11 |
+
+- Reading: the bonus raised dispatch of relocated cars and spread destinations
+  (no collapse). But aim is right and the car still serves another zone most of
+  the time (70% of dispatches are outside the target). Whether that is a design
+  choice or an accounting artefact is under investigation.
+- Not a result: one seed, two episodes.
+
+## D69 — no mid-flight dispatch (negative result, not adopted)
+- Date: 2026-10-05, Status: measured, rejected (1 seed, 40 iterations)
+- Test: targeting bonus 0.2 with allow_relocating_dispatch=False (cars still
+  relocating cannot be dispatched). Flag now reachable as --no-relocating-dispatch.
+- Result (val, final iteration): SR 32.8%, empty 553 km, wait 2.01 min.
+  Compare D67 seed 0: SR 64.6%, empty 482 km, wait 2.99 min.
+- Reading: mid-flight pulls carry a large part of service. The low in-target
+  share (30%) is therefore not waste to remove; cars sent to one zone often serve
+  nearby demand on the way. The decision-time aim check does not measure service.
+- Default stays allow_relocating_dispatch=True.
+
+## D70 — every held-out evaluation so far used ONE window; fixed
+- Date: 2026-10-05, Status: fixed, verified
+- Defect: `MultiWindowNYCOrderGenerator.reseed` rewinds the val/test cursor to 0
+  on every seeded reset. Every evaluation loop here seeds each episode
+  (`train.py` validation, `eval_tradeoff.py`, `shift_eval.py`, `evaluate.py`, the
+  `diag_*` scripts), so all of them only ever saw window 0 (Mon 08:00-09:00),
+  re-subsampled. MEASURED: seeds 9000, 9001, 9002, 12000, 12001 all report
+  window 0 on the val split.
+- Consequence: every validation number from D47 to D69, the HANDOFF tables, and
+  the LP tuning are single-window numbers. That includes "LP dominates RL". S3
+  (val split) and S6 (test split) were also one window each.
+- Fix: `UniformSampledNYCOrderGenerator.reseed` sets the window to
+  `seed % n_windows` for val/test, so consecutive seeds walk the whole split and
+  a seed always maps to the same window. Train mode is unchanged.
+  `tests/test_val_window_coverage.py`. Validation now defaults to 12 episodes.
+- Re-measured on all 12 val windows, paired, argmax, service rate = completed /
+  total (`scripts/diag_objective_gap.py`, seeds 12000-12011):
+
+  | arm | SR % | empty km | wait min | objective R |
+  |---|---|---|---|---|
+  | greedy | 41.6 ± 7.9 | 64.9 | 2.47 | -93.0 |
+  | LP, old defaults (5.0 / 0.5) | 53.9 ± 7.6 | 141.2 | 2.58 | -48.5 |
+  | LP, re-tuned (3.0 / 4.0) | 70.1 ± 3.3 | 339.9 | 2.68 | +4.4 |
+  | RL untrained (1 PPO update) | 66.9 ± 3.7 | 352.5 | 2.78 | -8.7 |
+  | RL flat bonus (study2 s1) | 67.2 ± 4.5 | 472.3 | 2.67 | -13.0 |
+  | RL targeting bonus (D67 s2) | 68.5 ± 4.2 | 441.9 | 2.92 | -6.7 |
+
+  R = gamma*served - beta*empty_km - alpha*wait - cancel, summed over zones with
+  no shaping. One training seed per RL arm: debugging output, not a result.
+- LP re-tune: 16 configs (lookahead 3/5/8/12 x penalty 0.5/1/2/4) on 8 TRAIN
+  windows, ranked by R (`scripts/tune_lp_objective.py`,
+  `results/lp_tuning/objective_sweep.json`). Defaults changed to 3.0 / 4.0.
+  Val was not used for the choice.
+- Two readings that replace earlier ones:
+  1. RL with relocation masked off is identical to greedy (41.6%, 64.9 km), so
+     everything RL adds comes from relocation, and almost any relocation helps:
+     an untrained policy gains 25 points of service over greedy.
+  2. 40 iterations of training added +120 ± 13 km and +0.3 ± 1.0 points of
+     service over the untrained policy (paired). Training was buying nothing.
+
+## D71 — relocator share is split out of gamma, not paid on top (env 3.2)
+- Date: 2026-10-05, Status: adopted as NYC default; supported by 1 seed
+- Problem: D49 paid the relocator 0.65 ON TOP of the dispatcher's gamma. The
+  policy is parameter-shared, so what it optimises is the SUM of zone rewards,
+  and that sum was R + 0.65 per dispatched relocated car: about +40 per episode
+  for moving cars, whatever it achieved. MEASURED (D70 protocol): on the
+  training reward the flat-bonus policy beats the untrained one by +2.2 ± 4.6,
+  on R it is -4.3 ± 4.0 worse.
+- Change: `relocator_share_is_split`. The relocator is still paid at dispatch;
+  the dispatcher receives gamma minus that payment at completion. Zone rewards
+  now sum to R exactly, apart from rides still in flight at the horizon
+  (`tests/test_reward_sums_to_objective.py`). NYCConfig True, EnvConfig False.
+- Result, seed 1, 40 iterations, paired vs untrained on 12 val windows:
+  SR +2.6 ± 1.0, empty +116 ± 12 km, R +5.2 ± 4.2. First configuration where
+  training improves service; the gain in R is about one standard error.
+- 40 more iterations (warm restart) changed nothing: SR 67.9%, 468 km. The run
+  is at a plateau, not cut short.
+- Against the re-tuned LP (paired): SR -0.6 ± 1.1, empty +128 ± 11 km,
+  R -7.9 ± 4.1. A tie on service, a clear loss on empty distance.
+- D66 (shortage gate) and D67 (targeting bonus) stay off: both pay outside R.
+
+## D72 — beta 0.2 probe: empty km is under-priced, and argmax differs from sampling
+- Date: 2026-10-05, Status: measured, 1 seed, no default changed
+- Why: at beta 0.06 the whole 128 km gap to LP is worth 7.7 reward per episode,
+  so the reward barely asks for shorter or fewer moves.
+- Run: split credit, beta 0.2, seed 1, 40 iterations.
+  - Training rollouts (sampled, train split): SR 70.1%, 433 km at iteration 40.
+  - Validation (argmax, 12 windows): SR 58.2%, 234 km, wait 2.92.
+- Readings:
+  1. beta does move empty km, so it is the lever for that KPI. At this setting
+     the argmax policy gives up 11 points of service for it, and the LP frontier
+     is better at the same service (58.9% at 151 km on train windows).
+  2. The policy that is trained (sampled) and the policy that is evaluated
+     (argmax, D60) behave very differently here. Which one is "the frozen
+     policy" has to be fixed before the shift study.
+- Open, user's call: the value of beta, and argmax vs seeded sampling.
+
+## D73 — why RL does not follow a moved hotspot; centred targeting bonus (1 seed)
+- Date: 2026-10-05, Status: measured, bonus stays OFF by default
+- Two-zone test (`scripts/competence_two_zone.py`, 4 episodes, policy sampled):
+
+  | policy | aim (best legal) | phase-1 SR | phase-2 SR | fleet at B |
+  |---|---|---|---|---|
+  | greedy | - | 3.7% | 6.9% | 20% -> 7% |
+  | LP (tuned) | - | 56.0% | 34.0% | 8% -> 30% |
+  | split credit (D71) | 33.7% | 47.0% | 13.7% | 5% -> 7% |
+  | flat bonus + targeting bonus (D67 s2) | 61.3% | 54.9% | 32.0% | 5% -> 25% |
+  | split + centred targeting bonus | 73.9% | 43.1% | 24.3% | 5% -> 27% |
+
+- Cause: aim. The policies that pick the neediest zone move the fleet to the new
+  hub; the one that does not, does not. The environment does not block it (LP
+  uses the same mask and action interface). Training demand never shows this:
+  max single-zone share is 9-12% per window against 90-100% in the test, with no
+  within-episode drift beyond sampling noise, and 0-1 riders pending per zone.
+- Change: `targeting_bonus_centred` (default True) subtracts the mean legal
+  target's demand, so a random destination earns zero and the bonus does not
+  pay for moving as such.
+- Cost on ordinary demand (12 val windows, paired vs tuned LP): split + centred
+  bonus is SR -3.1 ± 0.9, empty +103 ± 12 km, wait +0.37 ± 0.08, R -17.1 ± 4.0.
+  Split alone is SR -0.6 ± 1.1, +128 km, wait +0.03, R -7.9 ± 4.1. So the aim
+  signal buys the hub-following and loses service and wait on normal demand.
+- Test caveat: about 47% of zone B's road nodes lie beyond the 2 km dispatch
+  radius, so phase-2 service is capped near 53% for every policy.
+- Not a result: one training seed per arm.
+
+## D74 — centred targeting bonus, smaller values (1 seed each)
+- Date: 2026-10-05, Status: measured, default stays 0
+- Split credit, seed 1, 40 iterations. Paired vs tuned LP on 12 val windows, and
+  the two-zone test (4 episodes):
+
+  | bonus | SR vs LP | empty km vs LP | wait vs LP | aim | two-zone phase 2 | fleet at B |
+  |---|---|---|---|---|---|---|
+  | 0 | -0.6 ± 1.1 | +128 ± 11 | +0.03 ± 0.08 | 34% | 13.7% | 5% -> 7% |
+  | 0.05 | -1.2 ± 0.6 | +115 ± 12 | +0.22 ± 0.08 | 44% | 20.9% | 6% -> 22% |
+  | 0.1 | -0.4 ± 1.4 | +118 ± 12 | +0.14 ± 0.09 | 52% | 31.3% | 5% -> 23% |
+  | 0.2 | -3.1 ± 0.9 | +103 ± 12 | +0.37 ± 0.08 | 74% | 24.3% | 5% -> 27% |
+
+  LP on the two-zone test: phase 2 34.0%, fleet at B 8% -> 30%.
+- Reading: 0.1 keeps the hub-following and ties LP on service. No value touches
+  the empty-km gap.
+
+## D75 — where the extra empty km comes from; distance term in the destination head
+- Date: 2026-10-05, Status: defect fixed in code; no measured benefit yet
+- Measured on 12 val episodes, argmax, RL = split credit (D71) vs tuned LP:
+
+  | | RL | LP |
+  |---|---|---|
+  | relocations per episode | 141 | 112 |
+  | mean km per relocation (centroid to centroid) | 3.17 | 2.13 |
+  | moves of 4 km or more / under 2 km | 26% / 22% | 6.7% / 54% |
+  | idle car, nothing to dispatch: relocate | 100% | 26% |
+  | relocated again before any dispatch | 33% | 30% |
+  | driver-minutes relocating | 722 | 479 |
+
+  About 70% of the planned-distance gap is longer hops, about 30% is never
+  holding a car. P(noop) on the stay-or-move decision is 0.4% (4 episodes).
+- Defect: the head's "travel cost" was a linear layer on (target position - own
+  position). The own position is the same for every target, so it cancelled, and
+  a linear layer cannot form a distance. The policy could not prefer a nearer
+  zone. Fixed: `dist_cost` on the real centroid distance (`zone_xy` buffer set
+  from the env), zero-initialised, old checkpoints load unchanged.
+- Result (seed 1, 40 iterations, bonus 0.1): learned distance weight 0.006,
+  validation 67.1% / 470 km / 2.85. No change. At beta 0.06 nothing pushes the
+  weight away from zero.
+
+## D76 — beta 0.12 with the distance term (1 seed)
+- Date: 2026-10-05, Status: measured, no default changed
+- Split credit, bonus 0.1, distance term, beta 0.12, seed 1, 40 iterations:
+  validation (12 windows, argmax) 66.9% / 425 km / 2.82 min. Distance weight
+  -0.05 (right sign, small).
+- Against beta 0.06 with the same setup (67.1% / 470 km / 2.85): about 45 km
+  less at the same service. Tuned LP is 70.1% / 340 km / 2.68.
+- With D72 (beta 0.2: 58.2% / 234 km): pricing distance does reduce it, and the
+  policy moves slowly toward using distance, but in 40 iterations it does not
+  reach LP's service and LP's distance together.
+
+## D77 — nearest-k relocation option (measured, not adopted)
+- Date: 2026-10-05, Status: implemented behind `relocation_nearest_k` (default 0)
+- Applied at evaluation time only to an any-zone policy (12 val windows, paired
+  vs tuned LP): nearest 2 gives 68.1% / 341 km / 2.48 min, nearest 4 gives
+  71.1% / 410 km / 2.61.
+- Trained under it (seed 1, 40 iterations, validation seeds 9000-9011, not
+  paired with LP): nearest 2 gives 64.7% / 231 km / 2.68, nearest 4 gives
+  72.5% / 441 km / 2.47. Tuned LP: 70.1% / 340 km / 2.68.
+- User's call: a restriction of the action space works around the failure
+  without explaining it. Kept as an option, not used.
+
+## D78 — why the model does not learn to hold or go nearer; update fixed (A), distance input rescaled (B)
+- Date: 2026-10-05, Status: implemented and tested; no KPI gain yet (1 seed)
+- Two analyses (no repo changes):
+  - Env to model and model to action are faithful: every observation field
+    matched simulator truth to float precision over 1920 decisions; 278 of 278
+    relocations and 196 of 199 dispatches executed as chosen (3 lost to a
+    same-step timeout); buffer contents matched what was acted on.
+  - The network can represent the behaviour: an untrained copy, trained by
+    imitation for 1200 steps on "hold, else nearest zone with riders", reached
+    100% on stay-versus-move and 92% on the target, on held-out states.
+  - The learning signal is the failure: per-decision advantage sd about 1.15
+    against a hold-versus-move difference of about 0.1; split-half gradient
+    cosine 0.16; 85% of rows forced, giving zero gradient but sitting in the
+    batch mean and the advantage normalisation; joint clipping scaled the
+    actor's gradient by 0.44; the distance weight could move at most 0.19 in a
+    run and moved 0.05.
+- A (`agents/ippo.py`, `agents/mappo.py`): advantages normalised over rows with
+  more than one legal action; policy loss, entropy and clip fraction averaged
+  over those rows; value loss still on all rows; MAPPO clips actor and critic
+  separately. Logged entropy and clip_frac now refer to real rows; `real_frac`
+  added. `tests/test_update_real_rows.py`.
+- B (`networks/encoder.py`): distance input multiplied by a saved scale of 10;
+  checkpoints without the key load with scale 1, so they behave as before.
+- Run with A and B (split credit, bonus 0.1, beta 0.06, seed 1, 40 iterations):
+  validation 66.8% / 462 km / 2.79 min, against 67.1% / 470 km / 2.85 for the
+  same settings before A and B. Clip fraction on real rows 0.021, real_frac
+  0.138. Effective distance weight -0.17, against 0.006 before.
+- Reading: both changes do what they were meant to (larger real steps, a
+  distance weight that moves the right way), and neither has moved the KPIs in
+  40 iterations at beta 0.06. Also still open from the analyses: relocation
+  credit is not tied to the destination (29% of dispatched relocated cars are
+  used in the target zone; 36% of relocations are overwritten), and the mask
+  ignores cars already inbound.
+
+## D79 — beta 0.12 with A and B, 120 iterations (1 seed)
+- Date: 2026-10-05, Status: measured, no default changed
+- Split credit, bonus 0.1, distance input scale 10, update over real rows,
+  beta 0.12, seed 1, 3 workers. Validation, 12 windows (seeds 9000-9011), argmax:
+
+  | iteration | SR % | empty km | wait min |
+  |---|---|---|---|
+  | 40 | 68.0 | 461 | 2.77 |
+  | 80 | 67.1 | 416 | 2.84 |
+  | 120 | 65.8 | 332 | 2.80 |
+
+  Tuned LP (seeds 12000-12011, so not paired): 70.1 / 340 / 2.68.
+- Training rollouts (sampled): service steady near 70% from iteration 40 to 120
+  while empty km fell 446 -> 370. Effective distance weight -0.80, against
+  -0.17 after 40 iterations at beta 0.06.
+- Reading: with distance priced and the update fixed, the policy does learn to
+  drive less, and it was still improving at iteration 120, so this run is not
+  converged. Empty km reached LP's level; service is about 4 points below LP on
+  this unpaired comparison, and wait about 0.1 min above.
+
+## D80 — D79 continued to 240 iterations: it keeps trading service for distance
+- Date: 2026-10-05, Status: measured (1 seed), no default changed
+- D79 resumed (fresh optimiser state) for 120 more iterations, same settings.
+  Validation, 12 windows (seeds 9000-9011), argmax:
+
+  | total iterations | SR % | empty km | wait min |
+  |---|---|---|---|
+  | 40 | 68.0 | 461 | 2.77 |
+  | 80 | 67.1 | 416 | 2.84 |
+  | 120 | 65.8 | 332 | 2.80 |
+  | 160 | 61.2 | 218 | 2.90 |
+  | 200 | 60.5 | 234 | 3.02 |
+  | 240 | 59.9 | 204 | 2.91 |
+
+  Training rollouts (sampled) at 240: 64.1% / 245 km. Effective distance
+  weight -1.61.
+- Reading: the policy did not settle near LP. It kept giving up service to save
+  distance, as beta 0.12 asks. Its points lie below the LP's own trade-off
+  curve from the train-window sweep (LP: 67.6% at 259 km, 58.9% at 151 km;
+  RL: 65.8% at 332 km, 59.9% at 204 km; different seeds and split, so
+  indicative). So beta sets where on the curve RL sits, but RL's curve is still
+  worse than LP's.
+- Two-zone video episode (iteration-120 checkpoint): MAPPO 36.9% / 422 km,
+  fleet at B 12% -> 25%; tuned LP 44.7% / 488 km, 8% -> 31%. The IPPO video
+  uses the pre-fix d64 checkpoint and is not a fair IPPO result.
+
+## D81 — inbound-car observation for the actor (1 seed)
+- Date: 2026-10-05, Status: implemented behind `obs_inbound` (default False); no clear gain
+- Change: each zone's observation gains, per zone, the cars already heading
+  there (in flight plus claimed earlier this turn) as a share of the fleet,
+  read from the exact per-driver target record. The destination head takes it
+  as a per-target feature. `--obs-inbound`; `tests/test_obs_inbound.py`.
+- Run: same settings as D79 (split credit, bonus 0.1, beta 0.12, update over
+  real rows, distance scale 10, seed 1). The background run was cut at
+  iteration 88 by a session restart and resumed from the iteration-80
+  checkpoint with a fresh optimiser state. Validation, 12 windows, argmax:
+
+  | iteration | with inbound | without (D79) |
+  |---|---|---|
+  | 40 | 67.1% / 433 km / 2.75 | 68.0% / 461 km / 2.77 |
+  | 80 | 67.1% / 383 km / 2.76 | 67.1% / 416 km / 2.84 |
+  | 120 | 64.4% / 281 km / 2.84 | 65.8% / 332 km / 2.80 |
+
+- Reading: about 30-50 km less at each point, with service equal at 40 and 80
+  and 1.4 points lower at 120. That is consistent with moving a little faster
+  along the same service-versus-distance curve, not with a better curve: at
+  281 km, interpolating D79/D80 gives about 63.7% against 64.4% here. One seed;
+  the difference is within noise. Tuned LP: 70.1% / 340 km / 2.68.
+- Same episode as the progress video (val window 3, seed 9003, D79 checkpoint):
+  greedy 46.2% / 67 km / 2.35; tuned LP 66.2% / 326 km / 2.83;
+  MAPPO 62.3% / 247 km / 3.00.
+
+## D82 — relocator payment shared along the relocation chain (env 3.3)
+- Date: 2026-10-05, Status: implemented and tested, NOT yet trained on
+- Problem (measured in the D78 fidelity audit, 278 relocations): 36% were
+  re-relocated by a different zone before any dispatch. The record kept only
+  the last mover (D47), so the first zone paid for its leg and earned nothing,
+  and a zone could take the whole payment by re-sending a car it had been sent.
+- Change: `relocator_chain_share`. The payment for a dispatched relocated car
+  is divided equally among the distinct zones that moved it since its last
+  dispatch, excluding the dispatching zone. The chain is cleared at dispatch
+  and at completion, so it holds consecutive moves of one idle car only. That
+  is what D47's chain was not: it was cleared only on completion and so counted
+  unrelated moves. Clawback on cancel reverses each share. NYCConfig True,
+  EnvConfig False.
+- Still sums to the objective: `tests/test_reward_sums_to_objective.py` covers
+  split + chain sharing. `tests/test_chain_credit.py`.
+- Deliberately not done: paying less when the car is dispatched outside its
+  target zone. Mid-flight dispatches carry most of the service (D69), so that
+  would penalise moves that work.

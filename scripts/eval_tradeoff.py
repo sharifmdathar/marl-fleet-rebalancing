@@ -66,7 +66,7 @@ def run_episode(policy, cfg, seed: int, deterministic: bool = False) -> dict:
     k = env.kpi_summary()
     served = int(k["served"])
     cancelled = int(k["cancelled"])
-    terminal = served + cancelled
+    terminal = int(k["total"])
     return {
         "seed": seed,
         "served": served,

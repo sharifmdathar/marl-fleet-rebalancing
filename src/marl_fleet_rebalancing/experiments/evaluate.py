@@ -69,9 +69,7 @@ def load_trained_policy(
     if target_zone is not None:
         env_cfg.target_zone = target_zone
     if target_zone_demand_pct is not None:
-        pct = target_zone_demand_pct
-        if pct > 1.0:
-            pct = pct / 100.0
+        pct = target_zone_demand_pct * 100.0 if target_zone_demand_pct <= 1.0 else target_zone_demand_pct
         env_cfg.target_zone_demand_pct = pct
     if num_drivers is not None:
         env_cfg.num_drivers = num_drivers
@@ -287,7 +285,7 @@ def evaluate_policy(
         # Harvest final episode KPIs
         kpi = env.kpi_summary()
         total_acts = max(acts_idle + acts_dispatch + acts_relocate, 1)
-        sr = float(kpi["served"]) / max(float(kpi["served"]) + float(kpi["cancelled"]), 1.0)
+        sr = float(kpi["served"]) / max(float(kpi["total"]), 1.0)
 
         res = {
             "episode": float(ep + 1),
@@ -392,9 +390,7 @@ def main() -> None:
         if args.target_zone is not None:
             env_cfg.target_zone = args.target_zone
         if args.target_zone_demand_pct is not None:
-            pct = args.target_zone_demand_pct
-            if pct > 1.0:
-                pct = pct / 100.0
+            pct = args.target_zone_demand_pct * 100.0 if args.target_zone_demand_pct <= 1.0 else args.target_zone_demand_pct
             env_cfg.target_zone_demand_pct = pct
         if args.num_drivers is not None:
             env_cfg.num_drivers = args.num_drivers

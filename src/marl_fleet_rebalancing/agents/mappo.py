@@ -16,7 +16,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from marl_fleet_rebalancing.agents.ippo import RolloutBuffer, _explained_variance
+from marl_fleet_rebalancing.agents.ippo import (
+    RolloutBuffer,
+    _explained_variance,
+    _normalize_advantages,
+    _real_row_terms,
+)
 from marl_fleet_rebalancing.networks.encoder import (
     CentralizedCritic,
     build_zone_policy,
@@ -164,9 +169,9 @@ class MAPPO:
             if "agent_ids" in flat else None
         )
         # Advantage normalization (standard PPO practice).
-        b_advantages = (b_advantages - b_advantages.mean()) / (
-            b_advantages.std() + 1e-8
-        )
+        # A "real" row has >1 legal action; forced rows carry no policy signal.
+        b_real = b_mask.sum(-1) > 1
+        b_advantages = _normalize_advantages(b_advantages, b_real)
 
         num_samples = b_obs.shape[0]
         batch_size = max(num_samples // cfg.minibatches, 1)
@@ -187,16 +192,11 @@ class MAPPO:
                     else b_agent_ids[idx].to(dev),
                 )
                 dist = torch.distributions.Categorical(logits=logits)
-                logprobs = dist.log_prob(b_actions[idx].to(dev))
-                entropy = dist.entropy().mean()
-
-                ratio = torch.exp(logprobs - b_logprobs[idx].to(dev))
-                adv_idx = b_advantages[idx].to(dev)
-                surr1 = ratio * adv_idx
-                surr2 = torch.clamp(
-                    ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef,
-                ) * adv_idx
-                policy_loss = -torch.min(surr1, surr2).mean()
+                policy_loss, entropy, clip_frac = _real_row_terms(
+                    dist, b_actions[idx].to(dev), b_logprobs[idx].to(dev),
+                    b_advantages[idx].to(dev), b_real[idx].to(dev),
+                    cfg.clip_coef,
+                )
 
                 value_loss = nn.functional.mse_loss(
                     values, b_returns[idx].to(dev),
@@ -209,20 +209,15 @@ class MAPPO:
                 )
                 self.optimizer.zero_grad()
                 loss.backward()
+                # Separate clips: the critic's grad norm dwarfs the actor's.
                 nn.utils.clip_grad_norm_(
-                    list(self.actor.parameters())
-                    + list(self.critic.parameters()),
-                    cfg.max_grad_norm,
+                    self.actor.parameters(), cfg.max_grad_norm,
+                )
+                nn.utils.clip_grad_norm_(
+                    self.critic.parameters(), cfg.max_grad_norm,
                 )
                 self.optimizer.step()
 
-                with torch.no_grad():
-                    clip_frac = (
-                        ((ratio - 1.0).abs() > cfg.clip_coef)
-                        .float()
-                        .mean()
-                        .item()
-                    )
                 metrics["policy_loss"] += policy_loss.item()
                 metrics["value_loss"] += value_loss.item()
                 metrics["entropy"] += entropy.item()
@@ -231,6 +226,7 @@ class MAPPO:
 
         for key in metrics:
             metrics[key] /= max(update_steps, 1)
+        metrics["real_frac"] = b_real.float().mean().item()
         filled = buffer.filled
         metrics["explained_var"] = _explained_variance(
             buffer.values[filled], returns[filled],

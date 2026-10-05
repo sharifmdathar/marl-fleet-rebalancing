@@ -58,8 +58,9 @@ next to it. Efficiency is reported as service rate per 100 km of empty distance.
 
 - No new algorithm. No "RobustMAPPO-X." This is a measurement study.
 - No headline claims from in-distribution performance.
-- No learning the dispatch policy — dispatch is a fixed rule; agents learn
-  only relocation.
+- No separate dispatch algorithm. Zone agents choose both dispatch and
+  relocation (user decision 2026-10-05; the earlier "dispatch is a fixed rule"
+  line did not match the code).
 - No sim-to-real or deployment claims. One city, simulated demand.
 - No beating an untuned baseline. Baseline tuning is part of the work.
 

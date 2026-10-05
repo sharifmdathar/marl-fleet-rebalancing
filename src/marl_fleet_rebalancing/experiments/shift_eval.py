@@ -215,7 +215,7 @@ def evaluate_policy_on_env(
                 raise ValueError(f"Unknown policy_type: {policy_type}")
 
         kpi = env.kpi_summary()
-        sr = float(kpi["served"]) / max(float(kpi["served"]) + float(kpi["cancelled"]), 1.0)
+        sr = float(kpi["served"]) / max(float(kpi["total"]), 1.0)
         total_acts = max(acts_idle + acts_dispatch + acts_relocate, 1)
 
         episode_results.append({

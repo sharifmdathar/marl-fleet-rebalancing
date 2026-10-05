@@ -22,6 +22,14 @@ class UniformSampledNYCOrderGenerator(MultiWindowNYCOrderGenerator):
     so only the sampled subset pays the snapping cost.
     """
 
+    def reseed(self, rng) -> None:
+        # D70: the base class rewinds the val/test cursor to 0 on every seeded
+        # reset, so an eval loop that seeds each episode only ever saw window 0.
+        # Tie the window to the seed instead: consecutive seeds walk the split.
+        super().reseed(rng)
+        if self.mode in ("val", "test") and isinstance(rng, (int, np.integer)):
+            self._cursor = int(rng) % len(self.order_paths)
+
     def generate(self) -> List[Order]:
         import pandas as pd
 

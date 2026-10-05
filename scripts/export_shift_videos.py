@@ -213,6 +213,8 @@ def main() -> None:
                          "10/12: 3 hops apart, ~6.9 km, so serving B in "
                          "phase 2 genuinely requires moving fleet across the "
                          "map rather than to an adjacent zone.")
+    ap.add_argument("--lp", action="store_true", help="also render the tuned LP baseline")
+    ap.add_argument("--prefix", default="shift", help="output files are <prefix>_<arm>.mp4")
     ap.add_argument("--outdir", default="results/videos")
     ap.add_argument("--base-seed", type=int, default=7000)
     ap.add_argument("--switch-min", type=float, default=25.0)
@@ -228,6 +230,9 @@ def main() -> None:
     if args.greedy:
         from marl_fleet_rebalancing.baselines import GreedyZoneDispatcher
         arms.append(("greedy", GreedyZoneDispatcher()))
+    if args.lp:
+        from marl_fleet_rebalancing.baselines import ZoneLPRebalancer
+        arms.append(("lp", ZoneLPRebalancer()))
     if args.ippo:
         learner, _m, _ = load_trained_policy(Path(args.ippo))
         arms.append(("ippo", learner))
@@ -236,7 +241,7 @@ def main() -> None:
         arms.append(("mappo", learner))
 
     if not arms:
-        print("no arms requested; pass --ippo/--mappo/--greedy")
+        print("no arms requested; pass --ippo/--mappo/--greedy/--lp")
         return
 
     ok, share_a, share_b = _verify_shift(cfg, a, b, args.switch_min, args.base_seed)
@@ -249,7 +254,7 @@ def main() -> None:
     print(f"\n{'arm':<8} {'SR':>7} {'empty km':>10} {'reloc p1':>9} "
           f"{'reloc p2':>9} {'fleet@B p1':>11} {'fleet@B p2':>11}  path")
     for name, policy in arms:
-        out = outdir / f"shift_{name}.mp4"
+        out = outdir / f"{args.prefix}_{name}.mp4"
         stats = run_and_record(cfg, policy, args, a, b, out)
         print(f"{name:<8} {100*stats['service_rate']:6.1f}% "
               f"{stats['empty_km']:10.1f} {stats['reloc_phase1']:9d} "

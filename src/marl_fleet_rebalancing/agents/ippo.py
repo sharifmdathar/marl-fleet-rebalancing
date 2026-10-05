@@ -272,9 +272,9 @@ class IPPO:
             returns.ravel()[buffer.filled.ravel()],
         )
         # Advantage normalization (standard PPO practice).
-        b_advantages = (b_advantages - b_advantages.mean()) / (
-            b_advantages.std() + 1e-8
-        )
+        # A "real" row has >1 legal action; forced rows carry no policy signal.
+        b_real = b_mask.sum(-1) > 1
+        b_advantages = _normalize_advantages(b_advantages, b_real)
 
         num_samples = b_obs.shape[0]
         batch_size = max(num_samples // cfg.minibatches, 1)
@@ -292,16 +292,11 @@ class IPPO:
                     b_obs[idx].to(dev), b_mask[idx].to(dev),
                 )
                 dist = torch.distributions.Categorical(logits=logits)
-                logprobs = dist.log_prob(b_actions[idx].to(dev))
-                entropy = dist.entropy().mean()
-
-                ratio = torch.exp(logprobs - b_logprobs[idx].to(dev))
-                adv_idx = b_advantages[idx].to(dev)
-                surr1 = ratio * adv_idx
-                surr2 = torch.clamp(
-                    ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef,
-                ) * adv_idx
-                policy_loss = -torch.min(surr1, surr2).mean()
+                policy_loss, entropy, clip_frac = _real_row_terms(
+                    dist, b_actions[idx].to(dev), b_logprobs[idx].to(dev),
+                    b_advantages[idx].to(dev), b_real[idx].to(dev),
+                    cfg.clip_coef,
+                )
 
                 value_loss = nn.functional.mse_loss(
                     values, b_returns[idx].to(dev),
@@ -319,13 +314,6 @@ class IPPO:
                 )
                 self.optimizer.step()
 
-                with torch.no_grad():
-                    clip_frac = (
-                        ((ratio - 1.0).abs() > cfg.clip_coef)
-                        .float()
-                        .mean()
-                        .item()
-                    )
                 metrics["policy_loss"] += policy_loss.item()
                 metrics["value_loss"] += value_loss.item()
                 metrics["entropy"] += entropy.item()
@@ -334,11 +322,45 @@ class IPPO:
 
         for key in metrics:
             metrics[key] /= max(update_steps, 1)
+        metrics["real_frac"] = b_real.float().mean().item()
         filled = buffer.filled
         metrics["explained_var"] = _explained_variance(
             buffer.values[filled], returns[filled],
         )
         return metrics
+
+
+def _normalize_advantages(adv: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+    """Mean/std normalise using real (multi-action) rows only; falls back to all rows."""
+    ref = adv[real] if real.sum() >= 2 else adv
+    return (adv - ref.mean()) / (ref.std() + 1e-8)
+
+
+def _real_row_terms(
+    dist: torch.distributions.Categorical,
+    actions: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    adv: torch.Tensor,
+    real: torch.Tensor,
+    clip_coef: float,
+) -> tuple[torch.Tensor, torch.Tensor, float]:
+    """PPO policy loss, entropy, clip-frac as means over real rows only.
+
+    Forced rows (single legal action) have logprob 0 and zero entropy, so they
+    only dilute the means. Returns (policy_loss, entropy, clip_frac);
+    the first two are zero when the minibatch has no real rows.
+    """
+    logprobs = dist.log_prob(actions)
+    ratio = torch.exp(logprobs - old_logprobs)
+    if not real.any():
+        zero = dist.entropy().sum() * 0.0
+        return zero, zero, 0.0
+    surr1 = ratio * adv
+    surr2 = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * adv
+    policy_loss = -torch.min(surr1, surr2)[real].mean()
+    entropy = dist.entropy()[real].mean()
+    clip_frac = ((ratio[real].detach() - 1.0).abs() > clip_coef).float().mean().item()
+    return policy_loss, entropy, clip_frac
 
 
 def _explained_variance(values: np.ndarray, returns: np.ndarray) -> float:

@@ -18,7 +18,7 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 3.1 (D66: deficit-scaled relocator credit, NYC reference 1.7)
+    Version: 3.3 (D82: NYC relocator payment shared along the relocation chain)
     """
 
     # --- Fleet ---
@@ -245,9 +245,24 @@ class EnvConfig:
     # made the effective share fall to 0.150 at 3 hops -- a 1.004x margin over
     # cost, and net-negative from 4 hops on.
     relocator_share: float = 0.65
-    # D66: pay the relocator in proportion to waiting riders at the car's
-    # destination, saturating at this count. 0 = flat share (D64 behaviour).
-    relocator_deficit_reference: float = 0.0
+    # D66: pay the relocator only when the moved car was the marginal one (the
+    # destination had no idle car left and riders still waiting). False = flat (D64).
+    # D81: add to each zone's observation the cars already heading to every
+    # zone (in flight, plus claimed earlier this turn), as a share of the fleet.
+    obs_inbound: bool = False
+    # D77: relocation is limited to the k nearest legal target zones. 0 = any zone.
+    relocation_nearest_k: int = 0
+    relocator_requires_shortage: bool = False
+    # D82: True = the relocator payment is divided equally among every zone that
+    # moved the car since its last dispatch. False = last mover takes all (D47).
+    relocator_chain_share: bool = False
+    # D71: True = the relocator's share is taken out of the ride's gamma (zone
+    # rewards sum to the team objective). False = paid on top of it (D49).
+    relocator_share_is_split: bool = False
+    # D67: decision-time bonus for a relocation, scaled by the destination's unmet
+    # demand relative to the best legal destination. 0 = off.
+    targeting_bonus: float = 0.0
+    targeting_bonus_centred: bool = True  # D73: subtract the mean legal target's demand
 
     # D64: 0.45 -> 0.65. D59 made the relocating zone pay for the WHOLE job it
     # caused, but did not raise what it earns, which broke the expected-value
@@ -339,7 +354,9 @@ class NYCConfig(EnvConfig):
     cancel_penalty: float = 1.0
     team_share: float = 0.2
     relocator_share: float = 0.65
-    relocator_deficit_reference: float = 1.7  # D66: measured best-target demand
+    relocator_requires_shortage: bool = False  # D66: reverted to flat D64 credit after negative 5-seed result
+    relocator_share_is_split: bool = True  # D71: zone rewards sum to the team objective
+    relocator_chain_share: bool = True  # D82: no zone is left with cost and no credit
 
     # D64: 0.45 -> 0.65. D59 made the relocating zone pay for the WHOLE job it
     # caused, but did not raise what it earns, which broke the expected-value

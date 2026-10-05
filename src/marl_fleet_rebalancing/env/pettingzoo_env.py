@@ -251,6 +251,10 @@ class RideGymAEC(AECEnv):
         # section 1 know to reduce the dispatcher's share so the pair pays one
         # gamma between them rather than two.
         self._order_relocator_paid: dict[int, tuple[int, float]] = {}
+        # D82: zones that moved a car since it was last dispatched, and how
+        # each order's relocator payment was divided among them.
+        self._driver_reloc_chain: dict[int, list[int]] = {}
+        self._order_relocator_shares: dict[int, list[tuple[int, float]]] = {}
         # Dispatches requested this turn but not yet confirmed (D51). Committed
         # to _order_dispatcher / _driver_commander only after RideGym honours
         # the bid, so a refused dispatch leaves no phantom attribution.
@@ -519,6 +523,8 @@ class RideGymAEC(AECEnv):
             "neighbor_mask": Box(0.0, 1.0, shape=(z,), dtype=np.float32),
             "demand_hist": Box(0.0, 1.0, shape=(z, h), dtype=np.float32),
             "time_frac": Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            **({"inbound": Box(0.0, 1.0, shape=(z,), dtype=np.float32)}
+               if self._cfg.obs_inbound else {}),
         })
 
     def observation_space(self, agent: str) -> Dict:
@@ -746,9 +752,13 @@ class RideGymAEC(AECEnv):
         self._driver_commander.clear()
         self._driver_relocator.clear()
         self._order_relocator_paid.clear()
+        self._driver_reloc_chain.clear()
+        self._order_relocator_shares.clear()
         self._pending_dispatch.clear()
         self._driver_relocation_target.clear()
         self._demand_history.clear()
+        self._reloc_out = {"executed": 0, "dispatched": 0, "in_target": 0}
+        self._reloc_to: dict[int, int] = {}
         self._obs_scales[:] = 0.0
         self._demand_hist_scale = 0.0
         self._zone_inbound_reloc[:] = 0.0
@@ -810,7 +820,17 @@ class RideGymAEC(AECEnv):
         neigh_vec = np.zeros(self._num_zones, dtype=np.float32)
         neigh_vec[self._legal_relocate_targets(zone_idx)] = 1.0
 
+        extra = {}
+        if self._cfg.obs_inbound:
+            inbound = np.zeros(self._num_zones, dtype=np.float32)
+            for tgt in self._driver_relocation_target.values():
+                inbound[int(tgt)] += 1.0
+            for tgt, n in self._reloc_inbound_this_turn.items():
+                inbound[int(tgt)] += n
+            extra["inbound"] = np.minimum(inbound / max(self._num_drivers, 1), 1.0)
+
         return {
+            **extra,
             "zone_location": self._zone_centroids_norm[zone_idx],
             "zone_state": zone_state,
             "all_zone_state": self._zone_fleet_state,
@@ -893,6 +913,13 @@ class RideGymAEC(AECEnv):
             if (hops is not None and not demanded_here
                     and hops.get(j, 99) < hops.get(zone_idx, 99)):
                 out.append(int(j))
+        # D77: keep only the k nearest legal targets, so a zone hands cars to
+        # its surroundings instead of across the map.
+        k = int(self._cfg.relocation_nearest_k)
+        if 0 < k < len(out):
+            xy = np.asarray(self._zone_centroids_norm)
+            out.sort(key=lambda j: float(np.linalg.norm(xy[j] - xy[zone_idx])))
+            out = out[:k]
         return out
 
     def action_mask(self, agent: str) -> np.ndarray:
@@ -989,6 +1016,10 @@ class RideGymAEC(AECEnv):
 
         cfg = self._cfg
         local_rewards = np.zeros(self._num_zones, dtype=np.float32)
+        decision_bonus = getattr(self, "_decision_bonus", None)
+        if decision_bonus is not None:
+            local_rewards += decision_bonus
+            decision_bonus[:] = 0.0
         cents = np.asarray(self.env.relocation_points, dtype=float)
 
         self._prev_served = sum(
@@ -1028,6 +1059,7 @@ class RideGymAEC(AECEnv):
                 # deadhead to whichever zone relocated last.
                 if did is not None:
                     self._driver_relocator.pop(did, None)
+                    self._driver_reloc_chain.pop(did, None)
                     self._driver_commander.pop(did, None)
                 continue
             # D49: the dispatcher is paid the FULL served credit, always.
@@ -1043,10 +1075,18 @@ class RideGymAEC(AECEnv):
             # The relocator's share is a BONUS for a separate action, not a
             # slice carved out of the dispatcher's credit. Both agents did
             # distinct work, so both are paid for it.
-            local_rewards[dispatcher] += cfg.gamma
-            self._order_relocator_paid.pop(oid, None)
+            relocator_paid = self._order_relocator_paid.pop(oid, None)
+            self._order_relocator_shares.pop(oid, None)
+            served_credit = cfg.gamma
+            # D71: in split mode the relocator's payment comes out of this
+            # ride's gamma, so the zone rewards sum to the team objective and
+            # the shared policy is not paid for relocation volume.
+            if cfg.relocator_share_is_split and relocator_paid is not None:
+                served_credit -= relocator_paid[1]
+            local_rewards[dispatcher] += served_credit
             if did is not None:
                 self._driver_relocator.pop(did, None)
+                self._driver_reloc_chain.pop(did, None)
                 # D59: the relocating zone's liability for this job ends with
                 # the job. Section 1c clears it at dispatch, but a driver can
                 # also be dispatched and then complete, so clear here too --
@@ -1080,18 +1120,28 @@ class RideGymAEC(AECEnv):
             relocator = self._driver_relocator.get(did)
             if relocator is not None and relocator != zone_idx:
                 if 0 <= relocator < self._num_zones:
-                    paid = cfg.relocator_share * cfg.gamma
-                    ref = float(cfg.relocator_deficit_reference)
-                    if ref > 0.0:
-                        waiting = self._pending_per_zone[zone_idx] * max(self._num_drivers, 1)
-                        paid *= min(float(waiting) / ref, 1.0)
-                    local_rewards[relocator] += paid
-                    self._order_relocator_paid[oid] = (relocator, paid)
+                    # D66: pay only when the moved car was the marginal one, i.e.
+                    # the destination is short of cars and still has riders waiting
+                    # after this dispatch. Rebuilt caches make idle/pending post-dispatch.
+                    short = (
+                        self._zone_idle_counts[zone_idx] == 0
+                        and self._pending_per_zone[zone_idx] * max(self._num_drivers, 1) > 0.5
+                    )
+                    paid = cfg.relocator_share * cfg.gamma if (short or not cfg.relocator_requires_shortage) else 0.0
+                    if paid > 0.0:
+                        # D82: divide the payment among every zone that moved this
+                        # car since its last dispatch. Paying only the last mover
+                        # left the earlier one with the cost and no credit, and let
+                        # a zone capture the whole payment by re-sending a car.
+                        chain = self._driver_reloc_chain.get(did) if cfg.relocator_chain_share else None
+                        payees = [z for z in dict.fromkeys(chain or ()) if z != zone_idx] or [relocator]
+                        shares = [(z, paid / len(payees)) for z in payees]
+                        for z, amount in shares:
+                            local_rewards[z] += amount
+                        self._order_relocator_paid[oid] = (relocator, paid)
+                        self._order_relocator_shares[oid] = shares
             self._driver_relocator.pop(did, None)
-            # D59: the relocating zone's liability for this job ends with it.
-            # Otherwise the stale commander carries into the driver's next job
-            # and bills that zone for deadhead it did not cause.
-            self._driver_commander.pop(did, None)
+            self._driver_reloc_chain.pop(did, None)
 
         # 1b. Relocation arrival bonus: off by default. It paid the sending zone
         # for the arrival itself, which made moving look profitable without the
@@ -1164,7 +1214,8 @@ class RideGymAEC(AECEnv):
             # time out. Reversing the share keeps one gamma per completed ride.
             paid = self._order_relocator_paid.pop(oid, None)
             if paid is not None and 0 <= paid[0] < self._num_zones:
-                local_rewards[paid[0]] -= paid[1]
+                for z, amount in self._order_relocator_shares.pop(oid, [paid]):
+                    local_rewards[z] -= amount
         if cancel_penalty > 0.0:
             for oid in newly_cancelled:
                 order = self.env.orders.get(oid)
@@ -1287,8 +1338,23 @@ class RideGymAEC(AECEnv):
                 # Only the most recent move is credited, and only if that car
                 # later completes an order.
                 self._driver_relocator[driver_id] = zone_idx
+                self._driver_reloc_chain.setdefault(driver_id, []).append(zone_idx)
                 self._driver_relocation_target[driver_id] = target_zone
+                self._reloc_out["executed"] += 1
+                self._reloc_to[driver_id] = int(target_zone)
                 ridegym_actions[driver_id] = decoded
+                bonus_scale = float(self._cfg.targeting_bonus)
+                if bonus_scale > 0.0:
+                    unmet = self._pending_per_zone * max(self._num_drivers, 1)
+                    legal_unmet = [float(unmet[j]) for j in self._legal_relocate_targets(zone_idx)]
+                    best = max(legal_unmet, default=0.0)
+                    if best > 0.0:
+                        if not hasattr(self, "_decision_bonus"):
+                            self._decision_bonus = np.zeros(self._num_zones, dtype=np.float32)
+                        # D73: centred on the mean legal target, so a random
+                        # destination earns zero and moving is not paid for itself.
+                        baseline = float(np.mean(legal_unmet)) if self._cfg.targeting_bonus_centred else 0.0
+                        self._decision_bonus[zone_idx] += bonus_scale * (float(unmet[target_zone]) - baseline) / best
 
         # D43: refresh the per-zone inbound count AFTER targets are assigned.
         # _rebuild_caches runs before this loop, so aggregating there would
@@ -1336,6 +1402,11 @@ class RideGymAEC(AECEnv):
             # dispatched rather than to whoever moved the car.
             if did not in self._driver_relocator:
                 self._driver_commander[did] = zone_idx
+            if did in self._reloc_to:
+                tgt = self._reloc_to.pop(did)
+                self._reloc_out["dispatched"] += 1
+                if tgt == zone_idx:
+                    self._reloc_out["in_target"] += 1
             self._driver_relocation_target.pop(did, None)
             dispatched_this_turn.append((oid, did, zone_idx))
         self._pending_dispatch = []
@@ -1430,6 +1501,7 @@ class RideGymAEC(AECEnv):
         return {
             "served": float(served),
             "cancelled": float(cancelled),
+            "total": float(len(self.env.orders)),
             "avg_wait": avg_wait,
             "empty_km": empty_km,
             "mean_trip_km": float(np.mean(trip_km)) if trip_km else 0.0,

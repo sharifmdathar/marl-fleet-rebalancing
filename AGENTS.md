@@ -44,6 +44,16 @@ Concrete failures from this project. Each cost days.
 - **Validate an agent's targeting directly, not only its score.** Validation
   service rate hid a policy targeting at chance. Relocation precision is the
   acceptance test.
+- **Check what the evaluation set actually contains.** Every seeded reset
+  rewound the held-out window cursor, so every validation number up to D70 came
+  from one window out of twelve, and the ranking of LP against RL changed once
+  the full split was used. Print the window index before trusting a held-out
+  number.
+- **Tune the baseline on the environment you compare on.** The LP kept defaults
+  from an older build; re-tuned, it went from 54% to 70% service.
+- **Sum the zone rewards and compare with the objective.** A relocator bonus
+  paid on top of gamma made the shared policy's objective R plus 0.65 per moved
+  car. Training raised that and lowered R.
 - **Do not diagnose from an undertrained checkpoint.** An iteration-30 policy
   was analysed for hours before anyone checked it had converged.
 

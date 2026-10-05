@@ -32,6 +32,7 @@ def obs_to_vector(obs: dict[str, np.ndarray]) -> np.ndarray:
             obs["neighbor_mask"].ravel(),
             obs["demand_hist"].ravel(),
             obs["time_frac"].ravel(),
+            *([obs["inbound"].ravel()] if "inbound" in obs else []),
         ]
     ).astype(np.float32)
 
@@ -45,6 +46,8 @@ def obs_dim(obs_space: Dict) -> int:
         "time_frac",
     ):
         total += int(np.prod(obs_space[key].shape))
+    if "inbound" in obs_space.spaces:
+        total += int(np.prod(obs_space["inbound"].shape))
     return total
 
 
@@ -131,8 +134,10 @@ class ZoneAttentionEncoder(nn.Module):
         action_dim: int,
         embed_dim: int = 64,
         hidden_dim: int = 256,
+        inbound: bool = False,
     ) -> None:
         super().__init__()
+        self._inbound = inbound
         self._num_zones = num_zones
         self._max_pending = max_pending
         self._hist_len = hist_len
@@ -146,6 +151,7 @@ class ZoneAttentionEncoder(nn.Module):
             ("neighbor_mask", num_zones),
             ("demand_hist", num_zones * hist_len),
             ("time_frac", 1),
+            *([("inbound", num_zones)] if inbound else []),
         ]
         self._offsets: dict[str, tuple[int, int]] = {}
         o = 0
@@ -194,12 +200,26 @@ class ZoneAttentionEncoder(nn.Module):
         # Raw per-zone scalars, so the head has direct access to demand and
         # supply per destination without having to reconstruct them from an
         # embedding that was pooled away.
-        self.dest_bias = nn.Linear(4 + hist_len, 1)
+        # D81: with `inbound`, each destination also carries the cars already
+        # heading there, so zones can avoid piling onto one need.
+        self.dest_bias = nn.Linear(4 + hist_len + int(inbound), 1)
         # Per-zone identity, so the head can reason about distance-to-each
         # destination rather than about an anonymous pooled vector.
         self.zone_idx = nn.Embedding(num_zones, 2)
         self.zone_centroid = nn.Linear(2, 2, bias=False)
         self.travel_cost = nn.Linear(2, 1)
+        # D75: the term above is linear in (target - own position), so the own
+        # position cancels across targets and no distance can be expressed.
+        # Feed the real centroid distance instead. Starts at zero effect.
+        # ponytail: Euclidean on bbox-normalised coordinates; switch to road
+        # travel time if the anisotropy matters.
+        self.register_buffer("zone_xy", torch.zeros(num_zones, 2))
+        self.dist_cost = nn.Linear(1, 1)
+        # Adam moves a weight ~lr per step, so on a 0.1-0.7 input it cannot
+        # reach a useful magnitude in a few hundred steps; scale the input up.
+        self.register_buffer("dist_input_scale", torch.tensor(10.0))
+        nn.init.zeros_(self.dist_cost.weight)
+        nn.init.zeros_(self.dist_cost.bias)
         self._dest_scale = hidden_dim ** 0.5
 
         self.actor = nn.Linear(hidden_dim, action_dim)
@@ -209,6 +229,13 @@ class ZoneAttentionEncoder(nn.Module):
             self.actor.weight[1 + max_pending:, :].zero_()
             self.actor.bias[1 + max_pending:].zero_()
         self.critic = nn.Linear(hidden_dim, 1)
+
+    def load_state_dict(self, state_dict, strict: bool = True, **kwargs):
+        # Checkpoints from before D75 lack the distance term; keep its zeros.
+        new = {k: v for k, v in self.state_dict().items()
+               if k.startswith(("zone_xy", "dist_cost"))}
+        new["dist_input_scale"] = torch.tensor(1.0)  # pre-scale checkpoints trained unscaled
+        return super().load_state_dict({**new, **state_dict}, strict=strict, **kwargs)
 
     def _slice(self, obs: torch.Tensor, name: str) -> torch.Tensor:
         lo, hi = self._offsets[name]
@@ -273,8 +300,10 @@ class ZoneAttentionEncoder(nn.Module):
         # Direct per-destination bias from that zone's own raw features: this
         # is the term that lets "zone 6 has riders, zone 14 does not" reach the
         # logits without passing through an attention-weighted sum.
-        dest = dest + self.dest_bias(
-            torch.cat([all_zone_state, demand_hist], dim=-1)).squeeze(-1)
+        per_dest = [all_zone_state, demand_hist]
+        if self._inbound:
+            per_dest.append(self._slice(obs, "inbound").unsqueeze(-1))
+        dest = dest + self.dest_bias(torch.cat(per_dest, dim=-1)).squeeze(-1)
 
         # Travel cost from the acting zone's centroid to each destination's, so
         # deadhead distance can enter the choice rather than only being billed
@@ -289,6 +318,8 @@ class ZoneAttentionEncoder(nn.Module):
             cents[:, 1].unsqueeze(0) - zone_location[:, 1:2],
         ], dim=-1)                                              # (B, Z, 2)
         dest = dest + self.travel_cost(geo).squeeze(-1)
+        dist = (self.zone_xy.unsqueeze(0) - zone_location.unsqueeze(1)).norm(dim=-1)
+        dest = dest + self.dist_cost((dist * self.dist_input_scale).unsqueeze(-1)).squeeze(-1)
 
         # Scatter into the action head. Relocation action for zone j is
         # 1 + max_pending + j. Self-targeting is already excluded by the env:
@@ -339,9 +370,11 @@ def build_zone_policy(
             raise ValueError(
                 "attention arch requires num_zones, max_pending, hist_len",
             )
+        base = 7 + num_zones * (5 + hist_len) + max_pending * 8
         return ZoneAttentionEncoder(
             num_zones, max_pending, hist_len, action_dim,
             hidden_dim=hidden_dim,
+            inbound=observation_dim == base + num_zones,
         )
     raise ValueError(f"Unknown arch: {arch!r} (expected 'mlp' or 'attention')")
 

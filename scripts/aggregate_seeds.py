@@ -57,7 +57,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default="results/shift_eval")
     ap.add_argument("--pattern",
-                    default=r"(?P<algo>ippo|mappo|greedy|lp).*?(?P<seed>\d+)$")
+                    default=r"(?P<algo>ippo|mappo|greedy|lp).*?-s(?P<seed>\d+)$")
     ap.add_argument("--metric", default="service_rate")
     args = ap.parse_args()
 
