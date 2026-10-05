@@ -1810,3 +1810,99 @@ of breadth.
 - Deliberately not done: paying less when the car is dispatched outside its
   target zone. Mid-flight dispatches carry most of the service (D69), so that
   would penalise moves that work.
+
+---
+
+## D84 — entropy/beta sweep started, then killed before completion
+
+- Date: 2026-10-05, Status: aborted by reasoning, not by failure
+- Change: `scripts/run_queue.sh`, a sequential one-job-at-a-time queue runner with
+  resume. Two concurrent runs exhausted this 7 GB box and the server killed
+  them; memory hit 0 MB available immediately before each death. The runner skips
+  jobs whose run directory already holds `final_validation.json`, verified in
+  both directions (a completed run skipped, a started-but-unfinished run runs).
+- Queue built: IPPO, seed 1, 200 iterations, `entropy_coef` in {0, 0.001} at
+  beta 0.12, then `entropy_coef` 0 at beta 0.06 and 0.2. `--verbose` added
+  because entropy was never logged before, which is why the IPPO collapse was
+  invisible until validation.
+- **Killed at iteration 15 of run 1**, on the grounds in D85: sweeping beta on a
+  policy that can only see 2 minutes of demand is measuring a handicapped
+  policy. Partial run and its logs deleted rather than left as a stale artifact
+  (`AGENTS.md`).
+
+## D85 — the RL-vs-LP comparison was not fair: the actor sees 3.3% of the episode
+
+- Date: 2026-10-05, Status: hypothesis, training launched to test it
+- Finding, from reading `lp_baseline.py` against `config.py`. The LP does three
+  things RL has no mechanism for:
+  1. **Forecasts.** `lp_baseline.py:300` keeps an EMA of per-zone demand rate
+     (`smoothing_alpha` 0.3) and multiplies by `lookahead_minutes` 3.0.
+  2. **Optimises globally.** `solve_rebalance_lp` over all zones at once, versus
+     RL's per-zone independent action.
+  3. **Smooths**, so one noisy turn does not trigger a move.
+- RL's only temporal demand channel is `demand_history_len = 4`. At dt = 0.5 min
+  that is **2.0 minutes of a 60-minute episode, 3.3%**. The LP has an EMA over
+  *all* past turns plus a 3-minute lookahead.
+- So the recurring finding "RL is below the LP frontier" has been comparing a
+  forecaster plus global optimiser against a per-zone greedy policy with 2
+  minutes of memory. `AGENTS.md` requires effort comparable to the method
+  compared against, and requires never weakening a baseline; what happened here
+  is the method being handicapped, which is the same failure in the other
+  direction.
+- `scripts/diag_oracle_forecast.py` already flagged both candidate
+  explanations -- observability and credit assignment -- and noted the LP has
+  the same 5-min lookahead limitation on that axis. This entry names
+  observability as the specific asymmetry and makes it measurable.
+- Change: `--demand-history-len` on `train.py`. The value already flows into the
+  observation space (`pettingzoo_env.py:512,524`) and into
+  `ZoneAttentionEncoder`'s per-destination `dest_bias`, so a longer history
+  reaches the destination logits directly. No env code change; obs_dim changes,
+  so checkpoints are not interchangeable across values (h=4 gives obs 9, h=24
+  gives obs 615 with `obs_inbound`).
+- Running: `d85-h24` and `d85-h4`, IPPO seed 1, beta 0.06, 120 iterations,
+  paired on everything except the history length.
+- **Not a result.** 1 seed, and the hypothesis is unconfirmed. Recorded as a
+  hypothesis because it explains the frontier gap without needing any new claim
+  about credit assignment.
+
+## D86 — LP frontier re-measured on 25 configs; beta cannot be swept at eval time
+
+- Date: 2026-10-05, Status: measurement, no default changed
+- **`cfg.beta` cannot be swept on existing checkpoints.** It appears in exactly
+  one place in the env, `_compute_zone_rewards` (`pettingzoo_env.py:1169,1174,
+  1176`), and in no observation field, so a frozen argmax policy cannot see it.
+  Measured: same checkpoint (`d83-chain-mappo-s1/checkpoint_it0300.pt`), 12
+  windows, seeds 12000-12011, betas 0.06/0.12/0.20 give **bit-identical**
+  service rate and empty km (53.78% / 191.4 km at all three); only R changes, at
+  the expected slope. LP is likewise invariant. **A beta sweep is a training
+  sweep, not an evaluation sweep.**
+- `scripts/diag_reward_sweep.py` cannot do this and should not be extended: it
+  reads `alpha` from each run's `config.json` and compares whatever beta each run
+  trained at, and it computes service rate as `served/(served+cancelled)`, the
+  metric `AGENTS.md` forbids.
+- LP frontier, 25 configs re-measured on val (seeds 12000-12011, argmax) plus 9
+  interpolated penalties filling the 115 km hole in the original grid between
+  0.5 and 1.0. Densifying the LP grid strengthens the baseline, so it is
+  conservative for the claim below. 15 Pareto points, from 133.2 km / 53.0% to
+  339.9 km / 70.1%. The tuned default (3.0, 4.0) is on the frontier, so nothing
+  in the original tuning was wasted.
+- RL against that frontier (gap = RL SR minus LP SR interpolated to the same
+  empty km): **every measured RL point is below it**, best case -0.96 pp
+  (d79AB it40), worst -9.08 pp (d72 it40). D80's conclusion holds directionally
+  against a 25-point frontier rather than 6 points.
+- **The only clean same-config beta pair that exists is d78AB (beta 0.06) vs
+  d79AB (beta 0.12)** -- identical `config.json` except `beta`, same algo config,
+  same seed. At it40 they are indistinguishable: 68.91/436.6 vs 69.10/439.1, paired
+  dSR -0.96 +/- 1.23. So the existing checkpoints **cannot separate beta 0.06
+  from 0.12**, which is weaker than D72's claim and is the honest one.
+- **Break-even constrains beta before any KPI does.** At the re-measured 2.95 km
+  leg, beta 0.19 breaches `beta * km < relocator_share * gamma`. Beta 0.2 is
+  already past that line, consistent with d72's it40 point sitting furthest below
+  the frontier. D84's queued beta-0.2 run would have trained a policy whose
+  relocations are net-negative by construction.
+- **Eval-seed block matters more than expected.** `d83` it300 reads 59.74% /
+  199.3 km on seeds 9000-9011 and 53.78% / 191.4 km on 12000-12011 -- same 12
+  windows, different order subsample within each, a **5.9 pp swing on one
+  checkpoint**. Every D79-D81 frontier table uses the 9000 block; the gaps hold
+  under both blocks, but absolute levels are not comparable across them.
+  Protocol of record is 12000-12011.

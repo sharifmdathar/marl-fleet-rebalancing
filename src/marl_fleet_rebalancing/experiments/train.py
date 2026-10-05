@@ -926,6 +926,13 @@ def main() -> None:
                         help="PPO entropy bonus coefficient (default: 0.01)")
     parser.add_argument("--obs-inbound", action="store_true",
                         help="D81: observe cars already heading to each zone")
+    parser.add_argument("--demand-history-len", type=int, default=None,
+                        help="D85: turns of per-zone pending history in the "
+                             "observation (default 4 = 2.0 min at dt=0.5). The LP "
+                             "has an EMA over all past turns plus a 3-min "
+                             "lookahead; 4 turns is 3.3%% of a 60-min episode. "
+                             "Changes obs_dim, so checkpoints are not "
+                             "interchangeable across values.")
     parser.add_argument("--nearest-k", type=int, default=None,
                         help="D77: relocate only to the k nearest legal zones (0 = any)")
     parser.add_argument("--relocator-split", action="store_true",
@@ -991,6 +998,8 @@ def main() -> None:
         env_cfg.relocation_nearest_k = args.nearest_k
     if args.obs_inbound:
         env_cfg.obs_inbound = True
+    if args.demand_history_len is not None:
+        env_cfg.demand_history_len = args.demand_history_len
     if args.beta is not None:
         env_cfg.beta = args.beta
     if args.gamma is not None:
