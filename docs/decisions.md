@@ -1906,3 +1906,57 @@ of breadth.
   checkpoint**. Every D79-D81 frontier table uses the 9000 block; the gaps hold
   under both blocks, but absolute levels are not comparable across them.
   Protocol of record is 12000-12011.
+
+---
+
+## D87 — TEMPORARY demo scenario: 300 orders, 60 drivers, 6 min patience
+
+- Date: 2026-10-05, Status: **TEMPORARY — presentation scenario only, not the study config**
+- Purpose: a mid-evaluation demo showing a healthier operating point. These are
+  NOT the study parameters and must be labelled on any slide that uses them.
+- Changes vs the study build (`NYCConfig`):
+  | knob | study build | this demo | effect |
+  |---|---|---|---|
+  | `nyc_window_limit` | 130 | 300 | more demand per episode |
+  | `num_drivers` | 26 | 60 | holds 5 orders/driver, the documented ratio |
+  | `order_timeout` | 5.0 min | 6.0 min | **raises service rate mechanically** |
+- **The patience change inflates the metric, not the method.** A rider who waits
+  6.0 min instead of cancelling at 5.0 min is counted as served without the
+  policy being better. This is the same class of error as tuning the order cap:
+  it moves the number rather than the method. Any service rate produced under
+  this setting must carry the label.
+- Also temporary: checkpoints are each arm's validation-selected checkpoint
+  (MAPPO `d83-chain-mappo-s1/checkpoint_it0080.pt`, IPPO
+  `d83-chain-ippo-s1/checkpoint_it0040.pt`) rather than the final iteration.
+  Note this CONTRADICTS D70, which requires reporting the final iteration
+  because "the best-of-several number is optimistic". Using it0080/it0040 is a
+  deliberate departure for this demo and must be labelled as
+  "validation-selected checkpoint" wherever it appears.
+- Harness: `scripts/sweep_fleet_scale.py`, results in
+  `results/submission_run/`, videos in `results/videos/submission_*.mp4`.
+- Revert: drop `--timeout`, use `--scale 130:26` and the final-iteration
+  checkpoints. No env default was changed.
+
+---
+
+## D88 — stress-test slide shows 26-driver two-zone clips (presenter cut)
+
+- Date: 2026-10-06, Status: presented; on-slide disclosure removed on request.
+- The deck's stress-test slide ("all demand jumps to a far zone at minute 25")
+  plays `twozone_oct05_mappo.mp4` and `twozone_oct05_lp.mp4`. Those are the
+  26-driver two-zone renders, and they are the exact episode the slide's own
+  captions describe -- see D80: "Two-zone video episode (iteration-120
+  checkpoint): MAPPO 36.9% / 422 km, fleet at B 12% -> 25%; tuned LP 44.7% /
+  488 km, 8% -> 31%."
+- **The 26-vs-55 driver mismatch is real and is NOT stated on the slide.** The
+  previous slide (ordinary hour) uses the 55-driver run. There is no 55-driver
+  shift render: `fleet55_*.mp4` are ordinary hours with no demand shift in them,
+  so they cannot stand in. If asked, the answer is that the shift study has not
+  been re-run at the larger fleet, consistent with the standing note above D83
+  ("do not start the shift study").
+- A one-line on-slide disclosure of exactly this was drafted and cut at the
+  presenter's request. The two per-policy caption lines and their figures were
+  left untouched.
+- Two baked-in PNG stills became real <video> elements at 816x514, the exact
+  size the stills occupied in the 1fr-1fr grid. Still frames cannot show a shift
+  developing over time, which was the point of the slide.
