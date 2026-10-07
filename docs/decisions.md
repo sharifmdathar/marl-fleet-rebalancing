@@ -1960,3 +1960,32 @@ of breadth.
 - Two baked-in PNG stills became real <video> elements at 816x514, the exact
   size the stills occupied in the 1fr-1fr grid. Still frames cannot show a shift
   developing over time, which was the point of the slide.
+
+---
+
+## D89 — 2026-10-08: LP re-tuned on nyc16 (5.0/1.0); all saved checkpoints stale; fresh IPPO-40/MAPPO-80 S0–S7 eval
+
+- **LP re-tuned** with `scripts/tune_lp_objective.py --episodes 8` on
+  `data/nyc16` (rebuilt via `scripts/build_zone_subset.py --num-zones 16`):
+  16 configs, seeds 20000–20007, ranked by team objective. Best =
+  `lookahead_minutes=5.0`, `deficit_penalty_scale=1.0` → SR 72.7%,
+  296.0 km empty, wait 2.57 min, objective 19.8. Sweep JSON in
+  `results/lp_tuning/objective_sweep.json`. `LPBaselineConfig` defaults
+  updated in `src/marl_fleet_rebalancing/baselines/lp_baseline.py`.
+- **All checkpoints under `runs/` are stale.** Every one (incl.
+  `ippo-nyc-s0-95it-ck5/checkpoint_it0040.pt` and
+  `mappo-v18-val/checkpoint_it0080.pt`) fails `load_trained_policy` with an
+  obs-encoder shape mismatch (e.g. trunk input 895/811 vs current 1205/1065).
+  The requested "IPPO 40th / MAPPO 80th" checkpoints therefore had to be
+  retrained: `runs/ippo-fresh-it40/checkpoint_it0040.pt`,
+  `runs/mappo-fresh-it80/checkpoint_it0080.pt`.
+- **S0–S7 shift eval** (`experiments/shift_eval.py`, `--episodes 5`,
+  deterministic) for IPPO-it40, MAPPO-it80, Greedy, retuned LP lives in
+  `results/shift_eval_ippo40/`, `results/shift_eval_mappo80/`, merged in
+  `results/shift_eval_combined/summary.json`, figures in
+  `results/figures/` (degradation curves + service-vs-empty frontier).
+  `plot_shifts.py` now includes S7 on the x-axis (was silently dropped).
+- Caveat: IPPO-it40 / MAPPO-it80 sit close to LP and Greedy on several
+  scenarios; 40/80 iterations is not enough to separate the arms. Trained
+  200-iteration runs (`runs/ippo-fresh-it200/`, `runs/mappo-fresh-it200/`)
+  to check whether this is a plateau or undertraining before any headline.

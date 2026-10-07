@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Taxonomy order
-SHIFT_ORDER = ["S0", "S1", "S2a", "S2b", "S2d", "S2e", "S3", "S4", "S5", "S6"]
+SHIFT_ORDER = ["S0", "S1", "S2a", "S2b", "S2d", "S2e", "S3", "S4", "S5", "S6", "S7"]
 SHIFT_TICKS = [
     "S0\nBase (train)",
     "S1\nPermute",
@@ -36,6 +36,7 @@ SHIFT_TICKS = [
     "S4\nCold zone z1",
     "S5\nBurst z0",
     "S6\nTest split",
+    "S7\nDrift",
 ]
 
 KPI_SPECS = {

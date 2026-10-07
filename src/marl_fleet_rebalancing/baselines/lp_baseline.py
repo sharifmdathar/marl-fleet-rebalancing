@@ -67,10 +67,10 @@ class LPBaselineConfig:
     # spatial selectivity that makes the plan useful. Swept on S0/S3; 5 min beat
     # 3/8/12/15/30 on service rate at equal or lower empty km.
     # D70: re-tuned on the current env, 16 configs x 8 TRAIN windows, ranked by
-    # the team objective (scripts/tune_lp_objective.py). The earlier 5.0 / 0.5
-    # was chosen on a single validation window and gave 54% service on the full
-    # val split against 70% for this setting.
-    lookahead_minutes: float = 3.0
+    # the team objective (scripts/tune_lp_objective.py); re-tuned 2026-10-08 on
+    # data/nyc16, best = lookahead 5.0 / penalty 1.0 (objective 19.8, SR 72.7%,
+    # 296 km over 8 train seeds).
+    lookahead_minutes: float = 5.0
     rebalance_frequency_minutes: float = 1.0  # LP replanning interval
     smoothing_alpha: float = 0.3  # EMA smoothing factor for demand rates
     demand_init_rate: float = 30.0  # prior demand rate per zone (orders/hour)
@@ -82,8 +82,9 @@ class LPBaselineConfig:
     # aggressively. Re-swept on the 16-zone build (24 configs, 5 episodes, S0
     # and S3 only per AGENTS.md rule 3): the 0.4 default from the 62-zone
     # sweep gave 54.0% service rate, while 0.5 gives 58.6%. Re-tune before
-    # quoting this baseline on any other scale.
-    deficit_penalty_scale: float = 4.0
+    # quoting this baseline on any other scale. 2026-10-08 re-tune on
+    # data/nyc16, 8 train seeds, ranked by team objective: 1.0 wins.
+    deficit_penalty_scale: float = 1.0
 
 
 def solve_rebalance_lp(
