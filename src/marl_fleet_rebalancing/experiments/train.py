@@ -60,6 +60,12 @@ class TrainConfig:
     eval_window_limit: int | None = 500  # matches the training window budget
     verbose: bool = False
     num_workers: int = 1  # parallel rollout envs (1 = serial, current behavior)
+    # "auto" keeps the historical behaviour (cuda when present). On the Bandra
+    # net, CPU is faster: the rollout takes one batch-1 forward per (turn, zone)
+    # — 9k per iteration — and each one pays a host->device copy plus a sync,
+    # which costs ~2x the whole CPU rollout. Measured 3.7s vs 12.0s per
+    # iteration. Workers are always CPU regardless (spawn context, no CUDA).
+    device: str = "auto"
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +81,7 @@ class TrainConfig:
             "eval_split": self.eval_split,
             "eval_window_limit": self.eval_window_limit,
             "num_workers": self.num_workers,
+            "device": self.device,
         }
 
 
@@ -608,6 +615,12 @@ def train(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- policy & networks ----
+    if train_cfg.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(train_cfg.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested but CUDA is not available")
     torch.manual_seed(train_cfg.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(train_cfg.seed)
@@ -639,6 +652,7 @@ def train(
             state_dim=state_dim_,
             action_dim=action_dim,
             config=train_cfg.algo_config,
+            device=device,
             **arch_shape,
         )
     else:
@@ -647,6 +661,7 @@ def train(
             observation_dim=observation_dim,
             action_dim=action_dim,
             config=train_cfg.algo_config,
+            device=device,
             **arch_shape,
         )
 
@@ -969,6 +984,11 @@ def main() -> None:
                         help="Parallel rollout envs (default: 1 = serial). "
                              "Parallelism is across episodes; zones within a "
                              "turn stay sequential. Use ~n_cores-1.")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
+                        help="Policy device (default: auto = cuda if present). "
+                             "Use 'cpu' with --num-workers>1: the rollout is "
+                             "batch-1 per zone, so per-call GPU overhead makes "
+                             "it ~2x slower than CPU.")
     args = parser.parse_args()
     if args.eval_split == "test":
         parser.error("--eval-split test is not allowed: test is for final evaluation only (AGENTS.md)")
@@ -1038,6 +1058,7 @@ def main() -> None:
         if hasattr(env_cfg, "nyc_window_limit") else None,
         verbose=args.verbose,
         num_workers=args.num_workers,
+        device=args.device,
     )
     train(train_cfg, args.env, args.nyc_window_limit, args.algo,
           resume_from=args.resume)

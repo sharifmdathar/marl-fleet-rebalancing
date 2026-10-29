@@ -403,7 +403,7 @@ class BandraConfig(EnvConfig):
     order_timeout: float = 5.0  # env 3.0 (D35); see EnvConfig for the rationale
     num_orders: int = 200
     max_party_size: int = 3
-    network_path: str = "data/bandra_west.gpickle"
+    network_path: str = "data/synthetic_grid_5x5.gpickle"
     speed_kmh: float = 30.0
     max_pending: int = 80
     alpha: float = 0.1

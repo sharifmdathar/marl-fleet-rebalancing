@@ -85,7 +85,6 @@ def make_shifted_env(
 
     cfg.nyc_window_limit = nyc_window_limit
     cfg.nyc_split = "train"
-    cfg.order_source = "nyc"
     cfg.demand_shift_mode = "none"
     cfg.target_zone = None
     cfg.target_zone_demand_pct = None
@@ -93,6 +92,15 @@ def make_shifted_env(
     cfg.burst_share_pct = None
     cfg.perm_strength = None
     cfg.perm_offset = None
+
+    # Magnitude shifts scale the base generator's order volume. The SHIFTS
+    # table treats limit=130 (_WINDOW) as "1.0x". For NYC order sources the
+    # cap itself is the limiter (cfg.nyc_window_limit); for synthetic sources
+    # rescale num_orders by limit/130 so S2a..S2e keep the same relative
+    # severity on the synthetic demand profile.
+    if cfg.order_source == "synthetic" and nyc_window_limit is not None:
+        base_limit = cfg.nyc_window_limit or 130
+        cfg.num_orders = int(round(cfg.num_orders * nyc_window_limit / base_limit))
 
     # Mechanism dispatch
     if shift_param is not None:

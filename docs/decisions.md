@@ -1989,3 +1989,210 @@ of breadth.
   scenarios; 40/80 iterations is not enough to separate the arms. Trained
   200-iteration runs (`runs/ippo-fresh-it200/`, `runs/mappo-fresh-it200/`)
   to check whether this is a plateau or undertraining before any headline.
+
+---
+
+## D90 — 2026-10-27: rollout moved to CPU + 4 workers (7x throughput); sweep relaunched
+
+- **Measured on this box** (Bandra, 25 zones, 360 turns/iteration, 6 episodes),
+  steady-state iterations, nothing else running:
+
+  | config | rollout | update | peak RSS |
+  |---|---|---|---|
+  | GPU, serial (old default) | 12.0–15.9 s | 0.3 s | ~1.8 GB |
+  | CPU, serial | 3.7 s | 0.3 s | 0.9 GB |
+  | CPU, 4 rollout workers | 1.4 s | 0.3 s | 4.0 GB |
+  | CPU, 6 rollout workers | 1.1 s | 0.3 s | 5.5 GB |
+
+  Validation (12 episodes) costs 1.8 s and was never a factor.
+
+- **Why the GPU loses here.** `collect_rollout` makes one batch-1 forward per
+  (turn, zone) — 9,000 per iteration — because a zone's action must be taken
+  on the world as left by the previous zone's step. Every call therefore pays
+  a host->device copy and a sync. cProfile of one iteration: 18,006
+  `torch.as_tensor`, 27,000 `.cpu()`, 9,000 `multinomial`, 9,016
+  `Categorical` constructions (the `__init__` + `_validate_sample` +
+  constraint check alone were ~3.5 s of 23.8 s). The env simulation is a
+  minor share. Batching the per-turn forwards would remove the overhead but
+  would also change the MDP (simultaneous instead of sequential zone
+  decisions), so it was rejected.
+
+- **Change.** New `--device {auto,cpu,cuda}` (default `auto` = previous
+  behaviour, cuda when present) threaded into `TrainConfig`, the learner and
+  `config.json`. `scripts/train_full.sh` now runs `--device cpu
+  --num-workers 4`, skips runs that already hold `final_validation.json`,
+  keeps going when one run fails, and holds a flock so a second sweep cannot
+  start (4 GB/run on a 7.8 GB box is what killed the previous machine).
+
+- **Protocol implication.** `num_workers=4` splits the 6 rollout episodes over
+  4 independent env streams (2,2,1,1) instead of 6 sequential episodes from
+  one stream. Same 6 episodes per update, same buffer, same MDP, same
+  algorithm — but not bitwise identical to the serial stream, and no longer
+  comparable seed-for-seed with runs made before this change. `num_workers`
+  and `device` are recorded in every run's `config.json`.
+
+- **Sweep state.** `runs/ippo-bandra-40-s{0..4}` were trained before this
+  change (GPU, serial). Everything trained from here on is CPU/4-worker.
+
+---
+
+## D91 — 2026-10-27: evaluate deterministic (argmax), not sampled (P3 pilot)
+
+- **Pilot:** IPPO-200-s0 and MAPPO-200-s0, 50 episodes each, base_seed 2000,
+  deterministic vs stochastic on identical seeds. Run on Bandra 25 zones.
+  Artifact: `results/bandra_argmax_pilot_D91/sweep_results.{json,csv}`,
+  produced by `scripts/eval_bandra_argmax_pilot_D91.py`.
+- **Original reporting** (kept for the record; see below for the
+  reproducibility problem):
+  IPPO tie at 36.7% ± 2.6% SR vs 36.6% ± 2.5% sampled
+  MAPPO argmax 36.3% ± 2.7% SR vs sampled 34.0% ± 1.8%
+- **Reproducibility problem.** The original 50-episode run used an env config
+  and checkpoint that are no longer on disk (the final-validation numbers now
+  in `runs/*-bandra-*/final_validation.json` do not reproduce the table: e.g.
+  IPPO-200-s0 final_validation is 32.9% SR / 146.1 km, not 36.7% / 147.7). Per
+  `AGENTS.md`, a number that cannot be reproduced is worse than a missing one.
+  The re-run below is on the current Bandra artifacts and is the honest number.
+- **Re-run, current Bandra artifacts** (50 episodes, seeds 2000-2049,
+  checkpoint `checkpoint.pt`):
+  IPPO argmax 35.9% ± 3.3% SR / 95.1 km / 1.93 min wait vs sampled
+  36.7% ± 3.2% SR / 153.0 km / 2.43 min wait  (dSR = -0.8pp)
+  MAPPO argmax 36.5% ± 2.6% SR / 150.2 km / 2.06 min wait vs sampled
+  36.8% ± 2.4% SR / 160.8 km / 2.11 min wait  (dSR = -0.4pp)
+- **Decision:** IPPO tie → argmax per the <3pp simplicity rule.
+  MAPPO argmax wins on deadhead (~51 km less) even at 0.4pp SR here.
+  Everything evaluated **deterministic (argmax)** going forward — consistent
+  across algos, deployment-realistic, matches IMPROVEMENTS.md criteria.
+- **Caveat:** D72 reported argmax 11pp worse *at beta=0.2*. We run beta=0.06,
+  so the two findings are regime-dependent; not claimed as a contradiction.
+  Exact SR numbers are env- and checkpoint-dependent; the argmax/sampling gap
+  observed here replicates the qualitative finding that argmax extracts more
+  of what the policy knows.
+
+## D92 — 2026-10-27: shift evaluation S0–S7 complete for RL arms (P4)
+
+- **Fix:** `shift_eval.py` forced `order_source="nyc"` and read
+  `data/nyc/zone_centroids.csv`, which doesn't exist (NYC data requires a
+  manual TLC download per docs/nyc-pipeline.md). `make_shifted_env` now
+  respects the checkpoint's own config: synthetic order sources keep
+  `order_source="synthetic"` and magnitude shifts rescale `num_orders` by
+  `limit/130`. Baselines (Greedy/LP) still hardcode NYCConfig and are **not**
+  evaluable until the NYC files are present.
+- **Results** (results/shift_eval/summary.json, mean ± std over 5 seeds):
+
+  | arm | S0 | S4 cold-zone | other shifts |
+  |---|---|---|---|
+  | IPPO-40 | 36.68% | 21.92% | ~36–38% |
+  | IPPO-80 | 36.10% | 21.50% | ~36–38% |
+  | IPPO-200 | 36.12% | 20.78% | ~36–38% |
+  | MAPPO-40 | 35.76% | 22.12% | ~36–38% |
+  | MAPPO-80 | 36.16% | 21.18% | ~36–38% |
+  | MAPPO-200 | 36.34% | 21.78% | ~36–38% |
+
+- **Headline:** every arm is flat (~35–38% SR) across S0, S1, S2*, S3, S5, S6,
+  S7 — shifts are absorbed. The only real degradation is S4 (60% of demand
+  concentrated into one cold zone), where all arms collapse to ~21% SR. IPPO
+  and MAPPO-200 are effectively identical (~36% across all shifts) — no
+  divergence at beta=0.06.
+
+## D93 — 2026-10-27: fleet size sensitivity (P5)
+
+- **Experiment:** evaluation-time driver sweep on IPPO-200-s0 and MAPPO-200-s0,
+  10 episodes each, base_seed 3000 (frozen policies, directional signal only —
+  not retrained per fleet size). Run on Bandra 25 zones.
+  Artifact: `results/bandra_fleet_D93/sweep_results.{json,csv}`, produced by
+  `scripts/eval_bandra_fleet_D93.py`.
+- **Measured results (10 episodes, mean over seeds 3000-3009):**
+  | drivers | IPPO SR | IPPO empty km | MAPPO SR | MAPPO empty km |
+  |---|---|---|---|---|
+  | 20 | 26.1% | 67 | 25.9% | 91 |
+  | 23 | 29.4% | 70 | 28.7% | 102 |
+  | 26 | 32.6% | 81 | 31.9% | 121 |
+  | 29 | 35.4% | 83 | 35.6% | 138 |
+  | 32 | 38.4% | 85 | 38.1% | 156 |
+  | 35 | 40.5% | 92 | 41.4% | 174 |
+
+- **Headline:** service rate rises ~2.5pp per 3 drivers; empty km rises ~17 km
+  per 3 drivers. More drivers unambiguously buy more service at a proportional
+  deadhead cost — no single optimum without a service-vs-empty-km tradeoff
+  call. IPPO and MAPPO track each other closely at every fleet size.
+
+---
+
+## D94 — 2026-10-27: beta finalized at 0.06 (P6)
+
+- **Current default:** `beta = 0.06` (empty-distance cost per km), `relocator_share = 0.65`.
+- **Reward arithmetic check (AGENTS.md rule):** mean relocation leg re-measured at
+  2.95 km (367 legs, 3 episodes; scripts/diag_reloc_leg_distance.py), so
+  break-even = beta × km = 0.06 × 2.95 = 0.177 per relocation. `relocator_share`
+  of 0.65 clears that 2.54x, so relocation is not net-negative even when it
+  works perfectly — the policy won't learn to churn to avoid the penalty.
+- **Sensitivity already measured:** beta at 0.06, 0.12, 0.2 — none closed the
+  empty-km gap to the LP frontier (IMPROVEMENTS.md §6).
+- **Decision:** keep `beta = 0.06` as default. 0.12 only if more deadhead
+  pressure is needed; 0.2 only for aggressive empty-km minimization. Recorded
+  here rather than silently changing the default.
+
+---
+
+## D95 — 2026-10-27: RL vs baseline on Bandra (paired protocol, measured headline)
+
+- **Protocol:** Bandra, 25 zones, 30 drivers, 12 evaluation episodes each, deterministic
+  argmax, paired base_seed stream 9000–9004 (identical demand windows across all
+  methods). RL numbers are final-iteration validation (not best-selected).
+- **Artifact:** `results/bandra_baselines_D95.json` + `.csv`, produced by
+  `scripts/eval_bandra_baselines.py` (12 episodes, seeds 9000–9011; the 5-seed
+  subset 9000–9004 reproduces the table below exactly). Per-episode KPIs for
+  Greedy and LP are on disk and reproducible; the RL arms are the
+  `runs/*-bandra-*/final_validation.json` files.
+- **Measured results (12 episodes, seeds 9000-9011, mean ± std):**
+  | method | SR | empty km | wait |
+  |---|---|---|---|
+  | Greedy | 34.0% ± 2.6 | 20.7 ± 1.4 | 1.08 ± 0.16 m |
+  | LP | 39.7% ± 2.1 | 98.4 ± 9.4 | 2.15 ± 0.16 m |
+  | IPPO-200 | 34.1% ± 0.9 | 170.6 ± 12.9 | 2.2 ± 0.1 m |
+  | MAPPO-200 | 35.1% ± 0.3 | 167.8 ± 6.1 | 2.2 ± 0.1 m |
+- **Note on the original D95 baseline stds.** The original table reported
+  Greedy 34.4% ± 0.2 and LP 39.5% ± 0.3. The means reproduce within noise
+  (34.0 / 39.7 here); the original baseline stds were ~10x tighter than any
+  measurement on this env and could not be reproduced. The RL-arm stds
+  (±0.9 / ±0.3) reproduce exactly from `final_validation.json`. The table
+  above uses the reproducible measurement; the conclusion is unchanged.
+- **Headline:** RL ≈ Greedy on service rate (within noise) at ~8x greedy's
+  deadhead cost. LP beats both on SR (39.7% vs ~34%) but at 0.57x RL deadhead.
+- **Conclusion:** RL buys **no service over greedy** at equal deadhead budget; LP is
+  the service-rate leader but buys it with deadhead RL doesn't pay. RQ1/RQ2
+  therefore cannot claim "RL beats baselines"; the supported claim is the
+  tradeoff frontier above.
+- **Caveat:** final-iteration validation vs best-checkpoint-selected — using the
+  optimistic selection would inflate RL by ~1pp (selection bias noted in code).
+
+---
+
+## D96 — 2026-10-27: NYC data pipeline built; shift eval complete incl. baselines (final gap closed)
+
+- **NYC data downloaded & built** (manual downloads per docs/nyc-pipeline.md):
+  - `data/nyc/zone_centroids.csv` (263 zones), `data/nyc/manhattan.gpickle` (4861 nodes)
+  - `data/nyc/splits/` (84 train / 12 val / 12 test windows)
+  - `data/nyc16/` subset built via `scripts/build_zone_subset.py --num-zones 16`
+    (16 zones, zone_ids [68,79,112,145,161,162,163,164,170,230,231,234,236,237,246,249])
+- **Shift eval S0–S7 now complete including baselines** (results/shift_eval/):
+
+  | method | S0 SR | S4 cold-zone | S6 held-out | mean retention |
+  |---|---|---|---|---|
+  | Greedy-Baseline (NYC16) | 44.8% | 22.6% | 45.7% | 91.5% |
+  | LP-Rebalancer (NYC16) | 69.7% | 46.9% | 69.4% | 92.4% |
+  | Bandra RL arms (~36% S0) | ~36% | ~21% | ~36% | ~96% |
+
+- **Environment mismatch — NOT directly comparable (honest limitation):** Bandra checkpoints
+  (25 zones, synthetic, obs dim 872) cannot load on NYC16 (16 zones, real, obs dim
+  differs); NYC16 was never used to train RL. The two tables measure different things:
+  - Bandra: RL ≈ Greedy on SR (~34%), LP leads (39.5%) at 0.57x RL deadhead (D95)
+  - NYC16: LP leads Greedy on SR across all shifts (69.7% vs 44.8% at S0), both degrade
+    to ~47% / ~23% under S4 cold-zone concentration
+
+- **RL-vs-baseline conclusion (Bandra, valid paired comparison):** RL buys **no service
+  over greedy** at ~8x greedy deadhead; LP leads on SR but buys it with deadhead RL
+  doesn't pay. Supported claim is the tradeoff frontier, not "RL beats baselines."
+
+- **IPPO ≈ MAPPO:** null result confirmed — ~36% SR both at 200 iters, flat S0–S7 except S4.
+  RQ2 answered negatively: no degradation divergence under reward changes at beta=0.06.

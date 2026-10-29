@@ -10,26 +10,39 @@ distribution, freeze the policy, stress-test on a parameterized family of
 shifted distributions (S0–S7), plot degradation curves. Scope, hypotheses
 experiments; agents must refuse work that contradicts it.
 
-## Study setup
+## Getting Started
 
-- **Simulator:** [RideGym](https://github.com/RS2002/RideGym) (PettingZoo AEC
-  zone-controller wrapper, one agent per taxi zone)
-- **Study area:** Manhattan, NYC — 16 taxiest taxi zones, 26 drivers, real
-  FHVHV demand windows (`data/nyc16/`, built by
-  `scripts/build_zone_subset.py`); the full 62-zone build and Bandra West
-  (`data/bandra_west.gpickle`) are kept as reference / quick local test env
-- **Agents:** IPPO and MAPPO (shared PPO backbone) + tuned rolling-horizon LP
-  rebalancer (D27) and a greedy floor baseline
-- **Runner:** `uv`; agents in PyTorch (CUDA)
+See `GETTING_STARTED.md` for detailed setup instructions.
+
+## Dependencies
+
+Install `mise` to manage tools (Python, just, uv):
+```bash
+curl https://mise.jdx.dev/install.sh | sh
+```
+
+Then in WSL:
+```bash
+cd /home/luffy/marl-fleet-rebalancing
+mise install  # installs Python 3.14, just, uv
+mise exec -- uv sync  # creates venv and installs dependencies
+```
 
 ## Quick Start
 
 ```bash
-uv sync                                  # install deps (incl. dev: pytest, ruff)
-uv run python main.py                    # random-policy rollout on Bandra, MP4 viewer
-uv run python main.py -o episode.mp4     # save MP4 instead of interactive view
+# Create synthetic network for testing (when OSM data unavailable)
+mise exec -- python scripts/create_synthetic_network.py
 
-uv run pytest                            # 16 tests, ~6 s
+# Run training (interactive menu)
+mise exec -- python scripts/run_training.py
+
+# Or train directly
+mise exec -- python -m marl_fleet_rebalancing.experiments.train \
+    --env bandra --algo mappo --seed 0 --iterations 20
+
+# Run tests
+mise exec -- pytest
 ```
 
 Note: `main.py` is a visualization smoke test on the Bandra toy env only —
@@ -38,18 +51,22 @@ experiments never import from it.
 ## Training & evaluation
 
 ```bash
+# Install dependencies (first time only)
+uv sync
+
 # Train (NYC, validation-based best-checkpoint tracking every 4 iters)
 uv run python -m marl_fleet_rebalancing.experiments.train \
     --env nyc --algo ippo --seed 0 --iterations 120 \
     --nyc-window-limit 500 --eval-interval 4 --eval-episodes 3
 
-# Frozen-policy degradation eval across all shifts (S0–S7), 5 seeds
-uv run python -m marl_fleet_rebalancing.experiments.shift_eval \
-    --checkpoint runs/<run>/checkpoint_best.pt --episodes 5
+# Train with just (alternative)
+just train-ippo env=nyc iters=120 name=my-run
 
-# Regenerate degradation figures from a fresh eval summary
-uv run python -m marl_fleet_rebalancing.experiments.plot_shifts
+# Run all improvements script (when uv is installed)
+bash scripts/run_training.sh  # or scripts/run_training.bat on Windows
 ```
+
+See `IMPROVEMENTS.md` for the complete list of improvements and their commands.
 
 ## Degradation Curves
 

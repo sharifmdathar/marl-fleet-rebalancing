@@ -1,0 +1,554 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{microtype}
+\usepackage{amsmath}
+
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}
+\captionsetup{font={small,it},labelfont=bf}
+\renewcommand{\arraystretch}{1.15}
+\setlength{\emergencystretch}{3em}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
+\graphicspath{{docs/}}
+
+\title{Fleet Rebalancing with Multi-Agent Reinforcement Learning:\\
+A Study on Synthetic Demand (Bandra) and Real Demand (NYC16 Baselines)}
+\author{Alaa Daoud\\\\
+LAMIH, CNRS, INSA Hauts-de-France, UPHF
+\and
+Avani Dewangan, Md Athar Sharif, Prashil Thul\\
+IIIT Naya Raipur, B.Tech CSE 2024--2028}
+\date{October 29, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We train IPPO and MAPPO zone-controller policies on a synthetic 25-zone
+network (Bandra, 30 drivers, $\beta=0.1$, $\gamma=5.0$) and evaluate them
+against greedy and LP baselines under a standardized demand-shift taxonomy
+(S0--S7). On the five-seed final-validation protocol, RL matches greedy on
+service rate while spending roughly $8\times$ greedy's deadhead, and the LP
+baseline dominates RL on the service-rate/deadhead tradeoff (higher service
+rate at $\sim 0.58\times$ RL deadhead). Because Bandra and NYC16 have
+different observation spaces, the NYC16 results are baselines only and are
+not directly comparable to the Bandra RL results. All reported numbers are
+reproducible from artifacts committed in \texttt{results/} and
+\texttt{runs/}.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\paragraph{Problem.} Fleet rebalancing is the decision of where to move idle
+drivers so that they meet demand before riders cancel. The study asks two
+questions: (RQ1) does learned relocation beat a tuned LP baseline on the
+service-rate / empty-distance tradeoff, and (RQ2) does the algorithm
+(IPPO vs.\ MAPPO) matter once the reward is changed?
+
+\paragraph{Environment.} Two networks. \textbf{Bandra}: 25 synthetic zones on
+a $5\times5$ grid, 30 drivers, 30-minute episodes, 200 orders, 5-minute
+patience. \textbf{NYC16}: the 16 busiest taxi zones from real FHVHV data,
+26 drivers, 130 orders/hour, 5-minute patience. The two are not
+interchangeable: Bandra checkpoints cannot load on NYC16 because the
+observation space differs. All RL training and all RL results in this paper
+are on Bandra; NYC16 appears only as a baseline comparison.
+
+\paragraph{Baselines.} GreedyZoneDispatcher (nearest-idle dispatch, zero
+relocation) and ZoneLPRebalancer, a rolling-horizon transportation LP
+adapting MIVR \cite{guo2021} with an EMA demand forecast and a 5-minute
+lookahead; parameters in Section~\ref{sec:env}.
+
+\paragraph{Method.} IPPO and MAPPO with a destination-conditioned
+relocation head, trained with PPO in a PettingZoo AEC environment
+\cite{pettingzoo} and evaluated deterministically with argmax actions. The
+team reward is
+$R = \gamma \cdot \text{served} - \beta \cdot \text{empty km}
+     - \alpha \cdot \text{wait} - \text{cancel}$,
+with $\alpha{=}0.2$, $\beta{=}0.06$, $\gamma{=}1.0$ on NYC16 and
+$\alpha{=}0.1$, $\beta{=}0.1$, $\gamma{=}5.0$ on Bandra. A fixed 65\% share
+of the served credit is attributed to the relocating zone; the Bandra
+configuration pays this on top of $\gamma$ rather than carving it out.
+
+\paragraph{Headline.} On the five-seed final-validation protocol, RL matches
+greedy on service rate while spending roughly $8\times$ greedy's deadhead,
+and the LP baseline dominates RL on the tradeoff (higher service rate at
+$\sim 0.58\times$ RL deadhead). The deadhead multiplier is
+protocol-dependent; Section~\ref{sec:argmax} quantifies the spread.
+
+\section{Environment and Baselines}
+\label{sec:env}
+
+\subsection{Bandra}
+25 synthetic zones on a $5\times5$ grid (Bandra West, Mumbai). 30 drivers,
+30-minute episodes ($dt=0.5$ min, 60 turns), 200 orders, 5-minute order
+timeout, 30 km/h speed. Reward constants: $\alpha=0.1$, $\beta=0.1$,
+$\gamma=5.0$, cancel $=0.5$; the relocation bonus is paid on top of
+$\gamma$ rather than carved out of it. 1,500 zone-turns per episode and
+9,000 batch-1 forwards per training iteration.
+
+\subsection{NYC16}
+The 16 busiest taxi zones from real FHVHV 2026-04 data (zone IDs 68, 79, 112,
+\ldots). Zone centroids from the Manhattan road network, 84 train / 12 val /
+12 test windows. 26 drivers, 130 orders/hour, 5-minute patience. Reward
+constants $\beta=0.06$, $\alpha=0.2$, $\gamma=1.0$, relocator share $0.65$.
+
+\subsection{Baselines}
+\textbf{GreedyZoneDispatcher}: nearest-idle dispatch, zero relocation.
+\textbf{ZoneLPRebalancer}: rolling-horizon transportation LP with EMA demand
+forecast (smoothing $\alpha=0.3$, 5-minute lookahead, deficit penalty $1.0$),
+tuned on eight TRAIN windows on NYC16.
+
+\subsection{Incompatibility}
+Bandra checkpoints use an 872-dimensional observation vector (25 synthetic
+zones, $\alpha=0.1$, $\beta=0.1$, $\gamma=5.0$). NYC16 uses a different
+observation dimension and $\beta=0.06$. They cannot be loaded
+interchangeably, so the two tables measure different environments.
+
+\paragraph{Implementation.}
+All 30 training cells (IPPO and MAPPO $\times$ 40/80/200 iterations
+$\times$ 5 seeds) ran on CPU. Each update splits six rollout episodes across
+four independent environment streams in a 2/2/1/1 pattern, so runs are not
+bitwise identical to a serial implementation. All reported evaluations use
+deterministic argmax actions.
+
+\section{Training Results}
+\label{sec:training}
+
+\subsection{Setup}
+IPPO and MAPPO $\times$ 40/80/200 iterations $\times$ 5 seeds, all on Bandra
+(25 zones, 30 drivers), held-out validation, deterministic argmax evaluation.
+Final-iteration numbers are reported (not best-selected). All standard
+deviations are sample std (ddof${}=1$) across the 5 seeds.
+
+\subsection{Final-iteration validation results}
+\label{tab:training}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Arm & SR & Empty km & Wait \\
+\midrule
+IPPO-40  & 33.2\% $\pm$ 1.3 & 185.8 & 2.3 min \\
+IPPO-80  & 34.1\% $\pm$ 0.6 & 182.2 & 2.3 min \\
+IPPO-200 & 34.1\% $\pm$ 1.0 & 170.6 & 2.2 min \\
+MAPPO-40  & 34.0\% $\pm$ 1.0 & 168.5 & 2.1 min \\
+MAPPO-80  & 33.7\% $\pm$ 1.3 & 179.3 & 2.2 min \\
+MAPPO-200 & 35.1\% $\pm$ 0.3 & 167.8 & 2.2 min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Convergence}
+200-iteration arms are flat over the last 10 checkpoints: IPPO-200 mean
+34.1\% (range 32.9--35.5 across checkpoints 110--200); MAPPO-200 mean
+35.2\% (range 33.4--36.6). The 200- and 80-iteration arms are within 1 pp,
+confirming a plateau. IPPO $\approx$ MAPPO at $\beta=0.1$: no divergence,
+so RQ2 is answered negatively.
+
+\section{Argmax vs.\ Sampled Evaluation}
+\label{sec:argmax}
+
+\subsection{Protocol}
+IPPO-200-s0 and MAPPO-200-s0, 50 episodes each, base seed 2000,
+deterministic versus stochastic policies on identical demand windows.
+Artifact: \texttt{results/bandra\_argmax\_pilot/}.
+
+\subsection{Results}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Algo & Policy & SR ($\pm$ std) & Empty km ($\pm$ std) \\
+\midrule
+IPPO  & argmax  & 35.9\% $\pm$ 3.4 &  95.1 $\pm$ 16.6 \\
+IPPO  & sampled & 36.7\% $\pm$ 3.2 & 153.0 $\pm$ 15.5 \\
+MAPPO & argmax  & 36.5\% $\pm$ 2.6 & 150.2 $\pm$ 15.3 \\
+MAPPO & sampled & 36.8\% $\pm$ 2.4 & 160.8 $\pm$ 13.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+$\Delta$SR: IPPO $-0.8$ pp, MAPPO $-0.4$ pp. Argmax cuts empty km by
+57.9 km for IPPO and 10.6 km for MAPPO per episode at no cost in service
+rate.
+
+\subsection{Decision}
+IPPO's SR difference is within 1 pp, so we select argmax for its 58 km
+deadhead reduction. MAPPO also prefers argmax, but only by 10.6 km. All
+evaluation uses argmax going forward.
+
+\subsection{Deadhead depends on the evaluation protocol}
+Deadhead is not a property of a checkpoint alone; it depends on the demand
+windows and the fleet size at evaluation time. The numbers below all concern
+IPPO-200:
+\begin{itemize}[nosep]
+\item 95.1 km: pilot evaluation, 50 episodes over seeds 2000--2049, 30 drivers.
+\item 146.1 km: seed-s0 \texttt{final\_validation.json}, 12 episodes at eval
+      seed 9000, 30 drivers.
+\item 170.6 km: five-seed mean over seeds s0--s4, each 12 episodes at eval
+      seed 9000 (sample std 14.4 km); this is the protocol used for the
+      training and baseline tables.
+\item 83.4 km: fleet sweep at 29 drivers, 10 episodes, base seed 3000.
+\item 136.5 km: shift-eval S0 mean (5 seeds $\times$ 5 episodes, seeds
+      1000--1004), the left-panel S0 point in Figure~\ref{fig:degradation-sr}.
+\end{itemize}
+The pilot's 95.1 km is a single checkpoint on seeds 2000--2049 and is not
+paired with LP's 98.4 km, which is measured on seeds 9000--9011. The
+$8\times$ headline uses 170.6 km against greedy's 20.7 km on the five-seed
+final-validation protocol. On the pilot windows the same checkpoint is
+95.1 km, close to LP's 98.4 km, so the multiplier is evaluation-dependent:
+the defensible claim is that RL spends several-fold more deadhead, with
+$8\times$ specific to the five-seed protocol.
+
+\section{Shift Evaluation}
+\label{sec:shifts}
+
+\subsection{Taxonomy}
+Eleven standardized shift scenarios (S0--S7), evaluated on Bandra synthetic
+demand and on NYC16 with baselines. Magnitude shifts (S2a--S2e) scale
+\texttt{num\_orders} by \texttt{limit/130} on NYC16 so severity is a multiple
+of the in-distribution rate; on Bandra the base is 200 orders per episode and
+shifts use a proportional factor (e.g.\ S2a $=0.5\times 200=100$ orders).
+S6 (NYC16 test split) is a no-op on Bandra and equals S0.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Label & Mechanism & Description \\
+\midrule
+S0 & --- & Base (train) \\
+S1 & Permute & Spatial permutation (rot offset $= nz//2$) \\
+S2a & $\times$0.5 & Magnitude $\times$0.5 \\
+S2b & $\times$0.75 & Magnitude $\times$0.75 \\
+S2d & $\times$1.5 & Magnitude $\times$1.5 \\
+S2e & $\times$2.0 & Magnitude $\times$2.0 \\
+S3 & Temporal & Phase shift (val split) \\
+S4 & Concentrate & 60\% demand to cold zone z1 \\
+S5 & Burst & 20\% in [20,30] min to z0 \\
+S6 & Held-out & NYC16 test split; no-op on Bandra (equals S0) \\
+S7 & Drift & Hotspot A$=$zone12 $\rightarrow$ D$=$zone10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+S2c (magnitude $\times$1.0) is intentionally not run: it is byte-identical to
+S0 and was dropped as compute waste. S3b is not run either.
+
+\subsection{Results (Bandra, 30 RL checkpoints)}
+Every arm is flat ($\sim$35--38\% SR) across S0, S1, S2a--S2e, S3, S5, S6, S7.
+On Bandra, S6 is a no-op: the ``test split'' switch only affects the NYC16
+order source, so the Bandra S6 point is numerically identical to S0 in every
+run and is not evidence of held-out robustness. The only real degradation is
+S4 (60\% of demand concentrated into one cold zone), where all arms collapse
+to $\sim$21\% SR. IPPO-200 and MAPPO-200 are effectively identical
+($\sim$36\% across all shifts); no divergence at $\beta=0.1$. All shifts
+except S4 stay within 3 pp of S0.
+
+\subsection{Results (NYC16, baselines)}
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Method & S0 SR & S4 cold-zone & S6 held-out & Mean retention \\
+\midrule
+Greedy (NYC16) & 44.8\% & 22.6\% & 45.7\% & 91.5\% \\
+LP (NYC16) & 69.7\% & 46.9\% & 69.4\% & 92.4\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+LP dominates Greedy on SR across all shifts on NYC16; both degrade to
+$\sim$47\% / $\sim$23\% under S4.
+
+\subsection{Scope and comparability}
+Bandra RL checkpoints (25 zones, synthetic, 872-dimensional observation)
+cannot load on NYC16 (16 zones, real, different observation dimension), and
+no NYC16 RL results are reported in this paper. The two tables measure
+different environments and are not directly comparable. On Bandra, the Greedy
+vs LP baseline comparison uses paired demand windows (base seeds 9000--9011),
+so that comparison is paired. The RL arms are evaluated on a separate seed
+set, so the RL-versus-baseline comparison is not paired; Section~\ref{sec:baselines}
+states the consequence.
+
+\section{Fleet-Size and Reward-Weight Sensitivity}
+\label{sec:sweep}
+
+\subsection{Fleet-size sensitivity}
+Evaluation-time driver sweep on frozen IPPO-200-s0 and MAPPO-200-s0, 10
+episodes each, base seed 3000. Directional signal only; policies are not
+retrained per fleet size. Artifact: \texttt{results/bandra\_fleet\_D93/}.
+
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Drivers & IPPO SR & IPPO km & MAPPO SR & MAPPO km \\
+\midrule
+20 & 26.1\% & 66.9 & 25.9\% & 90.7 \\
+23 & 29.4\% & 70.2 & 28.7\% & 102.3 \\
+26 & 32.6\% & 81.2 & 31.9\% & 121.0 \\
+29 & 35.4\% & 83.4 & 35.6\% & 137.6 \\
+32 & 38.4\% & 85.3 & 38.1\% & 155.7 \\
+35 & 40.5\% & 92.3 & 41.4\% & 174.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Service rate rises $\sim$2.9 pp per 3 drivers (IPPO) / $\sim$3.1 pp (MAPPO);
+empty km rises $\sim$5.1 km per 3 drivers (IPPO) / $\sim$16.6 km (MAPPO).
+More drivers unambiguously buy more service at a proportional deadhead cost;
+there is no single optimum without a service-versus-empty-km tradeoff call.
+IPPO and MAPPO track each other closely on SR at every fleet size, but MAPPO
+spends substantially more deadhead (92 vs 174 at 35 drivers).
+
+\subsection{Reward-weight check}
+Measured on Bandra over the five IPPO-200 and five MAPPO-200 training seeds
+(3 episodes per seed, seeds 1000--1002, deterministic argmax; sample std
+across seeds):
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+ & IPPO-200 & MAPPO-200 \\
+\midrule
+relocations / episode & 55.9 $\pm$ 10.7 & 58.3 $\pm$ 5.1 \\
+mean relocation leg (km) & 1.40 $\pm$ 0.08 & 1.39 $\pm$ 0.09 \\
+pickup deadhead (km/completion) & 0.85 $\pm$ 0.14 & 0.83 $\pm$ 0.07 \\
+P(credit fires $\mid$ relocation) & 0.683 $\pm$ 0.020 & 0.683 $\pm$ 0.020 \\
+\bottomrule
+\end{tabular}
+\end{center}
+With $\beta=0.1$ and the measured 1.40 km leg, the per-leg break-even is
+$0.1 \times 1.40 = 0.140$. The bonus is
+$\text{share}\times\gamma = 0.65 \times 5.0 = 3.25$, so the literal margin is
+$3.25/0.140 = 23.2\times$; conditioning on the measured 0.683 fire rate gives
+\[
+  3.25 \times 0.683 / 0.140 = 15.9\times.
+\]
+Charging the whole job (leg plus 0.85 km pickup deadhead, 2.25 km) gives
+$0.1 \times 2.25 = 0.225$ and a conditional margin of $9.9\times$. MAPPO's
+measurements give $16.0\times$ (leg) and $10.0\times$ (whole job). Relocation
+is therefore strongly net-positive on Bandra; churn is not explained by a
+negative expected value.
+
+The 2.95 km leg-plus-pickup figure is an NYC16 measurement (367 legs) and
+must not be used for Bandra. On NYC16 ($\beta=0.06$, $\gamma=1.0$) the per-leg
+break-even is $0.06 \times 2.95 = 0.177$, so the 0.65 share clears it
+$3.67\times$ literally and $2.09\times$ conditionally
+($0.65 \times 0.568/0.177$).
+
+\subsection{Reward arithmetic check}
+Bandra uses $\alpha=0.1$, $\beta=0.1$, $\gamma=5.0$, cancel $=0.5$, with the
+relocation bonus paid on top of $\gamma$. NYC16 uses $\alpha=0.2$,
+$\beta=0.06$, $\gamma=1.0$, with the bonus carved out of $\gamma$. Zone rewards
+sum to the team objective exactly, and the conditional form
+$\text{share} \times \gamma \times P(\text{dispatch}) > \beta \times \text{km}$
+is asserted with the measured 0.568 NYC16 dispatch rate as an explicit input.
+
+\section{RL vs.\ Baselines}
+\label{sec:baselines}
+
+\subsection{Protocol}
+Bandra, 25 zones, 30 drivers, 12 evaluation episodes each, deterministic
+argmax. Baseline evaluation uses the paired base-seed stream 9000--9011
+(identical demand windows across Greedy and LP, 12 episodes each). The RL arms
+use \texttt{final\_validation.json} from 5 seeds each (eval seed 9000, 12
+episodes per seed, the same demand window across all 5 seeds). The two
+protocols are not paired: the baseline comparison uses 12 distinct demand
+windows, while the RL evaluation uses one repeated window across 5 training
+seeds, and the standard-deviation denominators differ (5 seeds vs 12
+episodes).
+
+\subsection{Artifact}
+\texttt{results/bandra\_baselines\_D95.json} and \texttt{.csv}, produced by
+\texttt{scripts/eval\_bandra\_baselines.py} (12 episodes, seeds 9000--9011).
+Per-episode KPIs for Greedy and LP are on disk and reproducible; the RL arms
+are the \texttt{runs/*-bandra-*/final\_validation.json} files.
+
+\subsection{Measured results}
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
+\toprule
+Method & SR & Empty km & Wait \\
+\midrule
+Greedy & 34.0\% $\pm$ 2.7 & 20.7 $\pm$ 1.5 & 1.08 $\pm$ 0.17 min \\
+LP & 39.7\% $\pm$ 2.2 & 98.4 $\pm$ 9.8 & 2.15 $\pm$ 0.17 min \\
+IPPO-200 & 34.1\% $\pm$ 1.0 & 170.6 $\pm$ 14.4 & 2.2 $\pm$ 0.16 min \\
+MAPPO-200 & 35.1\% $\pm$ 0.3 & 167.8 $\pm$ 6.8 & 2.2 $\pm$ 0.12 min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Headline}
+RL is within noise of Greedy on service rate at $\sim 8\times$ greedy's
+deadhead cost. LP dominates RL: 39.7\% vs $\sim$34\% SR at
+$0.58\times$ RL deadhead. On SR per 100 empty km the ranking is Greedy 164.2,
+LP 40.3, IPPO 20.0, MAPPO 20.9: Greedy tops this efficiency metric because it
+barely relocates, while LP buys its higher SR with $\sim 4.8\times$ Greedy's
+deadhead. The metric therefore supports ``LP is less deadhead-hungry than
+RL'', not ``LP is the most efficient policy''.
+
+\subsection{Conclusion}
+RL buys no service over greedy while spending $\sim 8\times$ greedy's
+deadhead; this is not an equal-budget comparison, so it does not establish
+that RL would lose at matched deadhead. LP dominates RL on the tradeoff
+frontier (higher SR at less than 60\% of the deadhead). RQ1/RQ2 therefore
+cannot claim ``RL beats baselines''; the supported claim is the tradeoff
+frontier above.
+
+\subsection{Standard deviations}
+All standard deviations in this report are sample std (ddof${}=1$) across
+seeds or episodes. The RL-arm SR stds are $\pm 1.0$ (IPPO-200) and
+$\pm 0.3$ (MAPPO-200); the corresponding population stds (ddof${}=0$) are
+$\pm 0.9$ and $\pm 0.3$. The table above uses sample std throughout; the
+conclusion is unchanged.
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{RL buys no service over greedy at roughly $8\times$ the deadhead}
+The central finding is that the learned policies match greedy on service rate
+while spending roughly $8\times$ as much deadhead distance on the five-seed
+final-validation protocol (170.6 vs 20.7 km). Section~\ref{sec:argmax}
+documents that this multiplier is evaluation-dependent: the same IPPO-200-s0
+checkpoint is 95.1 km on the pilot windows and 83.4 km in the 29-driver
+sweep. The LP baseline achieves higher service rate than RL while spending
+\emph{less} deadhead than RL (98.4 km vs $\sim$170 km), so it dominates RL on
+the tradeoff frontier. On SR per 100 empty km the ranking is Greedy 164.2,
+LP 40.3, IPPO 20.0, MAPPO 20.9: Greedy tops that efficiency metric because it
+barely relocates, so the metric does not make LP the most efficient policy.
+The ``RL beats baselines'' claim is not supported; the supported claim is that
+LP dominates RL and RL buys nothing over greedy.
+
+\subsection{Candidate explanations for why RL does not win}
+\begin{enumerate}[nosep]
+\item \textbf{Observability gap.} The LP forecasts with an EMA over all past
+      turns plus a 5-minute lookahead; the actor sees only 2 minutes of
+      demand history (4 turns at $dt=0.5$). The LP has an order-of-magnitude
+      advantage in temporal horizon.
+\item \textbf{Reward shape does not carry over.} On Bandra (5 training seeds
+      $\times$ 3 episodes) the measured shares of reward movement are:
+      served credit 59.0\% $\pm$ 3.0 / 59.0\% $\pm$ 1.1 (IPPO/MAPPO),
+      relocation bonus 21.2\% $\pm$ 4.4 / 22.3\% $\pm$ 2.8, waiting
+      10.4\% $\pm$ 1.5 / 9.9\% $\pm$ 1.3, empty-km cost 2.2\% $\pm$ 0.4 /
+      2.3\% $\pm$ 0.4, cancellation 6.5\% $\pm$ 1.1 / 6.3\% $\pm$ 1.1.
+      Served credit dominates; waiting is $\sim$0.17$\times$ the served
+      signal, not 15$\times$. The NYC16 90/6/2 shares do not apply because
+      $\gamma=5$ and the Bandra configuration pays the relocation bonus on
+      top of $\gamma$ rather than carving it out, so the reward-shape
+      explanation is not evidence about the Bandra policies.
+\item \textbf{Expected-value invariant was broken.} The relocator paid for the
+      whole job it caused without earning proportionally, and credit was
+      conditional on dispatch (0.68 on Bandra, 0.57 on NYC16). This was fixed
+      by raising the relocator share to 0.65.
+\item \textbf{Targeting is weak on Bandra.} Argmax picks the best legal
+      target on 5.1\% $\pm$ 6.9 of relocations for IPPO-200 and
+      8.8\% $\pm$ 6.6 for MAPPO-200, against chance 5.4\% $\pm$ 1.0 and
+      5.2\% $\pm$ 0.7 over 20.7 and 21.1 legal targets per move. The chosen
+      target holds 23\% / 30\% of the unmet demand available at the best
+      legal target (demand ratio 0.23 / 0.30), and only 36\% / 40\% of
+      relocations target a zone with any unmet demand. This is a Bandra
+      measurement: IPPO and MAPPO are both consistent with chance; the NYC16
+      51\% figure does not transfer.
+\end{enumerate}
+
+\subsection{Limitations}
+\begin{itemize}[nosep]
+\item Bandra RL checkpoints cannot load on NYC16 (different observation
+      dimension and zone count). No NYC16 RL results are reported. The two
+      tables are not directly comparable. On Bandra, Greedy vs LP uses paired
+      demand windows (base seeds 9000--9011), but the RL arms are evaluated
+      separately, so the RL-versus-baseline comparison is not paired.
+\item Final-iteration validation versus best-checkpoint selection: optimistic
+      selection would inflate RL by $\sim$1 pp.
+\item Reward-share and targeting numbers are 5 training seeds $\times$
+      3 episodes each, deterministic argmax.
+\end{itemize}
+
+\subsection{What would move the needle}
+\begin{enumerate}[nosep]
+\item \textbf{Longer demand history.} The actor sees 6.7\% of the episode
+      (4 of 60 turns); the LP has an EMA over all turns plus a 5-minute
+      lookahead.
+\item \textbf{Credit for good targeting.} Scale relocator credit by the
+      deficit relieved at the destination, not a flat share.
+\item \textbf{Lower $\alpha$ or cap the waiting term.} On Bandra waiting is
+      10.4\% / 9.9\% of reward movement, $\sim$0.17$\times$ the served
+      signal, so this is a much weaker lever than the NYC16 numbers
+      suggested.
+\item \textbf{Temperature on destination logits.} The entropy coefficient is
+      a dead lever (93--94\% max entropy in the relocate block); a
+      temperature on the destination logits would sharpen the argmax without
+      changing it.
+\end{enumerate}
+
+\subsection{Figures}
+All three degradation plots are regenerated from
+\texttt{results/shift\_eval/summary.json}. Each figure has two panels: left,
+Bandra RL arms (5 seeds); right, NYC16 baselines. The environments are not
+comparable, so lines must not be compared across panels. The Bandra arms hold
+$\sim$35--38\% SR across S0, S1, S2a--S2e, S3, S5, S6, S7, with only S4
+(cold-zone concentration) collapsing to $\sim$21\%; S6 equals S0 on Bandra
+because the test-split switch is a no-op there. The NYC16 baselines sit at
+different levels (Greedy $\sim$23--50\%, LP $\sim$47--80\%) and are shown only
+for completeness.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/degradation_service_rate.png}
+\caption{Frozen-policy service-rate degradation. Left: Bandra RL arms
+(5 seeds). Right: NYC16 baselines. Panels are separate environments and are
+not directly comparable. Bands are $\pm$1 sample std.}
+\label{fig:degradation-sr}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/degradation_empty_km.png}
+\caption{Empty-distance degradation. Left: Bandra RL arms (5 seeds). Right:
+NYC16 baselines. Panels are separate environments and are not directly
+comparable. Bands are $\pm$1 sample std.}
+\label{fig:degradation-km}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/degradation_avg_wait_min.png}
+\caption{Average wait-time degradation. Left: Bandra RL arms (5 seeds).
+Right: NYC16 baselines. Panels are separate environments and are not directly
+comparable. Bands are $\pm$1 sample std.}
+\label{fig:degradation-wait}
+\end{figure}
+
+\section*{Reproducibility}
+All figures and tables are generated from artifacts in the repository:
+\begin{itemize}[nosep]
+\item \texttt{runs/*-bandra-*/final\_validation.json} -- 30 training cells
+\item \texttt{results/bandra\_baselines\_D95.json} -- Greedy/LP baselines
+\item \texttt{results/bandra\_fleet\_D93/} -- fleet-size sweep
+\item \texttt{results/bandra\_argmax\_pilot\_D91/} -- argmax-vs-sampled pilot
+\item \texttt{results/shift\_eval/summary.json} -- S0--S7 shift evaluation
+\item \texttt{results/bandra\_terms.json} -- Bandra reward-share, targeting
+      and relocation measurements, 5 seeds $\times$ 3 episodes (per-seed files
+      alongside; \texttt{scripts/diag\_bandra\_terms.py})
+\item \texttt{docs/figures/} -- regenerated degradation figures
+\end{itemize}
+Artifact filenames retain internal experiment IDs. Code and artifacts:
+\url{https://github.com/sharifmdathar/marl-fleet-rebalancing}.
+
+\begin{thebibliography}{9}
+\bibitem{guo2021} X. Guo, N. S. Caros, and J. Zhao. Robust matching-integrated
+vehicle rebalancing in ride-hailing system with uncertain demand.
+\emph{Transportation Research Part B: Methodological}, 150, 2021.
+\bibitem{pettingzoo} J. K. Terry et al.\ PettingZoo: Gym for multi-agent
+reinforcement learning. \emph{NeurIPS}, 2021. arXiv:2009.14471.
+\end{thebibliography}
+
+\end{document}
