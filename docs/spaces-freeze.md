@@ -18,7 +18,10 @@ Observation: length **9**, per zone
 - own zone location (2)
 - own zone state (4)
 - pending riders, pending mask, inbound cars (3) — the inbound term is behind
-  `obs_inbound`, default **False** (D81)
+  `obs_inbound`. Env default **False** (D81); **`NYCConfig` True from D97**
+- demand history is `demand_history_len` turns per zone: 4 (2.0 min) by default,
+  **24 (12 min) in `NYCConfig` from D97**. It changes the flat vector
+  (283 -> 615), not the field count.
 
 MAPPO state: observation + 2 zone-tag terms in train mode.
 

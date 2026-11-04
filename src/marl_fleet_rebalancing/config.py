@@ -18,7 +18,9 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 3.3 (D82: NYC relocator payment shared along the relocation chain)
+    Version: 3.4 (D97: NYC observation carries the LP's information set —
+    D81 inbound channel and a 12-minute demand history. Observation space only;
+    no reward, action-space or dynamics change.)
     """
 
     # --- Fleet ---
@@ -249,6 +251,8 @@ class EnvConfig:
     # destination had no idle car left and riders still waiting). False = flat (D64).
     # D81: add to each zone's observation the cars already heading to every
     # zone (in flight, plus claimed earlier this turn), as a share of the fleet.
+    # Default stays False so old configs are unchanged; NYCConfig turns it on
+    # (D97) because no NYC training arm had ever seen it.
     obs_inbound: bool = False
     # D77: relocation is limited to the k nearest legal target zones. 0 = any zone.
     relocation_nearest_k: int = 0
@@ -294,6 +298,9 @@ class EnvConfig:
     # for no reason. Leave at 0.0; raise only as a small bridge if the
     # completion credit proves too slow to learn through.
     prospective_bonus_scale: float = 0.0
+    # Turns of per-zone pending history in the observation. 4 = 2.0 min at
+    # dt=0.5, i.e. 3.3% of a 60-minute NYC episode (D85). NYCConfig raises this
+    # to 24 (D97).
     demand_history_len: int = 4
     # D34: cap relocation arrivals per zone per turn at that zone's pending
     # demand. Zones act on the same pre-turn snapshot, so without a claim every
@@ -357,6 +364,24 @@ class NYCConfig(EnvConfig):
     relocator_requires_shortage: bool = False  # D66: reverted to flat D64 credit after negative 5-seed result
     relocator_share_is_split: bool = True  # D71: zone rewards sum to the team objective
     relocator_chain_share: bool = True  # D82: no zone is left with cost and no credit
+
+    # D97: the actor must see what the LP sees.
+    #
+    # MEASURED asymmetry (D85, D86): the LP carries an EMA over every past turn,
+    # a 5-minute lookahead and a global solve over all zones. The actor had 4
+    # turns (2.0 min) of demand history and no inbound channel at all, so the
+    # thing RL is supposed to win on -- anticipation -- was absent from its
+    # input. Neither change touches the reward (which still sums to the team
+    # objective, R), the action space, or the baselines.
+    #
+    # Both are set together deliberately: 200 iterations x 5 seeds is the unit
+    # of reportable work here, and separating them would cost twice the compute
+    # for a result that is still 1 arm. The cost is that a win (or loss) cannot
+    # be attributed to history length vs inbound.
+    #
+    # obs_dim 283 -> 615; checkpoints trained before this change do not load.
+    obs_inbound: bool = True
+    demand_history_len: int = 24
 
     # D64: 0.45 -> 0.65. D59 made the relocating zone pay for the WHOLE job it
     # caused, but did not raise what it earns, which broke the expected-value

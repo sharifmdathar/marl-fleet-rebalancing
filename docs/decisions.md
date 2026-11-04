@@ -2196,3 +2196,214 @@ of breadth.
 
 - **IPPO ≈ MAPPO:** null result confirmed — ~36% SR both at 200 iters, flat S0–S7 except S4.
   RQ2 answered negatively: no degradation divergence under reward changes at beta=0.06.
+
+---
+
+## D97 — 2026-10-30: NYC actor gets the LP's information set (env 3.4); reward exploitability audit
+
+- **Status:** change applied, 5-seed run launched, no result yet.
+- **Audit first (what could be gamed on `NYCConfig` presently):**
+
+  | term | value | can it be bought / gamed? |
+  |---|---|---|
+  | served | +1.0 gamma, on completion | no — the only term tied to the metric |
+  | relocator share | 0.65, **split out of gamma** (D71), chain-shared (D82) | no aggregate gain: zone rewards sum to R (`tests/test_reward_sums_to_objective.py`) |
+  | empty km | -0.06/km, charged to commander | cannot be avoided by churning; each km is billed |
+  | waiting | -0.2 x wait, charged to rider's zone | the only term that ranks *destinations* (D62) |
+  | cancel | -1.0 | —— |
+  | targeting bonus | **0** (D67) | off; pays outside R |
+  | prospective/arrival bonus | **0** (D28) | off; pays for arrival, not use |
+  | shortage gate | **off** (D66) | off; 5-seed negative |
+
+  Reward arithmetic re-checked against `beta * km < share * gamma * P(dispatch)`
+  at 2.95 km and 56.8%: 0.177 < 0.369, margin 1.41x (D64). No term pays without
+  an outcome; no term is charged to a zone that did not act.
+- **Two distortions left deliberately unchanged** (both are D-series decisions,
+  not defects): (i) the split gives 0.65 of a ride to the zone that moved the
+  car even when the move was not marginal — D66 was the fix and measured
+  negative; (ii) the credit fires at dispatch, not completion, because GAE
+  attenuates a 21-40-turn delay to 2.5% (D46/D48). Changing either reopens a
+  settled trade-off, so it is the user's call, not this entry's.
+- **Change (observation only — no reward, action or dynamics change):**
+  `NYCConfig.obs_inbound = True` and `NYCConfig.demand_history_len = 24`.
+  Env version 3.3 -> 3.4. obs_dim 283 -> 615 (16 zones).
+- **Why:** D85 measured that the actor saw 4 turns = 2.0 min of history, 3.3%
+  of a 60-minute episode, against an LP with an EMA over every turn plus a
+  5-minute lookahead and a global solve. D81's inbound channel existed but was
+  **off in every NYC arm ever trained**. The one axis RL is supposed to win on —
+  anticipation — was missing from its input. Neither change touches the
+  baseline or the metric.
+- **Confound, stated up front:** history length and inbound are changed
+  together. A 5-seed arm is the smallest reportable unit; splitting them would
+  double the compute for a still-1-arm result. Any outcome is attributable to
+  "the information set", not to either field.
+- **Invalidation:** checkpoints trained before this entry do not load
+  (obs_dim mismatch). D89 already recorded that every saved NYC checkpoint was
+  stale, so nothing usable is lost.
+- **Not changed:** the evaluation protocol. `_evaluate_validation` batches all
+  zones on the pre-turn snapshot and steps them together; the baseline harness
+  steps zone-by-zone. Measured on Bandra, same checkpoint and seeds: 35.1% /
+  159.6 km batched vs 36.6% / 143.5 km sequential. The 1.5 pp gap is larger
+  than the -0.96 pp that D86 uses to place every RL point below the LP
+  frontier, so this must be settled before any NYC comparison is reported.
+- **Running:** MAPPO, `--env nyc --iterations 200`, seeds 0-4, 5 processes x
+  1 rollout worker each (5 of 12 cores), `--device cpu`.
+  Dirs `runs/nyc16-h24-obs-s{0..4}`.
+
+## D98 — env 3.4 information set: 5 seeds, paired, still behind the LP
+
+- Date: 2026-10-30, Status: measured, 5 seeds x 12 val windows, argmax
+- Arm: MAPPO 200 iterations, `obs_inbound=True`, `demand_history_len=24`
+  (env 3.4, D97). Seeds 0-4, `runs/nyc16-h24-obs-s{0..4}`.
+- Protocol: ONE harness for every arm — `scripts/diag_objective_gap.py`,
+  sequential zone-by-zone, 12 val windows (seeds 12000-12011), paired.
+  This is the first NYC comparison in the log not built from two protocols.
+
+| arm | SR % | empty km | wait | reward/ep |
+|---|---|---|---|---|
+| Greedy | 41.2 ± 8.6 | 64.9 | 2.45 | -94.3 |
+| **LP** | **67.9 ± 6.9** | **285.6** | 2.73 | **+4.4** |
+| s0 | 66.5 | 456.7 | 2.63 | -10.6 |
+| s1 | 66.0 | 381.6 | 2.84 | -8.8 |
+| s2 | 64.6 | 434.5 | 2.69 | -15.5 |
+| s3 | 64.4 | 409.2 | 2.77 | -13.0 |
+| s4 | 60.3 | 356.1 | 2.72 | -26.8 |
+
+Paired vs LP (per-seed mean of 12 window differences, n=5 seeds):
+
+| metric | per seed | mean ± se |
+|---|---|---|
+| SR pp | -1.35, -1.92, -3.27, -3.46, -7.63 | **-3.53 ± 1.10** |
+| empty km | +171.1, +96.0, +148.9, +123.6, +70.5 | **+122.0 ± 18.0** |
+| wait min | -0.10, +0.11, -0.04, +0.04, -0.00 | +0.00 ± 0.04 |
+| reward/ep | -15.0, -13.2, -19.8, -17.3, -31.1 | -19.3 ± 3.2 |
+
+- **Verdict: the information set did not close the gap.** Every seed is behind
+  LP on service AND worse on deadhead; wait is a tie. Same shape as D71's arm
+  (2-minute memory: -0.6 pp, +128 km), so 12 minutes of history plus the
+  inbound channel bought no service. Negative result, recorded so it is not
+  re-derived.
+- **Batched vs sequential harness, re-confirmed on NYC:** same 3 checkpoints,
+  batched `_evaluate_validation` reads 65.7 / 64.9 / 63.7, sequential 66.5 /
+  66.0 / 64.6 (mean +0.93 pp). Direction matches Bandra's 1.5 pp. Until
+  `_evaluate_validation` steps zone-by-zone, `final_validation.json` is not
+  comparable to a baseline row.
+
+### Training length: the plateau is at ~100 iterations, not 200
+
+5-seed mean, sampled rollouts, 20-iteration buckets:
+
+| iters | 1-20 | 41-60 | 81-100 | 121-140 | 161-180 | 181-200 |
+|---|---|---|---|---|---|---|
+| SR % | 66.95 | 69.48 | **69.80** | 69.71 | 69.51 | 69.36 |
+| empty km | 477.9 | 460.8 | 453.3 | 458.7 | 454.1 | 452.9 |
+| wait | 2.85 | 2.68 | 2.66 | 2.63 | 2.66 | 2.65 |
+| entropy | 1.70 | 1.45 | 1.35 | 1.30 | 1.30 | 1.29 |
+| expl. var | 0.32 | 0.36 | 0.35 | 0.36 | 0.37 | 0.37 |
+
+Per-seed OLS slope over iterations 101-200: SR -0.16 pp/100 iters on average
+(individual seeds -1.03 to +0.95, three down two up). The return is flat as
+well (`mean_reward_per_turn` 0.00 across all 200 iterations on all 5 seeds),
+and PPO diagnostics are healthy throughout (clip 0.066, EV 0.37) — so the
+flatness is convergence, not a stalled optimiser.
+- The frozen policy moved 63.5 -> 64.1 SR over it 100-200, with seed sd 1.3 pp.
+  Two of five seeds peaked at iteration 50 (s1, s4); s4 ended 3.1 pp below its
+  own peak while shedding 70 km, i.e. it walked along the service/deadhead
+  frontier rather than out.
+- **Inferred (not run):** more iterations at this configuration are expected to
+  add ~0 on all three metrics. The measured slopes bound it at well under
+  1 pp of service per extra 100 iterations, against a 3.5 pp deficit. D71's
+  40-iteration warm restart from a comparable plateau also added nothing.
+  Direct test, if wanted: warm restart 5 seeds x +200 iterations (~2 h at 3
+  concurrent). It is the only remaining way to settle "train longer".
+- **Why it saturates at all (measured, D62):** dispatch is 98-99% top-1 and the
+  relocate destination logits span 0.4 nats, i.e. 93% of maximum entropy.  There is almost no gradient left to spend. Adding iterations does not create one;
+  changing the destination head (scale/temperature, or a global allocation
+  head) would.
+- **Partly superseded by D99.** A supervised fit into this same 615->256->256->33
+  head reaches LP-level service, so the head is not too weak to *express* the
+  behaviour; what it lacks is a gradient that points there. Head surgery is
+  therefore not required by the evidence, and the D62/D63 reading above should
+  be quoted as "the reward gives this head almost no ranking signal", not as
+  "the architecture cannot represent the LP".
+
+## D99 — the RL gap to the LP is not the architecture: cloning the LP into the same actor closes it
+
+- Date: 2026-10-30, Status: measured, diagnostic probe (1 fit per variant, not
+  5 seeds), no default changed
+- **Question opened by D98.** The 5-seed arm is -3.53 +- 1.86 pp service and
+  +122.0 +- 9.9 km against the LP. Two candidates: (a) the per-zone 33-way head
+  cannot express the LP's behaviour, because the LP solves a coupled 16x16
+  transfer problem and a per-zone argmax cannot say "the fourth car goes to
+  zone 7"; (b) the head can express it and PPO does not find it. D98 could not
+  tell these apart, and I had leaned toward (a) in the D98 write-up.
+
+**Probe.** `scripts/diag_bc_lp.py` fits the tuned LP's actions by masked
+cross-entropy into the *exact* actor the RL arm uses: `ZoneActorCritic`
+615 -> 256 -> 256 -> 33, flat MLP, parameter-shared, `arch="mlp"`, same
+observation (env 3.4, `obs_inbound` + `demand_history_len=24`). No reward, no
+rollouts, no PPO. 60 train windows = 116,160 decisions, 20 epochs, ~2 min CPU.
+Three weights on the relocate class, which is only 6.0% of decisions (88.3%
+no-op, 5.6% dispatch) so plain CE collapses to always-no-op. Scored argmax by
+`scripts/diag_objective_gap.py` on the same 12 val windows, seeds 12000-12011,
+same protocol as D98.
+
+| arm | SR % | empty km | wait | reloc/ep | R/ep |
+|---|---|---|---|---|---|
+| **LP** | **67.9 +- 6.9** | **285.6 +- 29.2** | 2.73 | 111.3 | **+0.2 +- 24.5** |
+| bc (weight 5) | 67.5 +- 5.6 | 310.8 +- 26.8 | 2.74 | 122.1 | -3.0 +- 23.1 |
+| bc (weight 10) | 69.9 +- 3.9 | 359.3 +- 23.2 | 2.70 | 148.4 | +3.4 +- 16.5 |
+| RL, 5-seed mean | 64.4 | 407.6 | 2.73 | 124.3 | -20.3 |
+
+Paired against the LP, per window (n=12):
+
+| arm | SR pp | km | reward |
+|---|---|---|---|
+| bc weight 5 | **-0.38 +- 1.43** | **+25.3 +- 8.6** | -3.2 +- 4.8 |
+| bc weight 10 | +2.05 +- 1.40 | +73.7 +- 10.7 | +3.2 +- 5.3 |
+| RL (5-seed mean) | -3.53 +- 1.86 | +122.0 +- 9.9 | -20.5 +- 7.5 |
+
+Paired BC (weight 5) against the RL 5-seed per-window mean: **SR +3.14 +- 1.53,
+km -96.8 +- 10.2, R +17.3 +- 6.8.** BC weight 10: SR +5.58 +- 1.27, km -48.3.
+- **Reading 1 — hypothesis (a) is dead.** The same observation and the same
+  33-way head, given supervised targets instead of a reward, reach LP-level
+  service at ~1.09x the LP's deadhead, in two minutes of CPU, where 5 seeds x
+  200 iterations of PPO land 3.5 pp and 122 km behind. The actor class is
+  sufficient. The D98 gap is optimisation / credit assignment.
+- **Reading 2 — where the deadhead actually comes from (measured
+  decomposition).** RL moves 124.3 cars per episode 3.28 km each (407.6 km);
+  the LP moves 111.3 cars 2.57 km each (285.6 km). The 122.0 km gap is
+  +13% relocation count (33.3 km) and +28% leg length (88.8 km): **73% of the
+  excess distance is longer legs, not more of them.** The BC clone reproduces
+  the LP's leg length almost exactly (2.55 km/reloc at weight 5). So at
+  constant relocation rate the destination choice is the dominant cost, which
+  is the D63 targeting weakness showing up in kilometres rather than nats.
+  This corrects a guess I made in conversation that the gap was mostly
+  relocation *volume*; that guess was wrong and the count term is the smaller
+  one.
+- **Reading 3 — the clone does not reproduce the LP's targeting, only its
+  level.** Teacher-forced on val windows (scored on the LP's own trajectory, so
+  no covariate shift): exact relocation target 36.2% (weight 5) / 45.0%
+  (weight 10), against 76.3% / 83.5% in-sample, and dispatch 100% in both
+  (the LP always takes the first legal dispatch slot, so that action is
+  computable from the mask alone). The LP's destination depends on internal
+  state the observation does not carry — an EMA over every past turn and a
+  transfer plan refreshed every `rebalance_frequency_minutes` — so ~45% is
+  plausibly the information ceiling of this observation for this teacher.
+  Two consequences: the clone earns the LP's service without the LP's
+  targeting, and the missing target accuracy is a real residual, not a
+  fitted-noise artefact.
+- **Limits.** One fit per class weight, not 5 seeds; the SEs above are across
+  the 12 paired windows and do not include fit-to-fit variance, so this is a
+  representation test, not a reportable method result. BC distils the baseline
+  itself, so it is circular as a method and must never be reported as "our
+  method beats the LP". Train windows only; val/test untouched. And the probe
+  separates architecture from everything else only — it does not show that PPO
+  under this reward and this budget *cannot* reach the same place.
+- **What it rules in.** A BC warm start, or DAgger on the BC policy's own
+  states (which targets the 45% teacher gap directly), followed by PPO
+  fine-tuning. Both are cheap next to a 200-iteration x 5-seed arm, and both
+  now have a measured reason to expect a result rather than a hope.
+- Artifacts: `scripts/diag_bc_lp.py`, `results/bc_lp_closedloop_full.json`,
+  `results/bc_lp_probe.json`, checkpoints `runs/nyc16-bc-lp{,-rw5,-rw10}`,
+  demonstrations `runs/bc-lp/`.
