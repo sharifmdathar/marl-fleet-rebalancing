@@ -8,7 +8,8 @@ Reads results/shift_eval/summary.json (policy -> shift -> metric stats)
 and writes one PNG per KPI: service_rate, empty_km, avg_wait_min.
 
 The summary mixes two environments: Bandra RL checkpoints and NYC16
-baselines. They are not comparable, so each figure has two panels.
+baselines (shift_eval.py evaluates baselines with NYCConfig). They are not
+comparable, so each figure has two panels.
 Bands are +/- 1 sample std (ddof=1) across seeds.
 """
 

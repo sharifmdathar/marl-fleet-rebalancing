@@ -410,6 +410,56 @@ $\pm 0.3$ (MAPPO-200); the corresponding population stds (ddof${}=0$) are
 $\pm 0.9$ and $\pm 0.3$. The table above uses sample std throughout; the
 conclusion is unchanged.
 
+\subsection{S0 tradeoff}
+\label{subsec:pareto-s0}
+Figure~\ref{fig:pareto-s0} plots S0 service rate against empty distance for
+the six RL arms and for both baselines, at the 5-seed protocol used by the RL
+arms (Greedy/LP over base seeds 9000--9004; the 12-episode protocol in
+Section~\ref{sec:baselines} is the same environment but a different window
+set, so its levels differ by $\sim$1--2 pp).
+
+Three facts stand out. Centralized LP dominates every decentralized RL arm on
+both axes at S0: 41.2\% $\pm$ 2.6 SR at 98.7 $\pm$ 5.4 km, against
+$\sim$36.1\% at 140--160 km for the RL arms. Greedy is the most
+mileage-efficient policy, reaching 35.3\% $\pm$ 2.0 SR on 21.1 $\pm$ 1.1 km
+of deadhead. And the RL arms buy only $+0.8$ pp of service over Greedy
+(36.1\% vs 35.3\%) while spending $\sim$7$\times$ its deadhead ($\sim$145 km
+vs 21 km). That is the coordination cost of decentralized MARL without global
+optimization: the policies relocate substantially without converting that
+distance into served demand.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/pareto_service_vs_empty.png}
+\caption{S0 tradeoff on Bandra. Each point is a 5-seed mean $\pm$ sample std
+(ddof${}=1$); Greedy and LP are Bandra runs from
+\texttt{results/bandra\_baselines\_D95.json}. Lower-right is better. LP
+dominates every RL arm on both axes; Greedy is cheapest but serves least.}
+\label{fig:pareto-s0}
+\end{figure}
+
+\subsection{Retention under demand shift}
+\label{subsec:retention}
+Figure~\ref{fig:retention-shift} divides each arm's shifted SR by its own S0.
+The RL arms are flat across the scale shifts ($0.5\times$--$2\times$), the S1
+permutation, S3 temporal, S5 burst and S7 drift, with retention
+$\approx 1.0$ and seed spreads under $\pm 0.05$. They collapse only where the
+imbalance is spatial rather than scalar, at S4 (cold-zone concentration),
+which retains 0.575--0.619 across the six arms. Greedy and LP are absent from
+this axis by construction: no Bandra shift sweep exists for them, and the
+Greedy/LP rows in \texttt{results/shift\_eval/summary.json} are NYC16 runs
+(\texttt{shift\_eval.py} constructs baselines with \texttt{NYCConfig()}), so
+normalizing them against Bandra S0 would compare environments.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/retention_by_shift.png}
+\caption{Retention under demand shift (Bandra). Bars: each arm's shifted SR
+divided by that same arm's S0 SR, 5 seeds per arm; error bar is the propagated
+sample std (ddof${}=1$). RL arms only, for the reason given in the text.}
+\label{fig:retention-shift}
+\end{figure}
+
 \section{Discussion and Limitations}
 \label{sec:discussion}
 
