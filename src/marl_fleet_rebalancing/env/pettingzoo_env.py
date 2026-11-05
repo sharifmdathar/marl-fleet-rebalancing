@@ -61,6 +61,37 @@ from marl_fleet_rebalancing.demand.two_zone_hotspot import (
 _M_PER_KM = 1000.0
 
 
+class NYCOrderGeneratorWithEconomics:
+    """Thin wrapper so NYC windows can optionally report revenue/profit without
+    touching the rest of the generation semantics."""
+
+    def __init__(
+        self,
+        base: Any,
+        revenue_per_completion: float = 0.0,
+        cost_per_km: float = 0.0,
+    ) -> None:
+        self._base = base
+        self.revenue_per_completion = revenue_per_completion
+        self.cost_per_km = cost_per_km
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def make_orders_for_window(self, *args, **kwargs):
+        return self._base.make_orders_for_window(*args, **kwargs)
+
+    def generate_orders(self, *args, **kwargs):
+        return self._base.generate_orders(*args, **kwargs)
+
+    def emit(self, env_state):
+        for o in self._base.emit(env_state):
+            if o.status == "completed":
+                o["revenue"] = self.revenue_per_completion
+                o["cost"] = self.cost_per_km * o.get("distance_km", 0.0)
+            yield o
+
+
 def _haversine_km(a, b) -> float:
     """Great-circle distance in km between two (lon, lat) pairs.
 
@@ -188,6 +219,10 @@ class RideGymAEC(AECEnv):
         # Reward tracking (for computing the custom reward)
         self._prev_served: int = 0
         self._episode_empty_m: float = 0.0
+        self._idle_time_per_zone: np.ndarray | None = (
+            np.zeros(self._num_zones, dtype=np.float32)
+            if getattr(config, "nyc_economic_metrics", False) else None
+        )
 
         # Per-turn agent-invariant caches, rebuilt after every env step
         self._pending_features = np.zeros(
@@ -402,6 +437,14 @@ class RideGymAEC(AECEnv):
         elif mode != "none":
             raise ValueError(f"Unknown demand_shift_mode: {mode!r}")
 
+        if config.order_source == "nyc" and getattr(
+            config, "nyc_economic_metrics", False
+        ):
+            gen = NYCOrderGeneratorWithEconomics(
+                base=gen,
+                revenue_per_completion=config.nyc_revenue_per_completion,
+                cost_per_km=config.nyc_cost_per_km,
+            )
         return gen
 
     @staticmethod
@@ -638,6 +681,10 @@ class RideGymAEC(AECEnv):
         zone_idle = np.zeros(self._num_zones, dtype=np.float32)
         zone_dispatchable = np.zeros(self._num_zones, dtype=np.float32)
         allow_reloc_disp = getattr(cfg, "allow_relocating_dispatch", True)
+        self._idle_time_per_zone: np.ndarray | None = (
+            np.zeros(self._num_zones, dtype=np.float32) if getattr(cfg, "nyc_economic_metrics", False) else None
+        )
+        self._last_step_time = self.env.time
 
         for did in range(self._num_drivers):
             d = self._last_obs[did]["self"]
@@ -747,6 +794,10 @@ class RideGymAEC(AECEnv):
         # Reset reward tracking and attribution
         self._prev_served = 0
         self._episode_empty_m = 0.0
+        self._episode_revenue = 0.0
+        self._episode_cost = 0.0
+        self._episode_idle_seconds = 0.0
+        self._episode_last_time = self.env.time
         self._order_dispatcher.clear()
         self._seen_completed_ids.clear()
         self._driver_commander.clear()
@@ -766,8 +817,21 @@ class RideGymAEC(AECEnv):
         self._claimed_orders_this_turn: set[int] = set()
         self._reloc_inbound_this_turn: dict[int, int] = {}
         self._seen_cancelled_ids: set[int] = set()
+        if self._idle_time_per_zone is not None:
+            self._idle_time_per_zone[:] = 0.0
+        self._episode_revenue = 0.0
+        self._episode_cost = 0.0
+        self._episode_idle_seconds = 0.0
+        self._episode_last_time = self.env.time
 
         self._rebuild_caches()
+
+        self._episode_revenue = 0.0
+        self._episode_cost = 0.0
+        self._episode_idle_seconds = 0.0
+        self._episode_last_time = self.env.time
+        if self._idle_time_per_zone is not None:
+            self._idle_time_per_zone[:] = 0.0
 
         self.agents = self.possible_agents[:]
         self._agent_order = self._rng.permutation(self._num_zones)
@@ -1065,12 +1129,31 @@ class RideGymAEC(AECEnv):
             # D49: the dispatcher is paid the FULL served credit, always.
             #
             # D48 paid it (1 - relocator_share) whenever the car had been
-            # relocated. That was wrong: the zone did identical work either way
-            # -- it dispatched a car to a rider and the ride completed -- so it
-            # earned 45% less for using the car another zone had pre-positioned
-            # for it. That penalised the outcome rebalancing exists to produce,
-            # and under team_share=0.2 the local term carries 80% of the weight,
-            # so the penalty was real rather than diluted.
+            # relocated. That was wrong: the zone did identical work either
+            # way -- it dispatched a car to a rider and the ride completed --
+            # so it earned 45% less for using the car another zone had
+            # pre-positioned for it. That penalised the outcome rebalancing
+            # exists to produce, and under team_share=0.2 the local term
+            # carries 80% of the weight, so the penalty was real rather than
+            # diluted.
+            #
+            # Economic mirrors tracked separately so the reward stays unchanged.
+            if getattr(self._cfg, "nyc_economic_metrics", False):
+                dd = getattr(order, "assigned_driver", None)
+                reloc_dist = 0.0
+                if did is not None:
+                    reloc_target = self._driver_relocation_target.get(dd)
+                    if reloc_target is not None:
+                        src = cents[dispatcher]
+                        dst = cents[reloc_target]
+                        reloc_dist = float(np.linalg.norm(src - dst))
+                pickup_dist = float(np.linalg.norm(cents[dispatcher] - cents[_zone_int_id(order.origin_zone)]))
+                trip_dist = float(order._trip_distance_km) if hasattr(order, "_trip_distance_km") else 0.0
+                self._episode_revenue += float(getattr(self._cfg, "nyc_revenue_per_completion", 0.0))
+                self._episode_cost += (
+                    float(getattr(self._cfg, "nyc_cost_per_km", 0.0)) * (reloc_dist + pickup_dist + trip_dist)
+                )
+                self._episode_idle_seconds += float(getattr(order, "wait_time", 0.0)) * 60.0
             #
             # The relocator's share is a BONUS for a separate action, not a
             # slice carved out of the dispatcher's credit. Both agents did
