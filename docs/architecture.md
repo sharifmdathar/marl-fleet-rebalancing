@@ -33,7 +33,7 @@ marl_fleet_rebalancing/
                                      # to runs/ (git-ignored)
     evaluate.py                      # frozen policy multi-seed eval & MP4/interactive viewer
     shift_eval.py                    # frozen-policy eval across S0-S6 -> results/shift_eval/
-    plot_shifts.py                   # degradation curves from summary.json -> results/figures/
+    plot_shifts_v2.py                # NYC16 shift figures -> results/figures/
     tune_lp_baseline.py              # LP baseline hyperparameter sweep (train/val shifts only)
   networks/
     encoder.py                       # obs flattening + ZoneActorCritic MLP
@@ -55,7 +55,7 @@ Still empty (only `__init__.py`):
 - `shifts/` — planned for demand shift generators
 
 Populated since: `agents/` (ippo.py, mappo.py), `networks/` (encoder.py),
-`experiments/` (train.py, evaluate.py, shift_eval.py, plot_shifts.py,
+`experiments/` (train.py, evaluate.py, shift_eval.py, plot_shifts_v2.py,
 tune_lp_baseline.py), `baselines/` (greedy, lp).
 
 ### RideGym interface contract (do not break)

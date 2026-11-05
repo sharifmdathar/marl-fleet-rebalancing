@@ -1,0 +1,10 @@
+{
+  "state": "finished",
+  "timestamp": "2026-11-05T06:35:10+05:30",
+  "what_was_done": [
+    "cleaning up Bandra framing from docs/report.tex",
+    "removing Bandra from README.md",
+    "regenerating report figures from NYC summaries"
+  ],
+  "not_started_or_left_running": []
+}

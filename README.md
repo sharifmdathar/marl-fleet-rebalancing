@@ -39,14 +39,14 @@ mise exec -- python scripts/run_training.py
 
 # Or train directly
 mise exec -- python -m marl_fleet_rebalancing.experiments.train \
-    --env bandra --algo mappo --seed 0 --iterations 20
+    --env nyc --algo mappo --seed 0 --iterations 200
 
 # Run tests
 mise exec -- pytest
 ```
 
-Note: `main.py` is a visualization smoke test on the Bandra toy env only —
-experiments never import from it.
+Note: `main.py` is a visualization smoke test only; experiments never
+import from it.
 
 ## Training & evaluation
 
@@ -70,18 +70,18 @@ See `IMPROVEMENTS.md` for the complete list of improvements and their commands.
 
 ## Degradation Curves
 
-Stress-testing frozen policies under the S0–S7 shift taxonomy, 5 seeds,
-deterministic argmax actions: IPPO-it40 / MAPPO-it80 / IPPO-it200 /
-MAPPO-it200 vs greedy and the re-tuned LP baseline (D89). Figures regenerate
-with `plot_shifts` after a shift eval run.
+Stress-testing frozen policies under the S0–S7 shift taxonomy on NYC16,
+5 seeds, deterministic argmax actions: MAPPO-200 and IPPO-200 vs greedy and
+the re-tuned LP baseline. Figures regenerate with `plot_shifts_v2` after a
+shift eval run.
 
-![Service rate across shifts](docs/figures/degradation_service_rate.png)
-![Empty distance across shifts](docs/figures/degradation_empty_km.png)
-![Average wait across shifts](docs/figures/degradation_avg_wait_min.png)
+![Service rate, empty distance and wait across shifts](docs/figures/degradation_metrics.png)
+![Retention across shifts](docs/figures/retention_by_shift.png)
+![S0 service vs empty distance](docs/figures/pareto_service_vs_empty.png)
 
 Caveat: these curves use greedy (argmax) frozen actions. With sampled actions
-the same four checkpoints all score ~72% service rate on S0; the
-argmax-vs-sampled gap is itself a measured result (see D89).
+the same checkpoints score higher on S0; the argmax-vs-sampled gap is itself
+a measured result (see D89).
 
 ## Repo map
 
@@ -106,18 +106,16 @@ rules: `AGENTS.md`.
 
 ## Current status
 
-- Env overhauled (D22–D26): zone ownership, neighbor relocation, reward
-  rescale (D25), winlim 500. Config is the contract — no magic numbers.
-- Baselines tuned (D27): the LP rebalancer leads every shift; RL policies are
-  not yet competitive.
-- Both PPO variants **collapse late in training** under the current reward
-  economics (relocation becomes net-negative), so checkpoint selection by
-  validation is the load-bearing protocol — it had two bugs (train-split
-  selection + training-RNG contamination), fixed 2026-09-17 and
-  regression-locked in `tests/test_training_validation.py`.
-- 2026-10-08 (D89): all checkpoints under `runs/` predate the current
-  obs-encoder and no longer load; IPPO and MAPPO were retrained (40/80/200
-  iters) and re-evaluated across S0–S7 against a re-tuned LP
-  (`lookahead=5.0`, `deficit_penalty_scale=1.0`). LP leads the frontier
-  (~71% service @ ~291 km on S0); RL sits below it on service and above it on
-  empty distance, as in D79–D81. H1–H4 remain unanswered.
+- Study environment is NYC16 (16 real FHVHV taxi zones, 26 drivers, 130
+  orders/hour). The synthetic Bandra toy env is retained only for fast unit
+  tests and visualization; it is not a study environment.
+- Baselines tuned on NYC16 training windows: the LP rebalancer leads the
+  service/deadhead frontier. LP at S0: 69.7% service at 290 empty km.
+- MAPPO-200 (env 3.4, 5 seeds, deterministic argmax) serves 64.2% at 397 km
+  on S0. IPPO-200 is trained on the same protocol. Both degrade most under
+  S4 cold-zone concentration; the LP is the most robust arm there.
+- Checkpoint selection uses the held-out validation split only. The 200-iter
+  arm plateaus around iteration 100; validation is the load-bearing protocol
+  and is regression-locked in `tests/test_training_validation.py`.
+- H1–H4 remain open; the measured result so far is the degradation curve and
+  the frontier gap, not a difference between IPPO and MAPPO.
