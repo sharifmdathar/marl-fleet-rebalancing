@@ -162,8 +162,14 @@ class ZoneAttentionEncoder(nn.Module):
         self_ctx_dim = 2 + 4  # zone_location + zone_state
         self.order_embed = nn.Sequential(nn.Linear(7, embed_dim), nn.Tanh())
         self.order_query = nn.Linear(self_ctx_dim, embed_dim)
+        # D100: the zone embedding also carries the RELATIVE geometry of that
+        # zone to the acting zone (dx, dy, dist), so destination scoring can
+        # reason about space without a learned per-zone id. Fixed zone ids
+        # (nn.Embedding) break permutation equivariance: under a spatial
+        # permutation of demand the same physical zone keeps its old id and
+        # the network cannot transfer what it learned from its neighbour.
         self.zone_embed = nn.Sequential(
-            nn.Linear(4 + hist_len, embed_dim), nn.Tanh(),
+            nn.Linear(4 + hist_len + 3, embed_dim), nn.Tanh(),
         )
         self.zone_query = nn.Linear(self_ctx_dim, embed_dim)
         self.neighbor_bias = nn.Parameter(torch.tensor(3.0))
@@ -203,10 +209,10 @@ class ZoneAttentionEncoder(nn.Module):
         # D81: with `inbound`, each destination also carries the cars already
         # heading there, so zones can avoid piling onto one need.
         self.dest_bias = nn.Linear(4 + hist_len + int(inbound), 1)
-        # Per-zone identity, so the head can reason about distance-to-each
-        # destination rather than about an anonymous pooled vector.
-        self.zone_idx = nn.Embedding(num_zones, 2)
-        self.zone_centroid = nn.Linear(2, 2, bias=False)
+        # D100: geometry comes from the real normalised centroids in the
+        # `zone_xy` buffer, NOT from a learned per-zone index embedding. A
+        # learned id is memorised for fixed zone numbers 0..Z-1, so a spatial
+        # permutation of the map leaves the network unable to generalise.
         self.travel_cost = nn.Linear(2, 1)
         # D75: the term above is linear in (target - own position), so the own
         # position cancels across targets and no distance can be expressed.
@@ -235,7 +241,11 @@ class ZoneAttentionEncoder(nn.Module):
         new = {k: v for k, v in self.state_dict().items()
                if k.startswith(("zone_xy", "dist_cost"))}
         new["dist_input_scale"] = torch.tensor(1.0)  # pre-scale checkpoints trained unscaled
-        return super().load_state_dict({**new, **state_dict}, strict=strict, **kwargs)
+        # D100 removed the memorised zone-id embedding. Drop its keys from
+        # older state dicts instead of failing on unexpected entries.
+        legacy = {k: v for k, v in state_dict.items()
+                  if not k.startswith(("zone_idx.", "zone_centroid."))}
+        return super().load_state_dict({**new, **legacy}, strict=strict, **kwargs)
 
     def _slice(self, obs: torch.Tensor, name: str) -> torch.Tensor:
         lo, hi = self._offsets[name]
@@ -274,7 +284,15 @@ class ZoneAttentionEncoder(nn.Module):
         order_attn = torch.softmax(order_logits, dim=-1) * has_pending.float()
         order_pool = (order_attn.unsqueeze(-1) * order_emb).sum(1)
 
-        zone_feat = torch.cat([all_zone_state, demand_hist], dim=-1)
+        # D100: relative geometry (dx, dy, dist) per zone, from the real
+        # centroids. This is the only spatial identity a zone gets, and it is
+        # invariant to renaming the zones: permute `zone_xy` and these rows
+        # permute with it.
+        geo = self.zone_xy.unsqueeze(0) - zone_location.unsqueeze(1)  # (B, Z, 2)
+        dist = geo.norm(dim=-1)                                      # (B, Z)
+        zone_feat = torch.cat(
+            [all_zone_state, demand_hist, geo, dist.unsqueeze(-1)], dim=-1,
+        )
         zone_emb = self.zone_embed(zone_feat)
         zq = self.zone_query(self_ctx).unsqueeze(1)
         zone_logits = (zq * zone_emb).sum(-1) / self._attn_scale
@@ -307,27 +325,25 @@ class ZoneAttentionEncoder(nn.Module):
 
         # Travel cost from the acting zone's centroid to each destination's, so
         # deadhead distance can enter the choice rather than only being billed
-        # afterwards. Each destination is identified by a learned index
-        # embedding, which the attention stack already treats as the zone's
-        # identity; the relative offset to the acting zone is then computed from
-        # those per-zone vectors. This avoids threading zone centroids through
-        # the build API, and keeps the term fully learned.
-        cents = self.zone_centroid(self.zone_idx.weight)        # (Z, 2)
-        geo = torch.stack([
-            cents[:, 0].unsqueeze(0) - zone_location[:, 0:1],
-            cents[:, 1].unsqueeze(0) - zone_location[:, 1:2],
-        ], dim=-1)                                              # (B, Z, 2)
+        # afterwards. `geo`/`dist` are the true normalised centroid offsets
+        # computed above, so this term is equivariant under a relabelling of
+        # the zones.
         dest = dest + self.travel_cost(geo).squeeze(-1)
-        dist = (self.zone_xy.unsqueeze(0) - zone_location.unsqueeze(1)).norm(dim=-1)
         dest = dest + self.dist_cost((dist * self.dist_input_scale).unsqueeze(-1)).squeeze(-1)
 
         # Scatter into the action head. Relocation action for zone j is
         # 1 + max_pending + j. Self-targeting is already excluded by the env:
         # `_legal_relocate_targets` skips `j == zone_idx`, and the action mask
         # enforces it, so no extra masking is needed here.
-        n_reloc = dest.shape[1]
-        base = 1 + self._max_pending
-        logits[:, base:base + n_reloc] = logits[:, base:base + n_reloc] + dest
+        # D100: relocation logits come 100% from the equivariant `dest` head.
+        # Adding `dest` onto the pooled `self.actor(h)` slice left the pooled
+        # relocation columns trainable, and `self.actor` is a plain Linear over
+        # the pooled context, which is permutation-invariant -- so part of the
+        # relocation decision was still fixed-zone memorisation. Slice the
+        # pooled head down to the stay/dispatch logits and concatenate, which
+        # keeps `actor`'s shape unchanged for checkpoint compatibility.
+        base_logits = self.actor(h)[:, :1 + self._max_pending]
+        logits = torch.cat([base_logits, dest], dim=-1)
 
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, float("-inf"))

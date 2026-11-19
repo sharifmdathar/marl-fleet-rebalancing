@@ -48,7 +48,7 @@ data/
   zone_partition.json                # 12-zone 3x4 mapping, verified 1464/1464 nodes
   nyc/                               # NYC pipeline output (git-ignored):
                                      # zone_centroids.csv, manhattan.gpickle
-                                     # (4868 nodes), splits/ 84 train / 12 val / 12 test
+                                     # (4861 nodes), splits/ 84 train / 12 val / 12 test
 ```
 
 Still empty (only `__init__.py`):

@@ -54,6 +54,7 @@ dataset/
 *.wav
 *.png
 !results/figures/*.png
+!docs/paper_v2/figs/*.png
 *.jpg
 *.jpeg
 *.gif
@@ -65,3 +66,25 @@ runs/
 # Eval artifacts: regenerated per run, never committed. All pre-env-2.3
 # results were deleted as invalid.
 results/
+
+# Local tooling / scratch
+.perch/
+.agents/
+scratch_*.py
+*.aux
+*:Zone.Identifier
+__MACOSX/
+
+# Scratch notes / template duplicates (not v2 deliverables)
+docs/_report_work/
+ANT27_PROCS_Template/
+docs/ANT27_PROCS_Template/
+*.zip
+docs/check_*.py
+docs/explore_*.py
+docs/inspect_*.py
+docs/stat_tests.py
+docs/test_pdf.py
+docs/compute_stats.py
+docs/report_backup.tex
+docs/procedia_ant_daoud.pdf

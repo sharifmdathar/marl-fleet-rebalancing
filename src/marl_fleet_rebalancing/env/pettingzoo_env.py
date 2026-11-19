@@ -150,6 +150,7 @@ class RideGymAEC(AECEnv):
         network = OSMnxNetwork(
             graph_path=config.network_path, speed_kmh=config.speed_kmh,
         )
+        self._network = network
         centroids = self._region_centroids(config, network)
         order_gen = self._make_order_generator(config, network, centroids)
         # The region model (one zone per agent, D10) must live in the network's
@@ -247,6 +248,16 @@ class RideGymAEC(AECEnv):
         self._zone_inbound_reloc = np.zeros(self._num_zones, dtype=np.float32)
         self._inbound_reloc_scale = 0.0
         self._zone_centroids_norm = self._normalized_centroids()
+        # Spatial domain-randomization index (D100). Built once, only when the
+        # opt-in flag is on, so normal runs pay nothing. Maps every network
+        # node to its nearest-centroid zone and caches each zone's nodes; the
+        # per-episode transform then works purely on the drawn order objects
+        # (no graph reload, no snapping pass).
+        self._dr_node_coords: np.ndarray | None = None
+        self._dr_node_to_zone: np.ndarray | None = None
+        self._dr_zone_nodes: list[np.ndarray] | None = None
+        if bool(getattr(config, "domain_randomize", False)):
+            self._build_domain_randomization_index()
 
         # Per-zone candidate orders (Point B: sorted closest-first per zone)
         self._zone_candidate_orders: list[list[dict]] = [[] for _ in range(self._num_zones)]
@@ -549,6 +560,84 @@ class RideGymAEC(AECEnv):
             pts[i] = (nx, ny)
         return pts
 
+    def _build_domain_randomization_index(self) -> None:
+        """Cache node->zone and zone->nodes for in-memory order remapping.
+
+        Uses the network already loaded by the env (its node coordinates are in
+        memory), so no graph file is read here.
+        """
+        coords = np.asarray(self._network.node_coords, dtype=float)
+        cents = np.asarray(self.env.relocation_points, dtype=float)
+        node_to_zone = np.argmin(
+            ((coords[:, None, :] - cents[None, :, :]) ** 2).sum(-1), axis=1,
+        )
+        zone_nodes: list[np.ndarray] = []
+        for z in range(self._num_zones):
+            nodes = np.flatnonzero(node_to_zone == z)
+            if len(nodes) == 0:
+                nodes = np.array(
+                    [int(np.argmin(((coords - cents[z]) ** 2).sum(-1)))],
+                    dtype=int,
+                )
+            zone_nodes.append(nodes)
+        self._dr_node_coords = coords
+        self._dr_node_to_zone = node_to_zone
+        self._dr_zone_nodes = zone_nodes
+
+    def _dr_remap_point(
+        self, point: tuple[float, float], permutation: np.ndarray,
+    ) -> tuple[float, float]:
+        """Move a point to a random node of its zone's permuted image."""
+        assert (
+            self._dr_node_coords is not None
+            and self._dr_node_to_zone is not None
+            and self._dr_zone_nodes is not None
+        )
+        dists = ((self._dr_node_coords - np.asarray(point, dtype=float)) ** 2).sum(1)
+        node = int(np.argmin(dists))
+        zone = int(self._dr_node_to_zone[node])
+        mapped = int(permutation[zone]) % self._num_zones
+        node = int(self._rng.choice(self._dr_zone_nodes[mapped]))
+        coord = self._network.node_coord(node)
+        return (float(coord[0]), float(coord[1]))
+
+    def _apply_spatial_domain_randomization(self, orders: list[Any]) -> None:
+        """Apply one random spatial transform to the drawn episode orders.
+
+        The three outcomes and their probabilities match the training
+        distribution: identity (0.34), a random zone permutation applied to
+        each order with p ~ U(0.5, 1.0) (0.33), or concentration of
+        pct ~ U(0.20, 0.75) of orders onto a random origin zone (0.33).
+        Order count, timestamps and party sizes are untouched.
+        """
+        if not orders or self._dr_zone_nodes is None:
+            return
+        draw = float(self._rng.random())
+        if draw < 0.34:
+            return  # identity: keep the drawn base window
+
+        if draw < 0.67:
+            permutation = self._rng.permutation(self._num_zones)
+            strength = float(self._rng.uniform(0.5, 1.0))
+            move = self._rng.random(len(orders)) < strength
+            for order, moved in zip(orders, move):
+                if not moved:
+                    continue
+                order.origin = self._dr_remap_point(tuple(order.origin), permutation)
+                order.destination = self._dr_remap_point(
+                    tuple(order.destination), permutation,
+                )
+            return
+
+        target_zone = int(self._rng.integers(0, self._num_zones))
+        pct = float(self._rng.uniform(0.20, 0.75))
+        count = max(1, min(len(orders), int(round(len(orders) * pct))))
+        chosen = self._rng.choice(len(orders), size=count, replace=False)
+        for idx in chosen:
+            node = int(self._rng.choice(self._dr_zone_nodes[target_zone]))
+            coord = self._network.node_coord(node)
+            orders[int(idx)].origin = (float(coord[0]), float(coord[1]))
+
     def _make_obs_space(self) -> Dict:
         z = self._num_zones
         p = self._max_pending
@@ -787,6 +876,15 @@ class RideGymAEC(AECEnv):
             self._rng = np.random.default_rng(seed)
 
         obs, _info = self.env.reset(seed=seed)
+        # D100: opt-in spatial domain randomization, applied to the orders the
+        # base generator just drew. This runs AFTER the base reset so it never
+        # changes the drawing logic and can use the wrapper's per-episode RNG;
+        # observations/caches are rebuilt so the injected t=0 orders reflect
+        # the transformed endpoints. With `domain_randomize=False` (default)
+        # this block is skipped entirely and behaviour is unchanged.
+        if bool(getattr(self._cfg, "domain_randomize", False)):
+            self._apply_spatial_domain_randomization(self.env._all_orders)
+            obs = self.env._build_observations()
         self._last_obs = obs
         self._current_pending = self._extract_pending(obs)
         self._terminated = False

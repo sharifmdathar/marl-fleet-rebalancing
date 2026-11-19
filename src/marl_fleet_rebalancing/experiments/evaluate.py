@@ -76,6 +76,11 @@ def load_trained_policy(
     if max_dispatch_radius_km is not None:
         env_cfg.max_dispatch_radius_km = max_dispatch_radius_km
 
+    # Evaluation never uses training-time domain randomization: every
+    # checkpoint must be scored on the real held-out demand it was trained for
+    # (and validation already forces this in train.py).
+    env_cfg.domain_randomize = False
+
     # Build environment
     eval_env = RideGymAEC(config=env_cfg, seed=run_manifest.get("seed", 42))
     eval_env.reset(seed=run_manifest.get("seed", 42))
@@ -176,6 +181,18 @@ def load_trained_policy(
         )
 
     learner.load_state_dict(weights)
+    # D100: the encoder takes its geometry from a non-persistent-in-weights
+    # buffer, so every load site must copy the environment's centroids into it.
+    # Doing it in this shared loader covers evaluate.py, shift_eval.py and
+    # scripts/eval_full_study.py, which all load checkpoints here.
+    actor = getattr(learner, "actor", None)
+    if actor is None:
+        actor = getattr(learner, "policy", None)
+    if actor is not None and hasattr(actor, "zone_xy"):
+        with torch.no_grad():
+            actor.zone_xy.copy_(
+                torch.as_tensor(eval_env._zone_centroids_norm),
+            )
     return learner, run_manifest, eval_env
 
 

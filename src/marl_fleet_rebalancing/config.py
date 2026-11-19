@@ -18,9 +18,13 @@ from typing import Any
 class EnvConfig:
     """Environment configuration shared across all experiments.
 
-    Version: 3.4 (D97: NYC observation carries the LP's information set —
-    D81 inbound channel and a 12-minute demand history. Observation space only;
-    no reward, action-space or dynamics change.)
+    Version: 3.5 (D100: optional spatial domain randomization for training.
+    Default False preserves every existing dynamic exactly; no reward, action
+    space or observation change. Also D99/D100 made the attention encoder
+    permutation-equivariant, which is a network change, not an env change.)
+    Changed in 3.4: NYC observation carries the LP's information set — D81
+    inbound channel and a 12-minute demand history. Observation space only;
+    no reward or dynamics change.)
     """
 
     # --- Fleet ---
@@ -157,6 +161,15 @@ class EnvConfig:
     # (Bandra default 5x5 = 25 zones). NYC overrides this with real taxi-zone
     # centroids (nyc_zone_centroids_path).
     relocation_grid: tuple[int, int] = (5, 5)
+
+    # --- Training-time spatial domain randomization (opt-in; default off) ---
+    # False = every reset uses the drawn window exactly as before, so existing
+    # runs are bit-identical. True = each TRAINING reset applies one of:
+    # identity (34%), a random zone permutation at strength ~U(0.5, 1.0)
+    # (33%), or concentration of U(20%, 75%) of orders on a random zone (33%).
+    # Evaluation and validation must always force this back to False, otherwise
+    # a held-out window would be scored on randomized demand.
+    domain_randomize: bool = False
 
     # --- Order source ---
     # "synthetic": OSMnxOrderGenerator over the network (num_orders, max_party_size)

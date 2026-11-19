@@ -163,6 +163,9 @@ def _make_validation_env(
     """
     val_cfg = copy.deepcopy(train_cfg.env_config)
     val_cfg.nyc_split = train_cfg.eval_split
+    # Validation must always score the clean held-out windows. Domain
+    # randomization is a training-time augmentation only.
+    val_cfg.domain_randomize = False
     if (
         train_cfg.eval_window_limit is not None
         and hasattr(val_cfg, "nyc_window_limit")
@@ -496,6 +499,13 @@ def _worker_init(
         action_dim=action_dim,
         state_dim=state_dim,
     )
+    # D100: geometry lives in a buffer, not in the weights. Populate it before
+    # the first state_dict exchange so a worker never rolls out with all-zero
+    # centroids.
+    actor = learner.actor if hasattr(learner, "actor") else learner.policy
+    if hasattr(actor, "zone_xy"):
+        with torch.no_grad():
+            actor.zone_xy.copy_(torch.as_tensor(env._zone_centroids_norm))
 
 
 def _worker_collect(job: tuple[dict, int, int]) -> dict:
@@ -941,6 +951,10 @@ def main() -> None:
                         help="PPO entropy bonus coefficient (default: 0.01)")
     parser.add_argument("--obs-inbound", action="store_true",
                         help="D81: observe cars already heading to each zone")
+    parser.add_argument("--domain-randomize", action="store_true",
+                        help="D100: per-episode spatial domain randomization "
+                             "during training (identity/permutation/concentration). "
+                             "Validation always stays clean.")
     parser.add_argument("--demand-history-len", type=int, default=None,
                         help="D85: turns of per-zone pending history in the "
                              "observation (default 4 = 2.0 min at dt=0.5). The LP "
@@ -1018,6 +1032,8 @@ def main() -> None:
         env_cfg.relocation_nearest_k = args.nearest_k
     if args.obs_inbound:
         env_cfg.obs_inbound = True
+    if args.domain_randomize:
+        env_cfg.domain_randomize = True
     if args.demand_history_len is not None:
         env_cfg.demand_history_len = args.demand_history_len
     if args.beta is not None:
