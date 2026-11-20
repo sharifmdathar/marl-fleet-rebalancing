@@ -15,6 +15,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import numpy as np
@@ -174,10 +175,14 @@ def fig1_pareto_and_decomp() -> None:
         sr, sr_sd, _ = arm_stats(name, "S0", "service_rate")
         km, km_sd, _ = arm_stats(name, "S0", "empty_km")
         ax_a.errorbar(
-            km, 100 * sr, xerr=km_sd, yerr=100 * sr_sd,
-            fmt=MARKERS[name], color=COLORS[name], mfc=COLORS[name],
-            mec=COLORS[name], ms=5.2, mew=1.0, elinewidth=0.8,
-            capsize=2.0, capthick=0.7, zorder=4,
+            km, 100 * sr, xerr=km_sd, yerr=100 * sr_sd, fmt="none",
+            ecolor=to_rgba(COLORS[name], 0.7), elinewidth=0.8,
+            capsize=2.0, capthick=0.7, zorder=2,
+        )
+        ax_a.plot(
+            km, 100 * sr, marker=MARKERS[name], linestyle="none",
+            color=COLORS[name], mfc=COLORS[name], mec=COLORS[name],
+            ms=5.2, mew=1.0, zorder=4,
         )
         handles.append(Line2D(
             [0], [0], marker=MARKERS[name], linestyle="none", ms=4.6,
@@ -190,14 +195,17 @@ def fig1_pareto_and_decomp() -> None:
         sr, sr_sd, _ = agg(df, arm, "S0", "service_rate")
         km, km_sd, _ = agg(df, arm, "S0", "empty_km")
         ax_a.errorbar(
-            km, 100 * sr, xerr=km_sd, yerr=100 * sr_sd,
-            fmt=marker, mfc="none", mec=color, color=color,
-            ms=6.0, mew=1.2, elinewidth=0.8, capsize=2.0,
-            capthick=0.7, zorder=5,
+            km, 100 * sr, xerr=km_sd, yerr=100 * sr_sd, fmt="none",
+            ecolor=to_rgba(color, 0.7), elinewidth=0.8, capsize=2.0,
+            capthick=0.7, zorder=2,
+        )
+        ax_a.plot(
+            km, 100 * sr, marker=marker, linestyle="none", color=color,
+            mfc="white", mec=color, ms=6.0, mew=1.2, zorder=6,
         )
         handles.append(Line2D(
             [0], [0], marker=marker, linestyle="none", ms=5.2,
-            mfc="none", mec=color, label=label))
+            mfc="white", mec=color, label=label))
     ax_a.set_xlim(0, 530)
     ax_a.set_ylim(35, 80)
     ax_a.set_xlabel("Empty distance (km)")
@@ -277,21 +285,32 @@ def fig2_shift_scenarios() -> None:
         ax_sr.errorbar(xs + off, sr, yerr=sr_sd, fmt=MARKERS[name],
                        color=COLORS[name], mfc=COLORS[name],
                        mec=COLORS[name], ms=4.2, mew=0.9,
-                       elinewidth=0.0, capsize=1.5, capthick=0.6,
-                       zorder=4, label=name)
+                       elinewidth=1.4, ecolor=to_rgba(COLORS[name], 0.9),
+                       capsize=1.5, capthick=0.6, zorder=4, label=name)
         # The S4 IPPO upper sd is 648 km, above the 560 km panel limit.
         # Cap the whisker at the top edge and label the full sd on the plot.
+        # The top cap is omitted for clipped points so no horizontal rule is
+        # drawn at the axis limit.
         km_top = 560.0
         upper = np.minimum(km_sd, np.maximum(km_top - km, 0.0))
         clipped = km + km_sd > km_top
         ax_km.errorbar(xs + off, km, yerr=np.vstack([km_sd, upper]),
                        fmt=MARKERS[name], color=COLORS[name],
                        mfc=COLORS[name], mec=COLORS[name], ms=4.2,
-                       mew=0.9, elinewidth=0.0, capsize=1.5, capthick=0.6,
+                       mew=0.9, elinewidth=1.4,
+                       ecolor=to_rgba(COLORS[name], 0.9), capsize=0.0,
                        zorder=4)
-        for xi, full_sd, is_clipped in zip(xs + off, km_sd, clipped):
-            if is_clipped:
-                ax_km.text(xi + 0.10, km_top - 4, f"\u00b1{full_sd:.0f}",
+        cap_half = 0.055
+        for xi, mean, sd, is_clipped in zip(xs + off, km, km_sd, clipped):
+            ax_km.hlines(mean - sd, xi - cap_half, xi + cap_half,
+                         colors=COLORS[name], linewidth=0.6, alpha=0.7,
+                         zorder=3)
+            if not is_clipped:
+                ax_km.hlines(mean + sd, xi - cap_half, xi + cap_half,
+                             colors=COLORS[name], linewidth=0.6,
+                             alpha=0.7, zorder=3)
+            else:
+                ax_km.text(xi + 0.10, km_top - 4, f"\u00b1{sd:.0f}",
                            ha="left", va="top", fontsize=6.8,
                            color=COLORS[name], zorder=6)
 
@@ -379,11 +398,11 @@ def fig3_parametric_curves() -> None:
     ax_b.set_xticks(xs_b)
     ax_b.axvspan(55, 85, color=OI["vermillion"], alpha=0.055, zorder=0)
     ax_b.annotate(
-        "DR-Attention > LP\nat 60\u201380% concentration",
+        "DR-Attention > LP\nat 60\u201380%\nconcentration",
         xy=(60, 100 * arm_stats("DR-Attention-MAPPO", "S4",
                                 "service_rate")[0]),
-        xytext=(54, 67), textcoords="data", fontsize=7.2,
-        color=OI["vermillion"], ha="left", va="top",
+        xytext=(68, 67), textcoords="data", fontsize=7.2,
+        color=OI["vermillion"], ha="center", va="top",
         bbox=dict(facecolor="white", alpha=0.88, edgecolor="none", pad=1.5),
         arrowprops=dict(arrowstyle="->", color=OI["vermillion"],
                         lw=0.7, shrinkA=2, shrinkB=3),
@@ -439,7 +458,7 @@ def fig4_retention_2x2() -> None:
     ax.set_xticks(x)
     ax.set_xticklabels([label for label, _ in family_scenarios])
     ax.set_ylabel("Shift-family retention (% of S0 service rate)")
-    ax.set_ylim(0, 125)
+    ax.set_ylim(0, 132)
     ax.set_xlim(-0.55, 2.55)
     style_axis(ax, "y")
 
@@ -456,10 +475,10 @@ def fig4_retention_2x2() -> None:
                     - round(family_mean("Attention-MAPPO", 0), 1))
     dr_gain_mlp = (round(family_mean("DR-MLP-MAPPO", 0), 1)
                    - round(family_mean("MLP-MAPPO", 0), 1))
-    ax.text(-0.45, 116.0,
-            f"Spatial DR gain: {dr_gain_attn:+.1f} pp with attention, "
-            f"{dr_gain_mlp:+.1f} pp with MLP",
-            ha="left", va="center", fontsize=7.0, color="#333333",
+    ax.text(0.0, 119.5,
+            f"Spatial DR gain: {dr_gain_attn:+.1f} pp\n"
+            f"with attention, {dr_gain_mlp:+.1f} pp with MLP",
+            ha="center", va="center", fontsize=7.0, color="#333333",
             bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
                       edgecolor="none", alpha=0.9), zorder=6)
 
